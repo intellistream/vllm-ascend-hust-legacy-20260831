@@ -142,6 +142,18 @@ Once the script completes, you can find the results in the benchmarks/results fo
 
 These files contain detailed benchmarking results for further analysis.
 
+#### vllm-hust target baseline
+
+To track the project goal against the official Ascend baseline used for the website leaderboard hero, use the dedicated baseline spec and runner:
+
+```shell
+export GOAL_BASELINE_ENV_PREFIX=/path/to/official-vllm-v0110-env
+bash benchmarks/scripts/run-vllm-hust-goal-baseline.sh \
+  benchmarks/tests/vllm-hust-goal-baseline.json
+```
+
+This produces a raw benchmark result plus a website-compatible leaderboard artifact under `benchmarks/results/vllm-hust-goal-baseline/`.
+
 #### Use benchmark cli
 
 For more flexible and customized use, benchmark cli is also provided to run online/offline benchmarks
