@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import functools
-import json
 import math
 import os
 from contextlib import nullcontext
@@ -28,7 +27,6 @@ from enum import Enum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 import regex as re
 import torch
 import torch_npu  # noqa: F401
@@ -47,7 +45,6 @@ else:
 COMPILATION_PASS_KEY = "graph_fusion_manager"
 ASCEND_QUANTIZATION_METHOD = "ascend"
 COMPRESSED_TENSORS_METHOD = "compressed-tensors"
-FP8_METHOD = "fp8"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
 
@@ -72,59 +69,14 @@ _IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
-_ATNN_CALCULATION_STREAM = None
 _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
 _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
 
 
-def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
-    """Extract DSV4 index for config per-layer arrays.
-
-    Runtime module names keep their original MTP namespace, e.g. ``mtp.0``.
-    When indexing config-level arrays such as ``compress_ratios``, MTP layers
-    are addressed after the main model layers.
-    """
-    from vllm.model_executor.models.utils import extract_layer_index
-
-    layer_idx = extract_layer_index(layer_name)
-    # TODO(zzzzwwjj): the layer idx of mtp should be aligned with vLLM
-    if ".mtp." in f".{layer_name}." and layer_idx < config.num_hidden_layers:
-        return config.num_hidden_layers + layer_idx
-    return layer_idx
-
-
-def get_dsv4_spec_layer_idx_from_weight_name(config: Any, weight_name: str) -> int | None:
-    """Return local MTP layer index for DSV4 checkpoint weight names."""
-    if weight_name.startswith("mtp."):
-        return int(weight_name.split(".")[1])
-    return None
-
-
-def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
-    """Return DSV4 compress ratio, treating unspecified MTP layers as dense."""
-    compress_ratios = getattr(config, "compress_ratios", None)
-    if compress_ratios is None or layer_idx >= len(compress_ratios):
-        return 0
-    return compress_ratios[layer_idx]
-
-
-def clear_enable_sp():
-    global _ENABLE_SP
-    _ENABLE_SP = None
-    enable_dsa_cp.cache_clear()
-    enable_dsa_cp_with_layer_shard.cache_clear()
-    enable_dsa_cp_with_o_proj_tp.cache_clear()
-    _libc_getenv.cache_clear()
-
-
 def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
-
-
-def is_950():
-    return get_ascend_device_type() == AscendDeviceType.A5
 
 
 def _mark_op_side_effectful(op: Any) -> None:
@@ -211,25 +163,17 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if weight.dtype == torch.float32:
         return False
 
-    # meta tensor only keeps shape/dtype meta info without physical memory, it is not necessary to trans it to NZ
-    if weight.is_meta:
-        return False
-
     # 310P always converts to NZ.
     if is_310p():
         return True
 
-    # Get config value instead of env
-    config = get_ascend_config()
-    nz_mode = config.weight_nz_mode
-
-    # NZ is disabled when mode is 0.
-    if not nz_mode:
+    # NZ is disabled on non-310P.
+    if not envs_ascend.VLLM_ASCEND_ENABLE_NZ:
         return False
 
-    # BF16/FP16 convert only when nz_mode == 2.
+    # BF16/FP16 convert only when enable_nz == 2.
     if weight.dtype in {torch.bfloat16, torch.float16}:
-        return nz_mode == 2
+        return envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
 
     # Quantized or other supported dtypes convert by default.
     return True
@@ -239,7 +183,6 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - 310P: always convert supported weights to FRACTAL_NZ
 # - non-310P: follow VLLM_ASCEND_ENABLE_NZ
 # - FP32: never convert
-# - meta tensor: never convert
 def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
@@ -399,20 +342,10 @@ def enable_custom_op():
                 _CUSTOM_OP_ENABLED = True
             except ImportError:
                 _CUSTOM_OP_ENABLED = False
-                logger.warning(
-                    "Failed to register custom ops, all custom ops will be disabled. "
-                    "The custom ops library might not be installed or the environment is not configured correctly. "
-                    "Please check the custom ops installation and environment variables."
-                )
+                logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
         else:
             _CUSTOM_OP_ENABLED = False
-            logger.warning(
-                "Failed to register custom ops, all custom ops will be disabled. "
-                "error=%s. "
-                "The custom ops library might not be installed or the environment is not configured correctly. "
-                "Please check the custom ops installation and environment variables.",
-                e,
-            )
+            logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
     return _CUSTOM_OP_ENABLED
 
 
@@ -501,57 +434,11 @@ def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
     return _CP_CHUNKEDPREFILL_COMM_STREAM
 
 
-def attention_calculation_stream() -> torch.npu.Stream:
-    global _ATNN_CALCULATION_STREAM
-    if _ATNN_CALCULATION_STREAM is None:
-        _ATNN_CALCULATION_STREAM = torch_npu.npu.Stream()
-    return _ATNN_CALCULATION_STREAM
-
-
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
     else:
         from vllm_ascend.patch import worker  # noqa: F401
-
-
-def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
-    """Load the local A5 endpoint config into ASCEND_LOCAL_COMM_RES."""
-    if kv_transfer_config is None:
-        return
-
-    visible_devices = os.getenv("ASCEND_RT_VISIBLE_DEVICES")
-    if visible_devices is None:
-        from vllm_ascend.cpu_binding import DeviceInfo
-
-        devices = sorted([int(x) for x in DeviceInfo.get_npu_map_info()])
-    else:
-        devices = [int(x) for x in visible_devices.split(",") if x.strip()]
-
-    extra_config = kv_transfer_config.kv_connector_extra_config or {}
-    local_comm_res_path = extra_config.get("ascend_local_comm_res_path")
-    if not local_comm_res_path:
-        return
-
-    if not devices:
-        raise ValueError("No NPU devices found or specified in ASCEND_RT_VISIBLE_DEVICES.")
-    if local_rank < 0 or local_rank >= len(devices):
-        raise ValueError(f"local_rank {local_rank} is out of bounds for the available NPU devices: {devices}")
-
-    local_comm_res_file = os.path.join(local_comm_res_path, f"ub_endpoint_npu_{devices[local_rank]}.json")
-    try:
-        with open(local_comm_res_file) as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            f"Endpoint config file not found: {local_comm_res_file}. "
-            "Please set ascend_local_comm_res_path in kv_connector_extra_config "
-            "to a directory containing ub_endpoint_npu_*.json endpoint configuration files."
-        )
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse endpoint config file: {local_comm_res_file}") from e
-
-    os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
 @functools.cache
@@ -606,11 +493,7 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
                 f"cudagraph_capture_sizes(={valid_max_size})"
             )
         logger.warning(
-            "Truncating max_cudagraph_capture_size. "
-            "original_size=%d, truncated_size=%d. "
-            "The max_cudagraph_capture_size does not match the max value of cudagraph_capture_sizes. "
-            "Please check the compilation_config for consistency.",
-            vllm_config.compilation_config.max_cudagraph_capture_size,
+            "Truncating max_cudagraph_capture_size to %d",
             valid_max_size,
         )
 
@@ -620,9 +503,7 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
         vllm_config.compilation_config.cudagraph_capture_sizes
     ):
         logger.warning(
-            "cudagraph_capture_sizes specified in compilation_config is overridden. "
-            "compilation_config_sizes=%s, overridden_sizes=%s. "
-            "The sizes are adjusted based on model configuration and resource constraints.",
+            ("cudagraph_capture_sizes specified in compilation_config %s is overridden by config %s"),
             vllm_config.compilation_config.cudagraph_capture_sizes,
             cudagraph_capture_sizes,
         )
@@ -637,6 +518,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # the number of streams, which is 2048, we save 248 streams
     # as a buffer.
     # Maximum number of graphs that can be captured by ACL Graph
+    # TODO: Find out whether we need to solve allreduce function
     MAX_CAPTURE_SIZE = 1800
 
     # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
@@ -646,24 +528,14 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     compilation_config = vllm_config.compilation_config
     original_sizes, compilation_config.cudagraph_capture_sizes = compilation_config.cudagraph_capture_sizes, None
 
-    # TODO: Find out if we can have different sizes for mixed batch and uniform batch
-    # If so, we'll only have to reduce the sizes for mixed batch
-    from vllm.config.compilation import CUDAGraphMode
-
-    cudagraph_mode = compilation_config.cudagraph_mode
-    if cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
-        MAX_CAPTURE_SIZE = max(0, MAX_CAPTURE_SIZE - len(original_sizes))
-
     # Calculate parallel configuration factor
     if not vllm_config.model_config:
         logger.warning(
-            "Got empty model config. "
-            "This may indicate a configuration loading issue or an empty configuration file. "
-            "Please check the model configuration file and loading process."
+            "Got empty model config. This typically occurs when an empty vllm_config is "
+            "initialized (e.g., in unit tests), where config updates are intentionally skipped."
         )
 
         return
-
     hf_config = vllm_config.model_config.hf_text_config
     if hasattr(hf_config, "num_hidden_layers"):
         num_hidden_layers = hf_config.num_hidden_layers
@@ -734,9 +606,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         )
         logger.info("Calculated maximum supported batch sizes for ACL graph: %s", max_num_batch_sizes)
         logger.warning(
-            "Currently, communication is performed using FFTS+ method. "
-            "impact: reduces available streams, limits runtime shapes. "
-            "solution: set HCCL_OP_EXPANSION_MODE=AIV to improve performance and increase supported shapes. "
+            "Currently, communication is performed using FFTS+ method, which reduces "
+            "the number of available streams and, as a result, limits the range of runtime "
+            "shapes that can be handled. To both improve communication performance and "
+            "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
         )
 
     arch_name = vllm_config.model_config.architecture
@@ -744,14 +617,13 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
         # Sample uniformly from original sizes
-        if max_num_batch_sizes <= 1:
-            # Avoid division by zero when only one capture size can be kept.
-            sampled_sizes = [original_sizes[-1]]
-        else:
-            step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
-            indices = [round(i * step) for i in range(max_num_batch_sizes)]
-            indices[0], indices[-1] = 0, len(original_sizes) - 1
-            sampled_sizes = [original_sizes[i] for i in indices]
+        step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
+        indices = [round(i * step) for i in range(max_num_batch_sizes)]
+
+        # Ensure first and last elements are preserved
+        indices[0], indices[-1] = 0, len(original_sizes) - 1
+
+        sampled_sizes = [original_sizes[i] for i in indices]
         update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
@@ -789,12 +661,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         return
     from vllm.model_executor.custom_op import CustomOp
 
-    from vllm_ascend.ops.activation import (
-        AscendQuickGELU,
-        AscendSiluAndMul,
-        AscendSiluAndMulWithClamp,
-    )
-    from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
+    from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.conv import AscendConv3dLayer
     from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
@@ -827,7 +694,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     REGISTERED_ASCEND_OPS = {
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
-        "SiluAndMulClamp": AscendSiluAndMulWithClamp,
         "RotaryEmbedding": AscendRotaryEmbedding,
         "MRotaryEmbedding": AscendMRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
@@ -851,20 +717,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
-        "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
-
-    if vllm_config is None:
-        try:
-            from vllm.config import get_current_vllm_config
-
-            vllm_config = get_current_vllm_config()
-        except AssertionError:
-            vllm_config = None
-    if vllm_config is not None and vllm_config.model_config.is_deepseek_mla:
-        from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
-
-        REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
@@ -878,7 +731,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             AscendRMSNormGated310,
         )
         from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
-        from vllm_ascend._310p.ops.rotary_embedding import AscendMRotaryEmbedding310, AscendRotaryEmbedding310
+        from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
         from vllm_ascend._310p.ops.vocab_parallel_embedding import (
             AscendParallelLMHead310,
             AscendVocabParallelEmbedding310,
@@ -897,9 +750,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "MMEncoderAttention": AscendMMEncoderAttention310,
                 "Conv3dLayer": AscendConv3dLayer310,
                 "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
-                "MRotaryEmbedding": AscendMRotaryEmbedding310,
             }
         )
+
+        REGISTERED_ASCEND_OPS.pop("MRotaryEmbedding", None)
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -922,11 +776,7 @@ def _init_ascend_device_type():
     global _ascend_device_type
     from vllm_ascend import _build_info  # type: ignore
 
-    device_type = getattr(_build_info, "__device_type__", None)
-    if device_type is None:
-        soc_version = getattr(_build_info, "__soc_version__", "ASCEND910B1").upper()
-        device_type = "_310P" if "310P" in soc_version else "A2"
-    _ascend_device_type = AscendDeviceType[device_type]
+    _ascend_device_type = AscendDeviceType[_build_info.__device_type__]
 
 
 def check_ascend_device_type():
@@ -971,16 +821,12 @@ def oproj_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 0
 
 
-def olora_tp_enable() -> bool:
-    return get_ascend_config().finegrained_tp_config.olora_tensor_parallel_size > 1
-
-
 def mlp_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size > 0
 
 
 def matmul_allreduce_enable() -> bool:
-    return get_ascend_config().enable_matmul_allreduce
+    return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
 
 def enable_sp_by_pass():
@@ -989,36 +835,32 @@ def enable_sp_by_pass():
 
 def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
     global _ENABLE_SP
-    if vllm_config is None:
-        try:
+    if _ENABLE_SP is None:
+        if vllm_config is None:
             from vllm.config import get_current_vllm_config
 
             vllm_config = get_current_vllm_config()
-        except AssertionError:
-            vllm_config = None
-
-    additional_config = getattr(vllm_config, "additional_config", None) if vllm_config is not None else None
-    refresh = additional_config.get("refresh", False) if additional_config else False
-
-    if _ENABLE_SP is None or refresh:
-        if additional_config is not None and "enable_flashcomm1" in additional_config:
-            _ENABLE_SP = bool(additional_config["enable_flashcomm1"])
-        else:
-            try:
-                _ENABLE_SP = get_ascend_config().enable_flashcomm1
-            except RuntimeError:
-                _ENABLE_SP = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+        _ENABLE_SP = (
+            envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
+            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", "0")))
+        )
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
-            logger.info("shared_expert_dp requires enable_sp=True. enable_sp has been set to True.")
+            logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
 
-    return bool(_ENABLE_SP)
+    return _ENABLE_SP
 
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
+
+
+def prefill_context_parallel_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
 
 
 def is_moe_model(vllm_config: VllmConfig):
@@ -1164,9 +1006,9 @@ def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
 
 def create_hccl_pg_options(group_name: str):
     options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
-    hccl_config = get_hccl_config_for_pg_options(group_name) or {}
-    hccl_config["group_name"] = group_name
-    options.hccl_config = hccl_config
+    hccl_config = get_hccl_config_for_pg_options(group_name)
+    if hccl_config is not None:
+        options.hccl_config = hccl_config
     return options
 
 
@@ -1302,8 +1144,7 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
 
 
 def flashcomm2_enable() -> bool:
-    config_val = get_ascend_config().enable_flashcomm2_parallel_size
-    return config_val > 0
+    return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
 def o_shard_enable() -> bool:
@@ -1314,10 +1155,10 @@ def o_shard_enable() -> bool:
 
 
 def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
-    flashcomm2_oproj_tp_size = ascend_config.enable_flashcomm2_parallel_size
+    flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-    if ascend_config.enable_flashcomm2_parallel_size <= 0:
+    if not flashcomm2_enable():
         return 0
 
     logger.info("Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size = %s", flashcomm2_oproj_tp_size)
@@ -1331,7 +1172,7 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
                 "FLASHCOMM2 only supports 'o_proj' as the sole layer sharding configuration! "
                 f"Found invalid layer_sharding: {layer_sharding}"
             )
-    if not ascend_config.enable_flashcomm1:
+    if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
         logger.warning_once(
             "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
         )
@@ -1399,10 +1240,6 @@ def refresh_block_size(vllm_config):
     if not scheduler_config or not model_config:
         return
 
-    if model_config.hf_config.model_type == "deepseek_v4":
-        # TODO(qcs): generalize the block_size
-        cache_config.block_size = 128
-
     if model_config.is_hybrid:
         # Hybrid attention+mamba models rely on the model-specific sizing
         # logic rather than the generic platform default.
@@ -1414,17 +1251,9 @@ def refresh_block_size(vllm_config):
             cache_config.block_size = 128
             return
 
-    try:
-        ascend_config = get_ascend_config()
-    except RuntimeError:
-        ascend_config = None
-    if ascend_config is not None and ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
-        logger.warning(
-            "Setting block size for xlite compatibility. "
-            "original_block_size=%d, new_block_size=128. "
-            "xlite_graph_config requires block_size <= 128.",
-            cache_config.block_size,
-        )
+    ascend_config = get_ascend_config()
+    if ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
+        logger.warning("Setting block size to 128 for xlite compatibility.")
         cache_config.block_size = 128
 
 
@@ -1473,28 +1302,17 @@ def singleton(cls):
     return get_instance
 
 
+# TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32.
+# and subsequent updates will introduce new interfaces. --zzhx1
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    # DSA CP is only applicable to models with indexer (e.g., DSv3.2, DSv4).
-    has_indexer = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
+    is_ds_v32 = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
         vllm_config.model_config.hf_text_config, "index_topk"
     )
-    if not has_indexer:
-        return False
-
-    dsa_cp_enable = False
-    additional_config = getattr(vllm_config, "additional_config", None)
-    if additional_config is not None and "enable_dsa_cp" in additional_config:
-        dsa_cp_enable = bool(additional_config["enable_dsa_cp"])
-
-    if dsa_cp_enable and not enable_sp():
-        raise ValueError(
-            "DSA CP requires SP to be enabled. Please enable SP(set VLLM_ASCEND_ENABLE_FLASHCOMM1=1) to use DSA CP."
-        )
-    return dsa_cp_enable and enable_sp()
+    return bool(is_ds_v32 and enable_sp())
 
 
 @lru_cache(maxsize=1)
@@ -1604,75 +1422,6 @@ def parse_layer_idx(prefix: str) -> int | None:
     """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
     match = re.search(r"layers\.(\d+)", prefix)
     return int(match.group(1)) if match else None
-
-
-def get_compressed_pos_and_indices(
-    num_computed_tokens: np.ndarray,
-    num_scheduled_tokens: np.ndarray,
-    arrange_np: np.ndarray,
-    use_compress: bool,
-    kv_cache_groups,
-) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
-    """
-    Batch generate compressed position ids for multi-requests on DSv4.
-    Calculate compressed position ids independently for each single request.
-
-    Args:
-        num_computed_tokens: Historical processed token counts of multiple requests, shape=[num_reqs,]
-        num_scheduled_tokens: New scheduled token counts of multiple requests in current step, shape=[num_reqs,]
-
-    Returns:
-        tuple(np.ndarray, np.ndarray):
-            1. Flattened compressed position id array for all requests
-            2. Length of compressed position ids for each individual request
-    """
-    if not use_compress:
-        return None, None, None  # type: ignore[return-value]
-    # Assert input validity
-    assert num_computed_tokens.shape == num_scheduled_tokens.shape, (
-        "num_computed_tokens and num_scheduled_tokens must have the same shape"
-    )
-    assert np.all(num_computed_tokens >= 0) and np.all(num_scheduled_tokens >= 0), (
-        "Token count cannot be negative value"
-    )
-
-    positions_compressed_list = []
-    req_indices_compressed_list = []
-    num_scheduled_tokens_compressed_list = []
-
-    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
-
-    for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_groups):
-        # Calculate compressed length of historical & total tokens
-        if isinstance(kv_cache_group_spec.kv_cache_spec, UniformTypeKVCacheSpecs):
-            kv_cache_spec = next(iter(kv_cache_group_spec.kv_cache_spec.kv_cache_specs.values()))
-        else:
-            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-        compress_ratio = getattr(kv_cache_spec, "compress_ratio", 1)
-
-        # Note(qcs): some models use compress_ratio=0 as non-compression tag.
-        if compress_ratio > 1:
-            compressed_historical_len = num_computed_tokens // compress_ratio
-            compressed_total_len = (num_computed_tokens + num_scheduled_tokens) // compress_ratio
-        else:
-            compressed_historical_len = num_computed_tokens
-            compressed_total_len = num_computed_tokens + num_scheduled_tokens
-
-        # The number of new compressed position ids for each request
-        num_new_compressed_pos = compressed_total_len - compressed_historical_len
-
-        # Core vectorized calculation (no for-loop)
-        pos_starts = compressed_historical_len
-        prefix_offsets = np.concatenate([[0], np.cumsum(num_new_compressed_pos[:-1])])
-        compressed_pos_ids = np.arange(np.sum(num_new_compressed_pos)) + np.repeat(
-            pos_starts - prefix_offsets, num_new_compressed_pos
-        )
-
-        req_indices_compressed = np.repeat(arrange_np, num_new_compressed_pos)
-        req_indices_compressed_list.append(req_indices_compressed)
-        positions_compressed_list.append(compressed_pos_ids)
-        num_scheduled_tokens_compressed_list.append(num_new_compressed_pos)
-    return positions_compressed_list, req_indices_compressed_list, num_scheduled_tokens_compressed_list
 
 
 def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
