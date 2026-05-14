@@ -54,6 +54,8 @@ It is the recommended approach for supporting the Ascend backend within the vLLM
 
 By using vLLM Ascend plugin, popular open-source models, including Transformer-like, Mixture-of-Experts (MoE), Embedding, Multi-modal LLMs can run seamlessly on the Ascend NPU.
 
+For detailed information on supported models, please refer to [supported models](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html).
+
 ## About This Fork
 
 This repository is maintained by [vLLM-HUST](https://github.com/vLLM-HUST), focusing on **operator-level optimization** for the vLLM Ascend backend. Our work includes:
@@ -61,8 +63,6 @@ This repository is maintained by [vLLM-HUST](https://github.com/vLLM-HUST), focu
 - Custom Ascend operator development and optimization (CANN/TIK)
 - Performance tuning for attention, MoE, and other critical kernels
 - Deep integration with Huawei Ascend hardware features
-
-For detailed information on supported models, please refer to [supported models](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html).
 
 ## Prerequisites
 
