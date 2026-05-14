@@ -49,6 +49,8 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 使用 vLLM 昇腾插件，可以让类Transformer、混合专家(MOE)、嵌入、多模态等流行的大语言模型在 Ascend NPU 上无缝运行。
 
 <<<<<<< HEAD
+支持的模型详细信息，请参考[模型支持列表](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html)。
+
 ## 关于本分支
 
 本仓库由 [vLLM-HUST](https://github.com/vLLM-HUST) 维护，专注于 **vLLM Ascend 后端的算子级优化**。工作内容包括：
@@ -56,8 +58,6 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 - 自定义 Ascend 算子（CANN/TIK）的开发和优化
 - Attention、MoE 等关键算子的性能调优
 - 与华为昇腾硬件特性的深度集成
-
-支持的模型详细信息，请参考[模型支持列表](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html)。
 
 ## 准备
 
