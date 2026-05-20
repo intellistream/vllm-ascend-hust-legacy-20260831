@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -15,6 +14,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.device = torch.device("cpu")
         runner.use_sparse = False
         runner.use_sparse_c8_indexer = False
+        runner.use_compress = False
         runner.use_hybrid_blocks = False
         runner.hybrid_with_attn_and_mamba = False
         runner.runner_only_attn_layers = set()
@@ -85,92 +85,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(v_cache.shape, (2, 16, 8, 64))
 
 
-
-class TestNPUModelRunnerDPSyncBuffers(unittest.TestCase):
-    def _build_runner(self):
-        runner = NPUModelRunner.__new__(NPUModelRunner)
-        runner.dp_size = 2
-        runner.dp_rank = 1
-        runner.vllm_config = MagicMock()
-        return runner
-
-    @patch(
-        "vllm_ascend.worker.model_runner_v1."
-        "should_skip_allreduce_across_dp_group"
-    )
-    def test_sync_metadata_reuses_padding_buffer_when_allreduce_skipped(
-        self, mock_should_skip_allreduce
-    ):
-        mock_should_skip_allreduce.return_value = True
-        runner = self._build_runner()
-
-        _, first_tokens_after_padding, _ = runner._sync_metadata_across_dp(7)
-        _, second_tokens_after_padding, _ = runner._sync_metadata_across_dp(9)
-
-        self.assertIsNotNone(first_tokens_after_padding)
-        self.assertIsNotNone(second_tokens_after_padding)
-        self.assertEqual(
-            first_tokens_after_padding.data_ptr(),
-            second_tokens_after_padding.data_ptr(),
-        )
-        self.assertEqual(second_tokens_after_padding.tolist(), [9, 9])
-
-    @patch("vllm_ascend.worker.model_runner_v1.get_dp_group")
-    @patch("vllm_ascend.worker.model_runner_v1.dist.all_reduce")
-    @patch(
-        "vllm_ascend.worker.model_runner_v1."
-        "should_skip_allreduce_across_dp_group"
-    )
-    def test_sync_metadata_reuses_buffers_for_allreduce_path(
-        self,
-        mock_should_skip_allreduce,
-        mock_all_reduce,
-        mock_get_dp_group,
-    ):
-        mock_should_skip_allreduce.return_value = False
-        mock_get_dp_group.return_value = SimpleNamespace(cpu_group=object())
-        all_reduce_buffer_ptrs = []
-
-        def fake_all_reduce(packed_tensor, group):
-            del group
-            all_reduce_buffer_ptrs.append(packed_tensor.data_ptr())
-            if len(all_reduce_buffer_ptrs) == 1:
-                packed_tensor[0].copy_(torch.tensor([5, 11], dtype=torch.int32))
-                packed_tensor[1].fill_(CUDAGraphMode.FULL.value)
-            else:
-                packed_tensor[0].copy_(torch.tensor([13, 3], dtype=torch.int32))
-                packed_tensor[1].fill_(CUDAGraphMode.PIECEWISE.value)
-
-        mock_all_reduce.side_effect = fake_all_reduce
-        runner = self._build_runner()
-
-        first_max_tokens, first_tokens_after_padding, first_mode = (
-            runner._sync_metadata_across_dp(7)
-        )
-        second_max_tokens, second_tokens_after_padding, second_mode = (
-            runner._sync_metadata_across_dp(2)
-        )
-
-        self.assertEqual(first_max_tokens, 11)
-        self.assertEqual(second_max_tokens, 13)
-        self.assertEqual(first_mode, CUDAGraphMode.FULL)
-        self.assertEqual(second_mode, CUDAGraphMode.PIECEWISE)
-        self.assertEqual(all_reduce_buffer_ptrs[0], all_reduce_buffer_ptrs[1])
-        self.assertIsNotNone(first_tokens_after_padding)
-        self.assertIsNotNone(second_tokens_after_padding)
-        self.assertEqual(
-            first_tokens_after_padding.data_ptr(),
-            second_tokens_after_padding.data_ptr(),
-        )
-        self.assertEqual(second_tokens_after_padding.tolist(), [13, 3])
-
-
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
         runner.vllm_config = MagicMock()
         runner.model_config = MagicMock()
+        runner.use_compress = False
         return runner
 
     @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
@@ -225,6 +146,46 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         actual_output_token_ids = actual_sampling_metadata.output_token_ids
         self.assertEqual(actual_output_token_ids[0], [1, 2, 3, 6])
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
+
+
+class TestNPUModelRunnerDebugger(unittest.TestCase):
+    def _build_runner(self, debugger=None):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.debugger = debugger or MagicMock()
+        runner.model = MagicMock()
+        runner.model_config = MagicMock()
+        runner.model_config.enforce_eager = False
+        runner._debugger_started = True
+        runner._debugger_step_dummy_data_before_execute = False
+        runner.use_compress = False
+        return runner
+
+    def test_finalize_dump_data_stops_stop_capable_debugger(self):
+        runner = self._build_runner()
+
+        runner._finalize_dump_data()
+
+        runner.debugger.stop.assert_called_once_with()
+        runner.debugger.step.assert_called_once_with()
+        self.assertFalse(runner._debugger_started)
+
+    def test_finalize_dump_data_steps_graph_debugger_without_stop(self):
+        debugger = MagicMock(spec=["start", "step"])
+        runner = self._build_runner(debugger)
+
+        runner._finalize_dump_data()
+
+        debugger.step.assert_called_once_with()
+        self.assertTrue(runner._debugger_started)
+
+    def test_start_dump_data_noop_when_already_started(self):
+        runner = self._build_runner(MagicMock(spec=["start", "step"]))
+
+        runner._start_dump_data()
+
+        runner.debugger.start.assert_not_called()
+        runner.debugger.step.assert_not_called()
+        self.assertTrue(runner._debugger_started)
 
 
 if __name__ == "__main__":

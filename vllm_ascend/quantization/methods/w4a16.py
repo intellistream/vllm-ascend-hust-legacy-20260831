@@ -198,6 +198,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
         mc2_mask: torch.Tensor | None = None,
+        tid2eid: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_shared_experts = getattr(layer, "n_shared_experts", 0)
         if num_shared_experts is None:
@@ -222,6 +223,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             num_experts=num_logical_experts,
+            tid2eid=tid2eid,
         )
 
         topk_ids = topk_ids.to(torch.int32)
@@ -248,6 +250,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
                 w2_scale=layer.w2_weight_scale,
                 w1_offset=layer.w13_weight_offset,
                 w2_offset=layer.w2_weight_offset,
+                swiglu_limit=layer.swiglu_limit,
             )
         )
 

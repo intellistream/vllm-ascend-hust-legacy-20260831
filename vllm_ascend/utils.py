@@ -27,6 +27,7 @@ from enum import Enum
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import regex as re
 import torch
 import torch_npu  # noqa: F401
@@ -69,6 +70,42 @@ _IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
+_ATNN_CALCULATION_STREAM = None
+_CUSTOM_OP_VENDOR_DIR = "custom_transformer"
+_CUSTOM_OP_BASE_DIR = (
+    os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
+)
+
+
+def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
+    """Extract DSV4 index for config per-layer arrays.
+
+    Runtime module names keep their original MTP namespace, e.g. ``mtp.0``.
+    When indexing config-level arrays such as ``compress_ratios``, MTP layers
+    are addressed after the main model layers.
+    """
+    from vllm.model_executor.models.utils import extract_layer_index
+
+    layer_idx = extract_layer_index(layer_name)
+    # TODO(zzzzwwjj): the layer idx of mtp should be aligned with vLLM
+    if ".mtp." in f".{layer_name}." and layer_idx < config.num_hidden_layers:
+        return config.num_hidden_layers + layer_idx
+    return layer_idx
+
+
+def get_dsv4_spec_layer_idx_from_weight_name(config: Any, weight_name: str) -> int | None:
+    """Return local MTP layer index for DSV4 checkpoint weight names."""
+    if weight_name.startswith("mtp."):
+        return int(weight_name.split(".")[1])
+    return None
+
+
+def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
+    """Return DSV4 compress ratio, treating unspecified MTP layers as dense."""
+    compress_ratios = getattr(config, "compress_ratios", None)
+    if compress_ratios is None or layer_idx >= len(compress_ratios):
+        return 0
+    return compress_ratios[layer_idx]
 
 
 def is_310p():
@@ -195,6 +232,26 @@ def _round_up(x: int, align: int):
     return (x + align - 1) // align * align
 
 
+def _prepend_env_path(env_name: str, path: str) -> None:
+    current_value = os.environ.get(env_name, "")
+    path_entries = [entry for entry in current_value.split(":") if entry]
+    if path not in path_entries:
+        path_entries.insert(0, path)
+        os.environ[env_name] = ":".join(path_entries)
+
+
+def bootstrap_custom_op_env(*, include_vendor_lib: bool = False) -> None:
+    vendor_path = os.path.join(_CUSTOM_OP_BASE_DIR, "_cann_ops_custom", "vendors", _CUSTOM_OP_VENDOR_DIR)
+    if not os.path.exists(vendor_path):
+        return
+    _prepend_env_path("ASCEND_CUSTOM_OPP_PATH", vendor_path)
+
+    if include_vendor_lib:
+        vendor_lib_path = os.path.join(vendor_path, "op_api", "lib")
+        if os.path.exists(vendor_lib_path):
+            _prepend_env_path("LD_LIBRARY_PATH", vendor_lib_path)
+
+
 def _custom_pad(x, pad_dims):
     # pad the input tensor to the shape of pad_dims
     # input: (13, 30), pad_dims: [0, 2, 0, 3]
@@ -285,10 +342,6 @@ def enable_custom_op():
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
 
-    if not envs_ascend.COMPILE_CUSTOM_KERNELS:
-        _CUSTOM_OP_ENABLED = False
-        return _CUSTOM_OP_ENABLED
-
     # There are some customed operators which aren't implemented
     # with batch invariant in vllm-ascend, we need to disable them.
     # FIXME(linfeng): Currently custom op compilation and execution are partially available
@@ -299,6 +352,8 @@ def enable_custom_op():
         return _CUSTOM_OP_ENABLED
 
     try:
+        if not torch.compiler.is_compiling():
+            bootstrap_custom_op_env()
         # isort: off
         # register custom ops into torch_library here
         import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
@@ -308,9 +363,22 @@ def enable_custom_op():
 
         # isort: on
         _CUSTOM_OP_ENABLED = True
-    except ImportError:
-        _CUSTOM_OP_ENABLED = False
-        logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+    except ImportError as e:
+        # Prefer the extension's rpath for vendor op_api loading. Only fall back
+        # to mutating LD_LIBRARY_PATH when the import proves it is still needed.
+        if (not torch.compiler.is_compiling()) and "libcust_opapi.so" in str(e):
+            try:
+                bootstrap_custom_op_env(include_vendor_lib=True)
+                import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
+                import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+
+                _CUSTOM_OP_ENABLED = True
+            except ImportError:
+                _CUSTOM_OP_ENABLED = False
+                logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+        else:
+            _CUSTOM_OP_ENABLED = False
+            logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
     return _CUSTOM_OP_ENABLED
 
 
@@ -399,6 +467,13 @@ def cp_chunkedprefill_comm_stream() -> torch.npu.Stream:
     return _CP_CHUNKEDPREFILL_COMM_STREAM
 
 
+def attention_calculation_stream() -> torch.npu.Stream:
+    global _ATNN_CALCULATION_STREAM
+    if _ATNN_CALCULATION_STREAM is None:
+        _ATNN_CALCULATION_STREAM = torch_npu.npu.Stream()
+    return _ATNN_CALCULATION_STREAM
+
+
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
@@ -406,45 +481,23 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
-def _normalize_vllm_compat_version(version_str: str) -> str:
-    version = Version(version_str)
-    normalized = ".".join(str(part) for part in version.release)
-    if version.pre is not None:
-        normalized += f"{version.pre[0]}{version.pre[1]}"
-    return normalized
-
-
 @functools.cache
-def get_vllm_upstream_version() -> str:
+def vllm_version_is(target_vllm_version: str):
     if envs_ascend.VLLM_VERSION is not None:
-        version_str = envs_ascend.VLLM_VERSION
+        vllm_version = envs_ascend.VLLM_VERSION
     else:
         import vllm
 
-        version_str = getattr(vllm, "__upstream_version__", None) or vllm.__version__
-
+        vllm_version = vllm.__version__
     try:
-        return _normalize_vllm_compat_version(version_str)
-    except InvalidVersion as exc:
+        return Version(vllm_version) == Version(target_vllm_version)
+    except InvalidVersion:
         raise ValueError(
-            f"Invalid vllm version {version_str} found. Set the environment "
-            "variable VLLM_VERSION to the upstream-compatible version by hand, "
-            "for example x.y.z or x.y.zrcN."
-        ) from exc
-
-
-@functools.cache
-def vllm_version_is(target_vllm_version: str):
-    try:
-        current_version = get_vllm_upstream_version()
-        target_version = _normalize_vllm_compat_version(target_vllm_version)
-    except InvalidVersion as exc:
-        raise ValueError(
-            f"Invalid target vllm version {target_vllm_version}. "
-            "Please use x.y.z or x.y.zrcN."
-        ) from exc
-
-    return current_version == target_version
+            f"Invalid vllm version {vllm_version} found. A dev version of vllm "
+            "is installed probably. Set the environment variable VLLM_VERSION "
+            "to control it by hand. And please make sure the value follows the "
+            "format of x.y.z."
+        )
 
 
 def get_max_hidden_layers(hf_config) -> int:
@@ -649,7 +702,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
+    from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
     from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
@@ -676,22 +731,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendVocabParallelEmbedding,
     )
 
-    try:
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
-    except ModuleNotFoundError as exc:
-        logger.warning(
-            "Skipping Ascend fused MoE custom op registration because an optional "
-            "upstream dependency is unavailable: %s",
-            exc,
-        )
-        AscendFusedMoE = None
-        AscendSharedFusedMoE = None
-    is_moe_model = bool(
-        vllm_config is not None
-        and vllm_config.model_config is not None
-        and vllm_config.model_config.is_moe
-    )
-
     global REGISTERED_ASCEND_OPS
     REGISTERED_ASCEND_OPS = {
         "QuickGELU": AscendQuickGELU,
@@ -710,6 +749,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "LogitsProcessor": AscendLogitsProcessor,
         "RMSNorm": AscendRMSNorm,
         "GemmaRMSNorm": AscendGemmaRMSNorm,
+        "FusedMoE": AscendFusedMoE,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
@@ -718,20 +758,12 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
         "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
+        "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
-
-    if is_moe_model:
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
-
-        REGISTERED_ASCEND_OPS.update(
-            {
-                "FusedMoE": AscendFusedMoE,
-                "SharedFusedMoE": AscendSharedFusedMoE,
-            }
-        )
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
+        from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
         from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
@@ -741,7 +773,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             AscendRMSNormGated310,
         )
         from vllm_ascend._310p.ops.mm_encoder_attention import AscendMMEncoderAttention310
-        from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
+        from vllm_ascend._310p.ops.rotary_embedding import AscendMRotaryEmbedding310, AscendRotaryEmbedding310
         from vllm_ascend._310p.ops.vocab_parallel_embedding import (
             AscendParallelLMHead310,
             AscendVocabParallelEmbedding310,
@@ -755,25 +787,14 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
                 "RMSNormGated": AscendRMSNormGated310,
                 "FusedMoE": AscendFusedMoE310,
-                "SharedFusedMoE": AscendSharedFusedMoE310,
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,
                 "Conv3dLayer": AscendConv3dLayer310,
                 "GatedDeltaNetAttention": AscendGatedDeltaNetAttention310,
+                "MRotaryEmbedding": AscendMRotaryEmbedding310,
             }
         )
-        if is_moe_model:
-            from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
-
-            REGISTERED_ASCEND_OPS.update(
-                {
-                    "FusedMoE": AscendFusedMoE310,
-                    "SharedFusedMoE": AscendSharedFusedMoE310,
-                }
-            )
-
-        REGISTERED_ASCEND_OPS.pop("MRotaryEmbedding", None)
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -839,6 +860,10 @@ def embedding_tp_enable() -> bool:
 
 def oproj_tp_enable() -> bool:
     return get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size > 0
+
+
+def olora_tp_enable() -> bool:
+    return get_ascend_config().finegrained_tp_config.olora_tensor_parallel_size > 1
 
 
 def mlp_tp_enable() -> bool:
@@ -1257,6 +1282,10 @@ def refresh_block_size(vllm_config):
     if cache_config.block_size is None:
         cache_config.block_size = 128
 
+    if model_config.hf_config.model_type == "deepseek_v4":
+        # TODO(qcs): generalize the block_size
+        cache_config.block_size = 128
+
     if not scheduler_config or not model_config:
         return
 
@@ -1442,6 +1471,75 @@ def parse_layer_idx(prefix: str) -> int | None:
     """Extract the layer index from a module prefix string like 'model.layers.0.self_attn'."""
     match = re.search(r"layers\.(\d+)", prefix)
     return int(match.group(1)) if match else None
+
+
+def get_compressed_pos_and_indices(
+    num_computed_tokens: np.ndarray,
+    num_scheduled_tokens: np.ndarray,
+    arrange_np: np.ndarray,
+    use_compress: bool,
+    kv_cache_groups,
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+    """
+    Batch generate compressed position ids for multi-requests on DSv4.
+    Calculate compressed position ids independently for each single request.
+
+    Args:
+        num_computed_tokens: Historical processed token counts of multiple requests, shape=[num_reqs,]
+        num_scheduled_tokens: New scheduled token counts of multiple requests in current step, shape=[num_reqs,]
+
+    Returns:
+        tuple(np.ndarray, np.ndarray):
+            1. Flattened compressed position id array for all requests
+            2. Length of compressed position ids for each individual request
+    """
+    if not use_compress:
+        return None, None, None  # type: ignore[return-value]
+    # Assert input validity
+    assert num_computed_tokens.shape == num_scheduled_tokens.shape, (
+        "num_computed_tokens and num_scheduled_tokens must have the same shape"
+    )
+    assert np.all(num_computed_tokens >= 0) and np.all(num_scheduled_tokens >= 0), (
+        "Token count cannot be negative value"
+    )
+
+    positions_compressed_list = []
+    req_indices_compressed_list = []
+    num_scheduled_tokens_compressed_list = []
+
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+    for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_groups):
+        # Calculate compressed length of historical & total tokens
+        if isinstance(kv_cache_group_spec.kv_cache_spec, UniformTypeKVCacheSpecs):
+            kv_cache_spec = next(iter(kv_cache_group_spec.kv_cache_spec.kv_cache_specs.values()))
+        else:
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+        compress_ratio = getattr(kv_cache_spec, "compress_ratio", 1)
+
+        # Note(qcs): some models use compress_ratio=0 as non-compression tag.
+        if compress_ratio > 1:
+            compressed_historical_len = num_computed_tokens // compress_ratio
+            compressed_total_len = (num_computed_tokens + num_scheduled_tokens) // compress_ratio
+        else:
+            compressed_historical_len = num_computed_tokens
+            compressed_total_len = num_computed_tokens + num_scheduled_tokens
+
+        # The number of new compressed position ids for each request
+        num_new_compressed_pos = compressed_total_len - compressed_historical_len
+
+        # Core vectorized calculation (no for-loop)
+        pos_starts = compressed_historical_len
+        prefix_offsets = np.concatenate([[0], np.cumsum(num_new_compressed_pos[:-1])])
+        compressed_pos_ids = np.arange(np.sum(num_new_compressed_pos)) + np.repeat(
+            pos_starts - prefix_offsets, num_new_compressed_pos
+        )
+
+        req_indices_compressed = np.repeat(arrange_np, num_new_compressed_pos)
+        req_indices_compressed_list.append(req_indices_compressed)
+        positions_compressed_list.append(compressed_pos_ids)
+        num_scheduled_tokens_compressed_list.append(num_new_compressed_pos)
+    return positions_compressed_list, req_indices_compressed_list, num_scheduled_tokens_compressed_list
 
 
 def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
