@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -72,74 +73,27 @@ class AscendConfig:
             )
 
         from vllm_ascend import envs as ascend_envs
-        from vllm_ascend.core.victim_selector import UtilityVictimSelectorConfig
 
-        if self.profiling_chunk_config.enabled and ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING:
+        self.enable_balance_scheduling = self._get_config_value(
+            additional_config,
+            "enable_balance_scheduling",
+            "VLLM_ASCEND_BALANCE_SCHEDULING",
+            ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING,
+        )
+        self.enable_flashcomm1 = self._get_config_value(
+            additional_config,
+            "enable_flashcomm1",
+            "VLLM_ASCEND_ENABLE_FLASHCOMM1",
+            ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM1,
+        )
+        if self.profiling_chunk_config.enabled and self.enable_balance_scheduling:
             raise ValueError(
-                "profiling_chunk_config and balance scheduling (VLLM_ASCEND_BALANCE_SCHEDULING) "
+                "profiling_chunk_config and balance scheduling (enable_balance_scheduling) "
                 "cannot be enabled at the same time. Please disable one of them."
             )
 
-        default_utility_cfg = UtilityVictimSelectorConfig()
-        utility_cfg = UtilityVictimSelectorConfig.from_additional_config(
-            {
-                "enable_utility_victim_selection": additional_config.get(
-                    "enable_utility_victim_selection",
-                    ascend_envs.VLLM_ASCEND_ENABLE_UTILITY_VICTIM_SELECTION,
-                ),
-                "utility_kill_switch": additional_config.get(
-                    "utility_kill_switch", ascend_envs.VLLM_ASCEND_UTILITY_KILL_SWITCH
-                ),
-                "utility_completion_weight": additional_config.get(
-                    "utility_completion_weight",
-                    ascend_envs.VLLM_ASCEND_UTILITY_COMPLETION_WEIGHT,
-                ),
-                "utility_preempt_weight": additional_config.get(
-                    "utility_preempt_weight", ascend_envs.VLLM_ASCEND_UTILITY_PREEMPT_WEIGHT
-                ),
-                "utility_kv_gate": additional_config.get(
-                    "utility_kv_gate", ascend_envs.VLLM_ASCEND_UTILITY_KV_GATE
-                ),
-                "utility_cooldown_s": additional_config.get(
-                    "utility_cooldown_s", ascend_envs.VLLM_ASCEND_UTILITY_COOLDOWN_S
-                ),
-                "utility_min_running": additional_config.get(
-                    "utility_min_running", ascend_envs.VLLM_ASCEND_UTILITY_MIN_RUNNING
-                ),
-                "utility_snapshot_enabled": additional_config.get(
-                    "utility_snapshot_enabled", ascend_envs.VLLM_ASCEND_UTILITY_SNAPSHOT_ENABLED
-                ),
-                "utility_snapshot_top_k": additional_config.get(
-                    "utility_snapshot_top_k", ascend_envs.VLLM_ASCEND_UTILITY_SNAPSHOT_TOP_K
-                ),
-                "utility_snapshot_history_size": additional_config.get(
-                    "utility_snapshot_history_size",
-                    ascend_envs.VLLM_ASCEND_UTILITY_SNAPSHOT_HISTORY_SIZE,
-                ),
-                "utility_epsilon": additional_config.get(
-                    "utility_epsilon", default_utility_cfg.utility_epsilon
-                ),
-                "utility_default_max_tokens": additional_config.get(
-                    "utility_default_max_tokens",
-                    default_utility_cfg.utility_default_max_tokens,
-                ),
-            }
-        )
-        self.enable_utility_victim_selection = utility_cfg.enable_utility_victim_selection
-        self.utility_kill_switch = utility_cfg.utility_kill_switch
-        self.utility_completion_weight = utility_cfg.utility_completion_weight
-        self.utility_preempt_weight = utility_cfg.utility_preempt_weight
-        self.utility_kv_gate = utility_cfg.utility_kv_gate
-        self.utility_cooldown_s = utility_cfg.utility_cooldown_s
-        self.utility_min_running = utility_cfg.utility_min_running
-        self.utility_snapshot_enabled = utility_cfg.utility_snapshot_enabled
-        self.utility_snapshot_top_k = utility_cfg.utility_snapshot_top_k
-        self.utility_snapshot_history_size = utility_cfg.utility_snapshot_history_size
-        self.utility_epsilon = utility_cfg.utility_epsilon
-        self.utility_default_max_tokens = utility_cfg.utility_default_max_tokens
-
         # Dump / PrecisionDebugger configuration
-        self.dump_config_path = additional_config.get("dump_config_path", None)
+        self.dump_config_path = self._resolve_dump_config_path(additional_config)
         self.layer_sharding = additional_config.get("layer_sharding", None)
         if self.layer_sharding:
             logger.info_once(
@@ -181,6 +135,49 @@ class AscendConfig:
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.multistream_dsa_preprocess = additional_config.get("multistream_dsa_preprocess", False)
 
+        self.enable_context_parallel = self._get_config_value(
+            additional_config,
+            "enable_context_parallel",
+            "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL",
+            ascend_envs.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL,
+        )
+        self.enable_matmul_allreduce = self._get_config_value(
+            additional_config,
+            "enable_matmul_allreduce",
+            "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE",
+            ascend_envs.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE,
+        )
+        self.enable_fused_mc2 = self._get_config_value(
+            additional_config,
+            "enable_fused_mc2",
+            "VLLM_ASCEND_ENABLE_FUSED_MC2",
+            ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
+        )
+        self.enable_mlapo = self._get_config_value(
+            additional_config,
+            "enable_mlapo",
+            "VLLM_ASCEND_ENABLE_MLAPO",
+            ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
+        )
+        self.enable_flashcomm2_parallel_size = self._get_config_value(
+            additional_config,
+            "enable_flashcomm2_parallel_size",
+            "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE",
+            ascend_envs.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE,
+        )
+        self.msmonitor_use_daemon = self._get_config_value(
+            additional_config,
+            "msmonitor_use_daemon",
+            "MSMONITOR_USE_DAEMON",
+            ascend_envs.MSMONITOR_USE_DAEMON,
+        )
+        self.enable_transpose_kv_cache_by_block = self._get_config_value(
+            additional_config,
+            "enable_transpose_kv_cache_by_block",
+            "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
+            ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK,
+        )
+
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
@@ -214,6 +211,14 @@ class AscendConfig:
         # _npu_paged_attention in this cases. This should be removed once
         # npu_fused_infer_attention_score performs better on all scenarios.
         self.pa_shape_list = additional_config.get("pa_shape_list", [])
+        # Weight NZ mode configuration.
+        # 0: disabled, 1: only quant case enable nz (default), 2: BF16/FP16 also enable nz
+        self.weight_nz_mode = self._get_config_value(
+            additional_config,
+            "weight_nz_mode",
+            "VLLM_ASCEND_ENABLE_NZ",
+            ascend_envs.VLLM_ASCEND_ENABLE_NZ,
+        )
 
         # when enable_async_exponential is True, AscendSampler will be different from vllm Sampler,
         # which make batch_invariant mode not working.
@@ -269,21 +274,19 @@ class AscendConfig:
         self.sparse_json = self.hamming_sparse["sparse_json_location"]
         self._check_enable_hamming_sparse()
 
-    def get_utility_selector_config_dict(self) -> dict[str, Any]:
-        return {
-            "enable_utility_victim_selection": self.enable_utility_victim_selection,
-            "utility_kill_switch": self.utility_kill_switch,
-            "utility_completion_weight": self.utility_completion_weight,
-            "utility_preempt_weight": self.utility_preempt_weight,
-            "utility_kv_gate": self.utility_kv_gate,
-            "utility_cooldown_s": self.utility_cooldown_s,
-            "utility_min_running": self.utility_min_running,
-            "utility_snapshot_enabled": self.utility_snapshot_enabled,
-            "utility_snapshot_top_k": self.utility_snapshot_top_k,
-            "utility_snapshot_history_size": self.utility_snapshot_history_size,
-            "utility_epsilon": self.utility_epsilon,
-            "utility_default_max_tokens": self.utility_default_max_tokens,
-        }
+    @staticmethod
+    def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
+        if config_key in additional_config:
+            value = additional_config[config_key]
+            logger.info_once(f"AscendConfig.{config_key} is set from additional_config with value {value}.")
+            return value
+        if env_key in os.environ:
+            logger.info_once(
+                f"AscendConfig.{config_key} falls back to environment variable {env_key} with value {env_value}. "
+                f"Please use additional_config.{config_key} instead, because {env_key} will be removed in the "
+                "next release."
+            )
+        return env_value
 
     def _check_mix_placement(self):
         if self.mix_placement:
@@ -294,6 +297,34 @@ class AscendConfig:
         if self.enable_hamming_sparse:
             if isinstance(self.sparse_json, str) and not os.path.isfile(self.sparse_json):
                 raise ValueError("Hamming sparse config json file doesn't exist.")
+
+    @staticmethod
+    def _materialize_dump_config_to_file(dump_config: dict[str, Any]) -> str:
+        dump_config_dir = os.path.join(os.getcwd(), ".vllm_ascend", "msprobe")
+        os.makedirs(dump_config_dir, exist_ok=True)
+        dump_config_file_path = os.path.join(dump_config_dir, "msprobe_dump_config.json")
+        with open(dump_config_file_path, "w", encoding="utf-8") as file:
+            json.dump(dump_config, file, ensure_ascii=False, indent=2)
+        logger.info("Materialized additional_config.dump_config to file: %s", dump_config_file_path)
+        return dump_config_file_path
+
+    @classmethod
+    def _resolve_dump_config_path(cls, additional_config: dict[str, Any]) -> str | None:
+        dump_config_path = additional_config.get("dump_config_path")
+        dump_config = additional_config.get("dump_config")
+        if dump_config_path is not None and dump_config is not None:
+            raise ValueError(
+                "Only one of additional_config.dump_config_path or additional_config.dump_config can be set."
+            )
+        if dump_config is not None:
+            if not isinstance(dump_config, dict):
+                raise ValueError(f"additional_config.dump_config must be a dict, got {type(dump_config).__name__}.")
+            return cls._materialize_dump_config_to_file(dump_config)
+        if dump_config_path is not None and not isinstance(dump_config_path, str):
+            raise ValueError(
+                f"additional_config.dump_config_path must be a string, got {type(dump_config_path).__name__}."
+            )
+        return dump_config_path
 
     @staticmethod
     def _has_sparse_c8_layer_config(quant_config: Any) -> bool:
@@ -402,7 +433,7 @@ class FinegrainedTPConfig:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")
             # dummy_run does not run the entire attention module in eager mode,
             # so the o_proj tp split can only be used in graph mode.
-            if vllm_config.model_config.enforce_eager is True:
+            if vllm_config.model_config.enforce_eager:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
@@ -686,6 +717,9 @@ def init_ascend_config(vllm_config):
 def clear_ascend_config():
     global _ASCEND_CONFIG
     _ASCEND_CONFIG = None
+    from vllm_ascend.utils import clear_enable_sp
+
+    clear_enable_sp()
 
 
 def get_ascend_config():

@@ -570,6 +570,7 @@ class TestNPUPlatform(TestBase):
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
         mock_ascend_config.recompute_scheduler_enable = False
+        mock_ascend_config.enable_balance_scheduling = True
         mock_init_ascend.return_value = mock_ascend_config
 
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -586,8 +587,7 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            patch("vllm_ascend.platform.envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING", True, create=True),
-            pytest.raises(ValueError, match=r"VLLM_ASCEND_BALANCE_SCHEDULING.*PD-mixed.*PD-disaggregated"),
+            pytest.raises(ValueError, match=r"enable_balance_scheduling.*PD-mixed.*PD-disaggregated"),
             patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
         ):
@@ -602,6 +602,7 @@ class TestNPUPlatform(TestBase):
     ):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
         mock_ascend_config.recompute_scheduler_enable = False
+        mock_ascend_config.enable_balance_scheduling = True
         mock_init_ascend.return_value = mock_ascend_config
 
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -618,8 +619,7 @@ class TestNPUPlatform(TestBase):
         self.platform = platform.NPUPlatform()
 
         with (
-            patch("vllm_ascend.platform.envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING", True, create=True),
-            pytest.raises(ValueError, match=r"VLLM_ASCEND_BALANCE_SCHEDULING.*PD-mixed.*PD-disaggregated"),
+            pytest.raises(ValueError, match=r"enable_balance_scheduling.*PD-mixed.*PD-disaggregated"),
             patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
             patch.object(platform, "check_kv_extra_config"),
         ):

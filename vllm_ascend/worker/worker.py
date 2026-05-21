@@ -429,10 +429,11 @@ class NPUWorker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+        nz_mode = get_ascend_config().weight_nz_mode
+        if nz_mode:
             raise ValueError(
                 "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
-                "in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0."
+                "in the RL scenarios. Please set weight_nz_mode=0 via --additional-config."
             )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
@@ -638,7 +639,7 @@ class NPUWorker(WorkerBase):
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         # enable msMonitor to monitor the performance of vllm-ascend
-        if envs_ascend.MSMONITOR_USE_DAEMON:
+        if get_ascend_config().msmonitor_use_daemon:
             dp.step()
 
         if self._pp_send_work:
