@@ -102,7 +102,7 @@ server_group_pid=""
 cleanup_ran=0
 
 find_orphaned_engine_pids() {
-  python - <<'PY'
+  "$PYTHON_BIN" - <<'PY'
 import os
 
 
@@ -474,7 +474,9 @@ runtime_ready_log_indicates_sudo_auth_failure() {
 }
 
 cleanup_previous_ci_processes() {
-  local marker_pgid marker_pid remaining_matches remaining_pids
+  local current_pgid marker_pgid marker_pid remaining_matches remaining_pids
+
+  current_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d '[:space:]')
 
   if [[ -f "$SERVER_PGID_MARKER" ]]; then
     marker_pgid=$(tr -d '[:space:]' <"$SERVER_PGID_MARKER")
@@ -502,6 +504,7 @@ cleanup_previous_ci_processes() {
   remaining_matches=$(ps -eo pid,ppid,pgid,sid,etimes,args \
     | grep -F "$WORKSPACE_ROOT" \
     | grep -E 'vllm|python|pytest' \
+    | awk -v current_pgid="$current_pgid" 'current_pgid == "" || $3 != current_pgid' \
     | grep -v grep || true)
   if [[ -n "$remaining_matches" ]]; then
     echo "Remaining workspace-scoped vLLM/Python processes before benchmark:"
