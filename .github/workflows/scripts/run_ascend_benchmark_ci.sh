@@ -37,6 +37,7 @@ SAME_SPEC_CONSTRAINTS_FILE=${SAME_SPEC_CONSTRAINTS_FILE:-$VLLM_HUST_BENCHMARK_RE
 MODEL_NAME=${MODEL_NAME:-Qwen/Qwen2.5-14B-Instruct}
 MODEL_PARAMETERS=${MODEL_PARAMETERS:-14B}
 MODEL_PRECISION=${MODEL_PRECISION:-FP16}
+LOAD_FORMAT=${LOAD_FORMAT:-}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-}
 DTYPE=${DTYPE:-float16}
@@ -229,6 +230,7 @@ SUDO_PRESERVE_ENV_VARS=(
   CURRENT_VLLM_CACHE_ROOT
   CURRENT_VLLM_HUST_REPO
   DTYPE
+  LOAD_FORMAT
   GITHUB_ACTOR
   GITHUB_EVENT_NAME
   HCCL_CONNECT_TIMEOUT
@@ -589,6 +591,11 @@ resolve_npu_smi_bin() {
 }
 
 start_server() {
+  local load_format_args=()
+  if [[ -n "$LOAD_FORMAT" ]]; then
+    load_format_args=(--load-format "$LOAD_FORMAT")
+  fi
+
   if command -v setsid >/dev/null 2>&1; then
     if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
       local preserve_list
@@ -604,6 +611,7 @@ start_server() {
         --model "$MODEL_NAME" \
         --host "$HOST" \
         --port "$PORT" \
+        "${load_format_args[@]}" \
         --dtype "$DTYPE" \
         --max-model-len "$MAX_MODEL_LEN" \
         --max-num-seqs "$MAX_NUM_SEQS" \
@@ -621,6 +629,7 @@ start_server() {
         --model "$MODEL_NAME" \
         --host "$HOST" \
         --port "$PORT" \
+        "${load_format_args[@]}" \
         --dtype "$DTYPE" \
         --max-model-len "$MAX_MODEL_LEN" \
         --max-num-seqs "$MAX_NUM_SEQS" \
