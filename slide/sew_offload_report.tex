@@ -3,7 +3,10 @@
 \usetheme{Madrid}
 \usecolortheme{default}
 
-\usepackage[UTF8]{ctex}
+\usepackage[UTF8,fontset=none]{ctex}
+\setCJKmainfont{Noto Serif CJK SC}
+\setCJKsansfont{Noto Sans CJK SC}
+\setCJKmonofont{Noto Sans Mono CJK SC}
 \usepackage{booktabs}
 \usepackage{tabularx}
 \usepackage{xcolor}
@@ -25,6 +28,7 @@
 \setbeamercolor{alerted text}{fg=AccentRed}
 \setbeamertemplate{navigation symbols}{}
 \setbeamertemplate{footline}{}
+\setbeamertemplate{headline}{}
 
 \newcommand{\keypoint}[1]{\textbf{\textcolor{AccentRed}{#1}}}
 \newcommand{\bluepoint}[1]{\textbf{\textcolor{MainBlue}{#1}}}
@@ -236,6 +240,7 @@ runtime 可以把动态 expert 工作集翻译为稳定的 slot 执行窗口。
 \vspace{-0.2em}
 
 \begin{center}
+\resizebox{0.96\linewidth}{!}{%
 \begin{tikzpicture}[
   font=\footnotesize,
   node distance=0.9cm,
@@ -263,6 +268,7 @@ runtime 可以把动态 expert 工作集翻译为稳定的 slot 执行窗口。
 \draw[arrow] (slot1) -- (gmm);
 \draw[arrow] (slot0) -- (gmm);
 \end{tikzpicture}
+}
 \end{center}
 
 \vspace{0.55em}
