@@ -9,6 +9,8 @@
 \setCJKmonofont{Noto Sans Mono CJK SC}
 \usepackage{booktabs}
 \usepackage{tabularx}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 \usepackage{xcolor}
 \usepackage{tikz}
 \usepackage{graphicx}
@@ -183,7 +185,7 @@ SEW-Offload 的价值正是在 Ascend 约束下，把动态 expert 工作集转�
 \vspace{0.3em}
 \setlength{\tabcolsep}{3pt}
 \renewcommand{\arraystretch}{1.13}
-\begin{tabularx}{\linewidth}{p{0.15\linewidth}p{0.22\linewidth}p{0.30\linewidth}X}
+\begin{tabularx}{\linewidth}{L{0.15\linewidth}L{0.22\linewidth}L{0.30\linewidth}Y}
 \toprule
 \textbf{工作类型} & \textbf{代表工作} & \textbf{做法} & \textbf{现有不足} \\
 \midrule
