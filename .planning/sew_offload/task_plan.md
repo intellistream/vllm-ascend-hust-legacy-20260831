@@ -10,14 +10,14 @@
 
 ## 当前阶段
 
-阶段 0：上下文建立与项目规划。
+阶段 1：研究问题冻结与三线项目规划。
 
 ## 阶段清单
 
 | 阶段 | 状态 | 目标产物 |
 | --- | --- | --- |
-| 0. 上下文建立 | in_progress | 仓库结构、MoE 代码边界、paper/slide 目录、工程规则 |
-| 1. 研究问题冻结 | pending | RQ、假设链、贡献点、非目标 |
+| 0. 上下文建立 | complete | 仓库结构、MoE 代码边界、paper/slide 目录、工程规则 |
+| 1. 研究问题冻结 | in_progress | RQ、假设链、贡献点、非目标 |
 | 2. 论文蓝图 | pending | `paper/outline.md`、`paper/related_work_matrix.md`、LaTeX skeleton |
 | 3. Slide 蓝图 | pending | `slide/sew_offload_report.tex` skeleton 与图表清单 |
 | 4. Runtime 架构设计 | pending | 高内聚低耦合模块边界、配置开关、集成点 |
@@ -44,7 +44,29 @@
 | 配置入口 | `vllm_ascend/envs.py` + 独立 config dataclass |
 | 第一阶段 | 只做 routing/expert 工作集观测，不改变执行 |
 | 第二阶段 | whole-expert host store + fixed slot + synchronous load |
-| 第三阶段 | static window + cache/prefetch + graph replay |
+| 第三阶段 | fixed expert-slot residency window + cache/prefetch + graph replay |
+
+## 三线交付规划
+
+### A. 论文线
+
+- 目标：以 CCF-A 系统/体系结构会议论文口径组织，先完成英文 LaTeX skeleton 与中文研究备忘。
+- 核心叙事：GPU MoE offloading 默认以动态 expert cache/prefetch 为中心；Ascend 类 NPU 已经有 per-expert count/grouped MoE 后端，但这个后端假设 expert 权重常驻。HBM 受限时，新的控制面不是重新发明 count 化 dispatch，而是把 expert 权重驻留重构为固定地址的 expert-slot window，使 offloading 能与 graph/static kernel/weight prefetch 共存。
+- 论文非目标：不训练 router、不改 top-k、不做 expert drop、不把精度风险伪装成系统优化。
+- 目标文件：`paper/outline.md`、`paper/related_work_matrix.md`、`paper/sew_offload.tex`、`paper/sew_offload.bib`、`paper/experiment_plan.md`。
+
+### B. Slide 线
+
+- 目标：仿 `moe_serving_report.tex` 的中文技术报告风格，围绕“问题、观察、旧工作为何不够、Ascend 机会、SEW-Offload 设计、实验计划”展开。
+- 目标文件：`slide/sew_offload_report.tex`，以及后续 `slide/figures/`。
+
+### C. 工程线
+
+- 目标：在 `vllm-ascend-hust` 内以默认关闭、单包高内聚、少量边界 hook 的方式推进；不重复实现现有 per-expert count dispatch。
+- 首选包：`vllm_ascend/moe_offload/`。
+- 首选 hook：`AscendUnquantizedFusedMoEMethod.apply()` 之后、`moe_comm_method.fused_experts()` 之前的 expert execution boundary；MVP-0 可复用 routed experts capturer 思路。
+- 严控边界：暂不改 `model_runner` 主路径、暂不改 scheduler、暂不大改 Ascend C kernels。
+- 目标文档：`docs/sew-offload/00-charter.md`、`01-system-design.md`、`02-implementation-plan.md`、`03-experiment-plan.md`、`04-reproduction.md`。
 
 ## 未决问题
 
