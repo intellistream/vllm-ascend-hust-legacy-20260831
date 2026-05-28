@@ -63,3 +63,13 @@
   - 权重仍按 `layer.w13_weight/layer.w2_weight` 全量常驻或现有列表传入，没有 host expert store、固定 HBM slot、slot replacement、slot prefetch；
   - 没有固定 slot 地址来服务 ACLGraph/static kernel，也没有 capacity-tiered activation window。
 - 修正后的研究贡献应聚焦为：基于已有 per-expert count 的 offload-aware fixed expert-slot residency window，即固定数量 HBM expert slots、稳定权重张量地址、动态 expert-to-slot 映射、slot miss/prefetch、可选 capacity-tier graph replay。
+
+## 关键修正：SEW-Offload 的优化目标不是 hit rate，而是隐藏预取时间
+
+- 新版整体设计应明确为：固定 slot 解决 Ascend 能不能稳定执行，prefetch/orchestration 解决 offloading 慢不慢，hit-first phased execution 解决 miss 已经发生时还能不能把等待藏起来。
+- 固定 slot 不是最终目标，而是 Ascend graph/static-kernel 友好的执行底座：slot tensor 地址、layout、dtype、capacity 稳定，动态变化的是 `expert_id -> slot_id` 映射。
+- 预取策略不应只优化 expert cache hit rate，而应优化 exposed stall：
+  - `T_stall = max(0, T_load_miss - T_overlap)`。
+  - 有价值的系统指标是 host-to-HBM load time 中有多少被 routing、dispatch、resident expert compute、后续 layer compute 或下一 decode step 前的空窗隐藏。
+- hit-first phased execution 的核心是：当前层 active experts 中，slot hit 的 expert 先组成 grouped MLP phase 执行，同时 miss experts 异步加载；miss 到齐后再组成少量 follow-up grouped MLP phase，避免 per-expert 小 kernel。
+- 这一路线仍然不修改 router、不改变 top-k expert、不 drop token，只改变 expert 权重驻留、加载、预取和 grouped execution 的相位编排。

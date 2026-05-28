@@ -10,15 +10,15 @@
 
 ## 当前阶段
 
-阶段 1：研究问题冻结与三线项目规划。
+阶段 2：论文蓝图与整体系统设计撰写。
 
 ## 阶段清单
 
 | 阶段 | 状态 | 目标产物 |
 | --- | --- | --- |
 | 0. 上下文建立 | complete | 仓库结构、MoE 代码边界、paper/slide 目录、工程规则 |
-| 1. 研究问题冻结 | in_progress | RQ、假设链、贡献点、非目标 |
-| 2. 论文蓝图 | pending | `paper/outline.md`、`paper/related_work_matrix.md`、LaTeX skeleton |
+| 1. 研究问题冻结 | complete | RQ、假设链、贡献点、非目标 |
+| 2. 论文蓝图 | in_progress | `paper/outline.md`、`paper/related_work_matrix.md`、LaTeX skeleton |
 | 3. Slide 蓝图 | pending | `slide/sew_offload_report.tex` skeleton 与图表清单 |
 | 4. Runtime 架构设计 | pending | 高内聚低耦合模块边界、配置开关、集成点 |
 | 5. MVP-0/MVP-1 实现计划 | pending | routing trace、expert store、slot manager、fixed window |
@@ -38,7 +38,7 @@
 
 | 项目 | 初始判断 |
 | --- | --- |
-| 系统名 | SEW-Offload: Static Expert Windowing for Ascend MoE Offloading |
+| 系统名 | SEW-Offload: Static Expert-Window Scheduling for Prefetch-Hidden MoE Offloading on Ascend NPUs |
 | 主要代码位置 | 新包 `vllm_ascend/moe_offload/` |
 | 最小集成点 | `vllm_ascend/ops/fused_moe/fused_moe.py` 中 expert 执行边界 |
 | 配置入口 | `vllm_ascend/envs.py` + 独立 config dataclass |
@@ -51,7 +51,7 @@
 ### A. 论文线
 
 - 目标：以 CCF-A 系统/体系结构会议论文口径组织，先完成英文 LaTeX skeleton 与中文研究备忘。
-- 核心叙事：GPU MoE offloading 默认以动态 expert cache/prefetch 为中心；Ascend 类 NPU 已经有 per-expert count/grouped MoE 后端，但这个后端假设 expert 权重常驻。HBM 受限时，新的控制面不是重新发明 count 化 dispatch，而是把 expert 权重驻留重构为固定地址的 expert-slot window，使 offloading 能与 graph/static kernel/weight prefetch 共存。
+- 核心叙事：GPU MoE offloading 默认以动态 expert cache/prefetch 为中心；Ascend 类 NPU 已经有 per-expert count/grouped MoE 后端，但这个后端假设 expert 权重常驻。HBM 受限时，新的控制面不是重新发明 count 化 dispatch，而是把 expert 权重驻留重构为固定地址的 expert-slot window，并通过 deadline-aware prefetch/orchestration 与 hit-first phased execution 隐藏 host-to-HBM 预取开销。
 - 论文非目标：不训练 router、不改 top-k、不做 expert drop、不把精度风险伪装成系统优化。
 - 目标文件：`paper/outline.md`、`paper/related_work_matrix.md`、`paper/sew_offload.tex`、`paper/sew_offload.bib`、`paper/experiment_plan.md`。
 
