@@ -21,7 +21,7 @@
 \definecolor{SoftGreen}{RGB}{232,246,238}
 \definecolor{SoftYellow}{RGB}{255,247,222}
 
-\setbeamercolor{title}{fg=MainBlue}
+\setbeamercolor{title}{fg=white}
 \setbeamercolor{frametitle}{fg=white,bg=MainBlue}
 \setbeamercolor{block title}{bg=MainBlue,fg=white}
 \setbeamercolor{block body}{bg=SoftGray,fg=black}
@@ -46,8 +46,7 @@
   \begin{beamercolorbox}[wd=\linewidth,sep=0.75em,rounded=true]{block body}
   \centering
   \keypoint{不要把 NPU 当 GPU 用：}
-  研究重点不是重新发明 MoE grouped dispatch，而是在 HBM 受限时，
-  利用 Ascend 的固定地址、图捕获、静态 kernel 和权重预取能力重新设计 expert offloading。
+  重点研究 Ascend 的差异化特性——包括静态图重放、固定 GM 地址空间、AIC/AIV 分离执行、显式 MTE 数据搬运以及可控的主机侧数据放置——如何重塑 MoE expert offloading 的设计空间，并据此重新设计专家权重驻留、搬运、窗口化执行与预取机制。
   \end{beamercolorbox}
 \end{frame}
 
