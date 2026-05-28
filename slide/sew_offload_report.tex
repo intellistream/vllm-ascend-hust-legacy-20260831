@@ -60,34 +60,28 @@
 混合专家模型通过为每个 token 仅激活少量专家来扩展模型容量，但专家权重本身仍然给推理阶段的设备显存带来巨大压力。专家卸载因此成为在有限 HBM 条件下部署大规模 MoE 模型的重要路径。然而，现有 MoE offloading 系统大多沿用 GPU 时代的抽象，主要关注哪些专家应常驻显存、缺失专家何时从主机侧加载，以及如何进行专家缓存和预取。
 
 \vspace{0.85em}
-\textbf{\textcolor{MainBlue}{GPU 与 Ascend 在 MoE Offloading 上的硬件适配差异}}
+\begin{columns}[T]
+\begin{column}{0.47\textwidth}
+\textbf{\textcolor{MainBlue}{GPU 对 MoE 动态性的适配}}
 \footnotesize
-\begin{tabular}{p{0.18\textwidth} p{0.36\textwidth} p{0.38\textwidth}}
-\toprule
-\textbf{适配维度} & \textbf{GPU-style Offloading} & \textbf{Ascend-specific Constraint} \\
-\midrule
-\textbf{动态 routing}
-& routing 后的动态 expert-token shape 通常由 dynamic kernel、stream 和通用 gather/scatter 处理
-& 动态 shape 会削弱 static graph / static-kernel 复用，需要将 expert-token 分布规整为固定窗口 \\
+\begin{itemize}
+  \item \textbf{动态 shape 容忍度高：} GPU 运行时可通过CUDA生态可以通过动态算子、流并行和通用重排算子较好吸收 MoE routing 的动态性；
+  \item \textbf{搬运机制较成熟：} expert miss 主要通过异步拷贝、prefetch、UVA 或 stream overlap 缓解传输阻塞；
+  \item \textbf{优化重点：} 围绕 expert cache、预取时机和 PCIe/NVLink stall 展开。
+\end{itemize}
+\end{column}
 
-\textbf{权重落位}
-& expert miss 后主要关注从 host 到 HBM 的传输时机与 cache replacement
-& miss expert 需要绑定到稳定的 GM weight slot，否则地址变化会影响 graph/slot 复用 \\
-
-\textbf{执行组织}
-& expert GEMM、scatter/gather、combine 多由 GPU kernel 组合完成
-& expert FFN、routing pack、mask、gate、combine 应分别映射到 AIC/Cube 与 AIV/UB \\
-
-\textbf{搬运重叠}
-& 通过 CUDA stream、async copy、prefetch 隐藏 PCIe/NVLink stall
-& 需要显式编排 MTE、weight slot、CopyIn/Compute/CopyOut，才能隐藏 H2D stall \\
-
-\textbf{已有 grouped MoE}
-& 多假设 expert weights 已在 GPU HBM 中，重点优化 resident expert execution
-& offloading 场景还要同时管理 expert residency、动态装载、slot reuse 与 fixed-window replay \\
-\bottomrule
-\end{tabular}
-
+\begin{column}{0.53\textwidth}
+\textbf{\textcolor{MainBlue}{Ascend 上动态 MoE 带来的限制}}
+\footnotesize
+\begin{itemize}
+  \item \textbf{静态图优势被削弱：} MoE routing 的动态性，使得Ascend无法充分利用图重放与静态kernel复用等优势，削弱了其性能优势；
+  \item \textbf{固定地址优势被削弱：} offloaded expert 动态装载后，若缺少稳定 weight slot，权重地址和 buffer layout 难以复用；
+  \item \textbf{计算单元协同变复杂：} expert FFN、token pack、mask、gate 和 combine 需要在 AIC/AIV 之间显式分工；
+  \item \textbf{数据搬运必须显式编排：} miss expert 的加载需要与 MTE 搬运、weight slot 绑定和计算流水协同。
+\end{itemize}
+\end{column}
+\end{columns}
 % \begin{columns}[T,onlytextwidth]
 % \begin{column}{0.3\textwidth}
 % \textbf{\textcolor{MainBlue}{GPU offloading 的常见视角}}
