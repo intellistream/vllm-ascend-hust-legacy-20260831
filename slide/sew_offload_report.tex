@@ -51,34 +51,34 @@
 \end{frame}
 
 \begin{frame}[t]{What is your problem}
-\small
+\footnotesize
 \vspace{-0.4em}
 
-\bluepoint{研究背景：MoE 总参数量快速增大，单卡 HBM 越来越不够}
+\bluepoint{问题场景：在 Ascend NPU 上部署大规模 MoE，expert 权重无法全量常驻 HBM}
 
-\vspace{0.45em}
-混合专家模型通过为每个 token 仅激活少量专家来扩展模型容量，但专家权重本身仍然给推理阶段的设备显存带来巨大压力。专家卸载因此成为在有限 HBM 条件下部署大规模 MoE 模型的重要路径。然而，现有 MoE offloading 系统大多沿用 GPU 时代的抽象，主要关注哪些专家应常驻显存、缺失专家何时从主机侧加载，以及如何进行专家缓存和预取。
+\vspace{0.35em}
+MoE 每个 token 只激活少量 expert，但完整 expert 参数集仍然需要被存放和访问。在 Ascend 单卡或低 HBM 预算下，dense 权重、KV cache 和中间 buffer 已占用大量 HBM，剩余空间只能容纳部分 expert。于是，推理过程从“所有 expert 都在 NPU 上等待执行”变成“router 本轮请求的 expert 可能需要从 host 侧取回”。
 
-\vspace{0.85em}
+\vspace{0.55em}
 \begin{columns}[T]
 \begin{column}{0.47\textwidth}
-\textbf{\textcolor{MainBlue}{GPU 对 MoE 动态性的适配}}
-\footnotesize
+\textbf{\textcolor{MainBlue}{现有方法的 GPU 假设}}
+\scriptsize
 \begin{itemize}
-  \item \textbf{动态 shape 容忍度高：} GPU 运行时可通过CUDA生态可以通过动态算子、流并行和通用重排算子较好吸收 MoE routing 的动态性；
-  \item \textbf{搬运机制较成熟：} expert miss 主要通过异步拷贝、prefetch、UVA 或 stream overlap 缓解传输阻塞；
-  \item \textbf{优化重点：} 围绕 expert cache、预取时机和 PCIe/NVLink stall 展开。
+  \item \textbf{expert caching：} 把 HBM 看作 expert cache，热 expert 常驻，冷 expert 放在 host；
+  \item \textbf{host-to-device prefetching：} 根据历史路由或预测提前把可能需要的 expert 搬到设备；
+  \item \textbf{CUDA stream overlap：} 依赖动态 kernel、stream 并发和异步拷贝隐藏传输开销。
 \end{itemize}
 \end{column}
 
 \begin{column}{0.53\textwidth}
-\textbf{\textcolor{MainBlue}{Ascend 上动态 MoE 带来的限制}}
-\footnotesize
+\textbf{\textcolor{MainBlue}{为什么在 Ascend 上不完整}}
+\scriptsize
 \begin{itemize}
-  \item \textbf{静态图优势被削弱：} MoE routing 的动态性，使得Ascend无法充分利用图重放与静态kernel复用等优势，削弱了其性能优势；
-  \item \textbf{固定地址优势被削弱：} offloaded expert 动态装载后，若缺少稳定 weight slot，权重地址和 buffer layout 难以复用；
-  \item \textbf{计算单元协同变复杂：} expert FFN、token pack、mask、gate 和 combine 需要在 AIC/AIV 之间显式分工；
-  \item \textbf{数据搬运必须显式编排：} miss expert 的加载需要与 MTE 搬运、weight slot 绑定和计算流水协同。
+  \item \textbf{稳定 tensor 地址：} expert 动态装载会改变权重入口，削弱地址绑定和 buffer 复用；
+  \item \textbf{固定 shape 与图重放：} active expert 和 token count 每轮变化，放大 graph/static-kernel 变体；
+  \item \textbf{显式调度的数据移动：} H2D/MTE 搬运若不能被明确编排，会暴露为计算等待；
+  \item \textbf{结果：} HBM 压力被缓解，但 NPU 静态复用能力下降，吞吐下降、尾延迟抖动。
 \end{itemize}
 \end{column}
 \end{columns}
@@ -106,11 +106,144 @@
 % \end{column}
 % \end{columns}
 
-\vspace{0.75em}
-\begin{beamercolorbox}[wd=\linewidth,sep=0.7em,rounded=true]{block body}
-\textbf{\textcolor{AccentRed}{核心问题：}}
-在 Ascend 单卡 HBM 不足时，如何在\textbf{不修改 router、不改变 top-k 激活、不丢 token}的前提下，
-让 MoE expert offloading 既节省 HBM，又保持 NPU 喜欢的固定地址、固定形状和可预编译执行路径？
+\vspace{0.55em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.55em,rounded=true]{block body}
+\textbf{\textcolor{AccentRed}{核心问题定义：}}
+现有 MoE 卸载通常把 expert 权重视为动态缓存对象，通过替换、预取和流级拷贝/计算重叠降低传输开销；
+但在 HBM 受限的 Ascend NPU 上，动态加载到任意 device buffer 会与\textbf{稳定权重地址、固定执行窗口、图重放和显式数据移动调度}冲突。
+结果是：要么 host-to-HBM expert 加载暴露在关键路径上，要么放弃高效 NPU 执行所需的静态规整性。
+\end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{Why it matters?}
+\footnotesize
+\vspace{-0.4em}
+
+\bluepoint{MoE、Ascend 与 offloading 三个层面的必要性}
+
+\vspace{0.3em}
+随着 DeepSeek-V3/R1、Qwen-MoE、Mixtral 等模型普及，MoE 已成为大模型扩展的重要方向。问题不再只是能不能训练更大的模型，而是如何让超大 expert 参数在真实硬件上高效服务。
+
+\vspace{0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.32\textwidth}
+\begin{block}{1. 为什么 MoE 很重要}
+\scriptsize
+\begin{itemize}
+  \item \textbf{扩展参数规模：} 拥有巨大专家参数池，但每个 token 只激活少量 expert；
+  \item \textbf{提高推理性价比：} 相比同等总参数 dense 模型，用稀疏激活降低单 token 计算量；
+  \item \textbf{代表前沿趋势：} DeepSeek、Qwen、Mixtral 表明，大规模 MoE 已成为高能力模型的重要形态。
+\end{itemize}
+\end{block}
+\end{column}
+
+\begin{column}{0.32\textwidth}
+\begin{block}{2. 为什么 Ascend 上重要}
+\scriptsize
+\begin{itemize}
+  \item \textbf{国产算力主战场：} 生产环境依赖 Ascend 910B/910C，MoE 能否跑好直接影响算力可用性；
+  \item \textbf{不能只复制 GPU：} Ascend 更强调稳定地址、固定 shape、图重放和显式搬运调度；
+  \item \textbf{需要 NPU-native 路线：} 把 MoE 适配 Ascend，才能释放 AIC/AIV/MTE 等硬件能力。
+\end{itemize}
+\end{block}
+\end{column}
+
+\begin{column}{0.32\textwidth}
+\begin{block}{3. 为什么 offload 重要}
+\scriptsize
+\begin{itemize}
+  \item \textbf{HBM 是硬约束：} expert 总权重远超单卡可用 HBM，dense 权重和 KV cache 继续挤占空间；
+  \item \textbf{部署取决于驻留策略：} 没有 offload，大 MoE 只能依赖更多卡或更小模型，应用门槛显著提高；
+  \item \textbf{Ascend offload 更难：} 动态加载 expert 会破坏地址稳定与图复用，必须重新设计 slot、窗口和预取流水。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.35em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.55em,rounded=true]{block body}
+\scriptsize
+\textbf{\textcolor{AccentRed}{核心动机：}}
+MoE 决定了前沿模型的扩展方向，Ascend 决定了这些模型在国产算力上的落地能力；
+而 expert offloading 决定了在 HBM 受限时，能否把“参数很大但激活稀疏”的 MoE 真正部署起来。
+SEW-Offload 的价值正是在 Ascend 约束下，把动态 expert 工作集转化为可复用、可预取、可流水化的固定 slot 执行窗口。
+\end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{Why existing work fails?}
+\scriptsize
+\vspace{-0.55em}
+
+\bluepoint{现有工作各自解决了局部问题，但没有同时覆盖“Ascend + HBM 受限 + expert offload”。}
+
+\vspace{0.3em}
+\begin{tabularx}{\linewidth}{p{0.20\linewidth}p{0.27\linewidth}p{0.28\linewidth}X}
+\toprule
+\textbf{工作类型} & \textbf{现有方法怎么做} & \textbf{在我们场景下缺什么} & \textbf{导致的问题} \\
+\midrule
+GPU MoE offload &
+把 HBM 当 expert cache；基于历史/预测做 prefetch；用 CUDA stream 和异步拷贝隐藏 H2D。 &
+默认动态 kernel、动态权重对象和 stream overlap 可接受；缺少 Ascend 稳定地址、固定 shape、图重放与 MTE 编排。 &
+HBM 压力转化为动态入口和搬运 stall，graph/static kernel 复用收益下降。 \\
+\midrule
+Ascend 全量 MoE &
+vLLM Ascend 已支持 routing 到 per-expert count/grouped execution，并用 \texttt{npu\_grouped\_matmul} 执行。 &
+假设 expert 权重全量在 HBM；缺少 host store、resident slot、miss/prefetch/replacement 和 phased execution。 &
+后端能高效执行 grouped MoE，但无法处理“缺失 expert 如何进入 NPU”。 \\
+\midrule
+非 Ascend NPU MoE &
+如 NPUMoE 面向 Apple ANE：把 dense/static compute offload 到 NPU，动态算子走 CPU/GPU fallback，并用 static tiers/grouped execution/graph residency。 &
+目标硬件、内存体系和 runtime 不同；重点是 ANE 图执行与 fallback，不是 Ascend host-to-HBM expert offload。 &
+有静态化启发，但不能直接解决 Ascend 上 expert 权重动态装载和稳定入口问题。 \\
+\bottomrule
+\end{tabularx}
+
+\vspace{0.3em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.45em,rounded=true]{block body}
+\textbf{\textcolor{AccentRed}{研究空白：}}
+缺少面向 Ascend 的 \textbf{HBM 受限 expert offloading}：不改变 router/top-k/token 语义，同时处理权重驻留、搬运隐藏和稳定执行入口。
+\end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{What is your key idea?}
+\footnotesize
+\vspace{-0.45em}
+
+\bluepoint{把 expert offloading 从“cache hit rate 问题”改写为“可静态化、可预取、可分阶段执行的调度问题”。}
+
+\vspace{0.25em}
+\begin{center}
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  font=\scriptsize,
+  challenge/.style={draw=AccentRed, fill=SoftYellow, rounded corners=2pt, text width=3.55cm, minimum height=1.1cm, align=center},
+  idea/.style={draw=MainBlue, fill=SoftGreen, rounded corners=2pt, text width=3.85cm, minimum height=1.75cm, align=center},
+  arrow/.style={-{Latex[length=2.4mm]}, very thick, color=MainBlue}
+]
+\node[challenge] (c1) at (0,0) {\textbf{Challenge 1}\\动态 expert 身份破坏稳定入口};
+\node[idea, below=0.55cm of c1] (i1) {\textbf{Static Expert Slots}\\预先分配固定 HBM slots；\\运行时只换 slot 里的 expert，\\不换 NPU 看到的地址。};
+\draw[arrow] (c1) -- (i1);
+
+\node[challenge] (c2) at (4.8,0) {\textbf{Challenge 2}\\只按热度预取，可能搬错 expert};
+\node[idea, below=0.55cm of c2] (i2) {\textbf{Deadline-Aware Prefetch}\\把每次加载当作带 deadline 的 job；\\按使用时间、加载成本和 token 数\\决定先搬谁。};
+\draw[arrow] (c2) -- (i2);
+
+\node[challenge] (c3) at (9.6,0) {\textbf{Challenge 3}\\等待 miss 会阻塞整层 MoE};
+\node[idea, below=0.55cm of c3] (i3) {\textbf{Hit-First Phased Execution}\\不要等所有 expert 到齐；\\先跑已在 HBM 的 experts，\\边算边加载 miss experts。};
+\draw[arrow] (c3) -- (i3);
+
+\draw[arrow] ([xshift=0.15cm]i1.east) -- ([xshift=-0.15cm]i2.west);
+\draw[arrow] ([xshift=0.15cm]i2.east) -- ([xshift=-0.15cm]i3.west);
+\end{tikzpicture}
+}
+\end{center}
+
+\vspace{0.15em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.55em,rounded=true]{block body}
+\scriptsize
+\textbf{\textcolor{AccentRed}{核心转换：}}
+固定 slot 提供稳定入口；deadline-aware prefetch 解决“先搬谁”；hit-first phased execution 解决“miss 已发生时怎么不整层等待”。
 \end{beamercolorbox}
 \end{frame}
 
