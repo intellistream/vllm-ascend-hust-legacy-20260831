@@ -1,0 +1,531 @@
+\documentclass[aspectratio=169,10pt]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{default}
+
+\usepackage[UTF8]{ctex}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{graphicx}
+\usetikzlibrary{positioning,arrows.meta,fit}
+
+\definecolor{MainBlue}{RGB}{40,82,145}
+\definecolor{AccentRed}{RGB}{178,56,46}
+\definecolor{SoftGray}{RGB}{245,247,250}
+\definecolor{DarkGray}{RGB}{70,76,86}
+\definecolor{SoftGreen}{RGB}{232,246,238}
+\definecolor{SoftYellow}{RGB}{255,247,222}
+
+\setbeamercolor{title}{fg=MainBlue}
+\setbeamercolor{frametitle}{fg=white,bg=MainBlue}
+\setbeamercolor{block title}{bg=MainBlue,fg=white}
+\setbeamercolor{block body}{bg=SoftGray,fg=black}
+\setbeamercolor{alerted text}{fg=AccentRed}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}{}
+
+\newcommand{\keypoint}[1]{\textbf{\textcolor{AccentRed}{#1}}}
+\newcommand{\bluepoint}[1]{\textbf{\textcolor{MainBlue}{#1}}}
+
+\title{SEW-Offload: 面向昇腾 NPU 的 MoE Expert Offloading}
+\subtitle{Static Expert-Slot Windowing for Ascend MoE Offloading}
+\author{}
+\date{}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+  \vspace{-1.0em}
+  \begin{beamercolorbox}[wd=\linewidth,sep=0.75em,rounded=true]{block body}
+  \centering
+  \keypoint{不要把 NPU 当 GPU 用：}
+  研究重点不是重新发明 MoE grouped dispatch，而是在 HBM 受限时，
+  利用 Ascend 的固定地址、图捕获、静态 kernel 和权重预取能力重新设计 expert offloading。
+  \end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{What is your problem}
+\small
+\vspace{-0.4em}
+
+\bluepoint{背景：MoE 总参数量快速增大，单卡 HBM 越来越不够}
+
+\vspace{0.45em}
+Qwen3-30B-A3B 这类 MoE 模型每个 token 只激活少量专家，但模型总专家权重仍然需要占用大量 HBM。
+当我们希望在单机单卡上服务更大 MoE，或者把更多 HBM 留给 KV cache、长上下文和并发请求时，
+expert 权重就自然进入 offloading 场景。
+
+\vspace{0.85em}
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.48\textwidth}
+\textbf{\textcolor{MainBlue}{GPU offloading 的常见视角}}
+\footnotesize
+\begin{itemize}
+  \item 哪些 expert 常驻 GPU；
+  \item 哪些 expert 从 CPU/host 预取；
+  \item 如何根据历史路由预测下轮 expert；
+  \item 如何减少 PCIe/NVLink 搬运阻塞。
+\end{itemize}
+\end{column}
+
+\begin{column}{0.50\textwidth}
+\textbf{\textcolor{MainBlue}{Ascend NPU 暴露的新问题}}
+\footnotesize
+\begin{itemize}
+  \item NPU 后端更偏好固定 shape 与稳定执行图；
+  \item expert 权重地址变化会破坏 graph/static-kernel 复用；
+  \item MTE/权重预取、AIC/AIV 流水是显式控制面；
+  \item grouped MoE 已有，但默认假设 expert 权重常驻。
+\end{itemize}
+\end{column}
+\end{columns}
+
+\vspace{0.75em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.7em,rounded=true]{block body}
+\textbf{\textcolor{AccentRed}{核心问题：}}
+在 Ascend 单卡 HBM 不足时，如何在\textbf{不修改 router、不改变 top-k 激活、不丢 token}的前提下，
+让 MoE expert offloading 既节省 HBM，又保持 NPU 喜欢的固定地址、固定形状和可预编译执行路径？
+\end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{Old assumption fails: 旧 GPU 假设为什么不够}
+\small
+\vspace{-0.4em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{旧假设：expert cache 是主要问题}
+\footnotesize
+GPU MoE offloading 常把系统抽象成：
+\begin{itemize}
+  \item router 产生动态 expert 集合；
+  \item runtime 根据热度/预测决定加载哪些 expert；
+  \item expert kernel 对当前 batch 动态执行；
+  \item cache 命中率和传输带宽决定性能。
+\end{itemize}
+\end{block}
+\end{column}
+
+\begin{column}{0.49\textwidth}
+\begin{block}{在 Ascend 上缺失的约束}
+\footnotesize
+如果只复制 GPU cache 策略，会忽略：
+\begin{itemize}
+  \item graph capture 依赖稳定 tensor 形状和地址；
+  \item static kernel 编译启动成本高，但重复执行收益大；
+  \item MTE 搬运和 Cube 计算需要被流水化；
+  \item 小而动态的 expert 执行会放大队列和调度开销。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.8em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.75em,rounded=true]{block body}
+\textbf{\textcolor{AccentRed}{重新定义 offloading：}}
+在 Ascend 上，offloading 不只是“expert 在 host 和 device 之间移动”，
+还包括\textbf{权重驻留位置、slot 地址稳定性、图复用粒度、预取流水}这些 GPU 工作通常弱化的控制面。
+\end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{Important correction: vLLM Ascend 已经做了什么}
+\small
+\vspace{-0.45em}
+
+\bluepoint{我们不能把已有 grouped MoE 后端当成新贡献。}
+
+\vspace{0.55em}
+\begin{tabularx}{\linewidth}{p{0.24\linewidth}X X}
+\toprule
+\textbf{路径} & \textbf{已有机制} & \textbf{含义} \\
+\midrule
+MC2 & \texttt{npu\_moe\_distribute\_dispatch} 返回 \texttt{expert\_token\_nums} & dispatch 后已有每个 expert 的累计 token 边界 \\
+AllGather & \texttt{npu\_moe\_init\_routing} 返回 \texttt{expert\_tokens} & token-level routing 被整理为 per-expert count \\
+All2AllV & \texttt{torch.histc(topk\_ids)} 统计 \texttt{tokens\_per\_expert} & expert 粒度统计用于通信和 GMM \\
+MLP & \texttt{npu\_grouped\_matmul(... group\_list=...)} & 后端按 expert 分组执行矩阵乘 \\
+\bottomrule
+\end{tabularx}
+
+\vspace{0.85em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.7em,rounded=true]{block body}
+\textbf{\textcolor{AccentRed}{修正后的边界：}}
+vLLM Ascend 已经解决了“per-token assignment 到 per-expert count/grouped execution”的表示问题。
+SEW-Offload 不能声称这是贡献；我们的目标是在此基础上解决\alert{HBM 不足时 expert 权重不再全量常驻}的问题。
+\end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{What is still missing: grouped count 不是 offloading window}
+\small
+\vspace{-0.45em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.48\textwidth}
+\begin{block}{已有 grouped MoE 后端}
+\footnotesize
+\begin{itemize}
+  \item 输入仍是每轮动态 \texttt{topk\_ids}；
+  \item \texttt{group\_list} 的形状固定，但 count 数值动态；
+  \item GMM 根据每轮 \texttt{split\_value} 决定 expert 的 M 维；
+  \item 权重张量来自 \texttt{layer.w13\_weight/w2\_weight}。
+\end{itemize}
+\end{block}
+\end{column}
+
+\begin{column}{0.50\textwidth}
+\begin{block}{Offloading 需要的新抽象}
+\footnotesize
+\begin{itemize}
+  \item HBM 中只有固定数量 \texttt{expert\_slots}；
+  \item \texttt{expert\_id -> slot\_id} 动态映射；
+  \item slot 内权重 tensor 地址长期稳定；
+  \item miss expert 触发加载、替换或慢速 fallback；
+  \item slot 作为 graph/static-kernel 的稳定输入。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.85em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.72em,rounded=true]{block body}
+\textbf{\textcolor{AccentRed}{关键差异：}}
+grouped count 解决的是\textbf{activation 如何按 expert 执行}；
+SEW-Offload 解决的是\textbf{expert 权重如何在 HBM 受限时以固定 slot 方式驻留、加载和复用}。
+\end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{Opportunity: Ascend 给 MoE offloading 的新控制面}
+\small
+\vspace{-0.4em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{Graph / static kernel}
+\footnotesize
+ACLGraph/NPUGraph 和 static kernel 更偏好固定 shape、固定 tensor 地址与有限执行变体。
+这意味着 expert offloading 应该尽量让 device 侧权重入口稳定。
+\end{block}
+
+\begin{block}{AIC/AIV/MTE 分工}
+\footnotesize
+MoE 执行天然包含 routing、permute、grouped GEMM、combine 与权重搬运。
+Ascend 的矩阵单元、向量单元和搬运单元让这些阶段有机会流水化。
+\end{block}
+\end{column}
+
+\begin{column}{0.49\textwidth}
+\begin{block}{Weight prefetch}
+\footnotesize
+vLLM Ascend 已经有通过额外 pipeline 预取线性层权重、降低 MTE 压力的经验。
+Expert slot 可以把“预取哪些权重”变成显式策略问题。
+\end{block}
+
+\begin{block}{Fixed GM window}
+\footnotesize
+如果 NPU 侧只有固定数量 slot，且每个 slot 的权重布局固定，
+runtime 可以把动态 expert 工作集翻译为稳定的 slot 执行窗口。
+\end{block}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}[t]{Key idea: Static Expert-Slot Windowing}
+\small
+\vspace{-0.2em}
+
+\begin{center}
+\begin{tikzpicture}[
+  font=\footnotesize,
+  node distance=0.9cm,
+  box/.style={draw=MainBlue, fill=SoftGray, rounded corners=2pt, minimum height=0.75cm, align=center},
+  slot/.style={draw=MainBlue, fill=SoftGreen, rounded corners=2pt, minimum height=0.72cm, align=center},
+  miss/.style={draw=AccentRed, fill=SoftYellow, rounded corners=2pt, minimum height=0.72cm, align=center},
+  arrow/.style={-{Latex[length=2.2mm]}, thick, color=DarkGray}
+]
+\node[box, minimum width=2.6cm] (router) {Router output\\\texttt{topk\_ids}};
+\node[box, right=1.0cm of router, minimum width=2.8cm] (count) {Existing backend\\\texttt{group\_list}};
+\node[box, right=1.0cm of count, minimum width=2.8cm] (policy) {SEW policy\\working set};
+\node[slot, below right=0.55cm and 0.35cm of policy, minimum width=2.2cm] (slot0) {slot 0\\expert 7};
+\node[slot, right=0.35cm of slot0, minimum width=2.2cm] (slot1) {slot 1\\expert 2};
+\node[slot, right=0.35cm of slot1, minimum width=2.2cm] (slot2) {slot 2\\expert 19};
+\node[miss, below=0.55cm of slot1, minimum width=3.4cm] (host) {host expert store\\miss / prefetch / replace};
+\node[box, right=1.0cm of slot2, minimum width=2.7cm] (gmm) {Grouped MLP\\slot weights};
+
+\draw[arrow] (router) -- (count);
+\draw[arrow] (count) -- (policy);
+\draw[arrow] (policy) -- (slot0);
+\draw[arrow] (policy) -- (slot1);
+\draw[arrow] (policy) -- (slot2);
+\draw[arrow] (host) -- (slot1);
+\draw[arrow] (slot2) -- (gmm);
+\draw[arrow] (slot1) -- (gmm);
+\draw[arrow] (slot0) -- (gmm);
+\end{tikzpicture}
+\end{center}
+
+\vspace{0.55em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.7em,rounded=true]{block body}
+\textbf{\textcolor{AccentRed}{核心思想：}}
+不改变 router 选出的 expert；只是在执行前，把 active expert 映射到固定数量、固定地址的 HBM slots。
+命中的 expert 直接执行，未命中的 expert 触发加载/替换/降级路径。
+\end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{Runtime abstraction}
+\small
+\vspace{-0.4em}
+
+\begin{tabularx}{\linewidth}{p{0.24\linewidth}X X}
+\toprule
+\textbf{抽象} & \textbf{职责} & \textbf{为什么是 Ascend-specific} \\
+\midrule
+\texttt{ExpertStore} &
+CPU/host 侧保存完整 expert 权重，支持按 expert 或 tile 加载 &
+把 offloading 从一次性全量权重迁移变成可调度的数据搬运 \\
+\texttt{SlotManager} &
+维护固定数量 HBM slots 与 \texttt{expert\_id -> slot\_id} &
+固定 slot tensor 地址，给 graph/static kernel 稳定入口 \\
+\texttt{WindowPlanner} &
+根据 \texttt{group\_list}、历史热度和 HBM budget 选择 resident set &
+利用已有 per-expert count，而不是重新做 routing \\
+\texttt{PrefetchEngine} &
+在 routing/dispatch/GMM 间隙预取下一层或下一步 expert &
+显式利用 MTE/权重预取流水，降低 Cube 等待 \\
+\texttt{FallbackPath} &
+处理 slot miss、超预算、预取失败和未覆盖 expert &
+保证不 drop token，不改变模型语义 \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}[t]{One iteration data flow}
+\small
+\vspace{-0.35em}
+
+\begin{enumerate}
+  \setlength\itemsep{0.65em}
+  \item \textbf{Routing：} 原始 router 产生 \texttt{topk\_ids/topk\_weights}，不修改激活结果。
+  \item \textbf{Count extraction：} 复用现有 \texttt{token\_dispatcher.py} 得到 \texttt{group\_list/expert\_tokens}。
+  \item \textbf{Working-set planning：} 根据当前层 active experts、历史局部性和 slot budget 决定 resident set。
+  \item \textbf{Slot remap：} 将 active expert 映射到 \texttt{slot\_id}，构造 slot-local expert map。
+  \item \textbf{Load/prefetch：} 对 miss expert 从 host store 加载到空闲或被替换 slot。
+  \item \textbf{Grouped MLP：} 使用 slot 权重和现有 grouped matmul 路径执行。
+  \item \textbf{Combine：} 复用现有 combine/unpermute，还原原始 token 顺序。
+\end{enumerate}
+
+\vspace{0.55em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.7em,rounded=true]{block body}
+\textbf{\textcolor{AccentRed}{语义保证：}}
+SEW-Offload 只改变 expert 权重的驻留和访问方式，不改变 router logits、top-k expert、gate weight 或 combine 语义。
+\end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{Integration in vLLM Ascend}
+\small
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.54\textwidth}
+\begin{block}{现有主路径}
+\footnotesize
+\begin{enumerate}
+  \item \texttt{AscendFusedMoE.forward\_impl}
+  \item \texttt{select\_experts}
+  \item \texttt{build\_fused\_experts\_input}
+  \item \texttt{moe\_comm\_method.fused\_experts}
+  \item \texttt{token\_dispatch -> MLP -> combine}
+\end{enumerate}
+\end{block}
+\end{column}
+
+\begin{column}{0.44\textwidth}
+\begin{block}{SEW 最小插入点}
+\footnotesize
+\begin{itemize}
+  \item 在 \texttt{fused\_experts} 前准备 slot weights；
+  \item 不改 scheduler；
+  \item 不改 model runner；
+  \item 不重写 token dispatcher；
+  \item 默认关闭，通过配置开关启用。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.7em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.7em,rounded=true]{block body}
+\textbf{\textcolor{AccentRed}{低侵入原则：}}
+SEW-Offload 应作为 \texttt{vllm\_ascend/moe\_offload/} 中的独立 runtime，
+通过薄 hook 接入 MoE boundary；现有 grouped count、dispatch、GMM 和 combine 尽量复用。
+\end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{Policy design}
+\small
+\vspace{-0.4em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.33\textwidth}
+\begin{block}{MVP-0: observe}
+\footnotesize
+\begin{itemize}
+  \item 记录每层 active experts；
+  \item 记录 \texttt{expert\_tokens}；
+  \item 分析 temporal locality；
+  \item 不改变执行路径。
+\end{itemize}
+\end{block}
+\end{column}
+
+\begin{column}{0.33\textwidth}
+\begin{block}{MVP-1: sync slot}
+\footnotesize
+\begin{itemize}
+  \item 固定 HBM slot 数；
+  \item miss 同步加载；
+  \item LRU/heat replacement；
+  \item 保证 correctness。
+\end{itemize}
+\end{block}
+\end{column}
+
+\begin{column}{0.31\textwidth}
+\begin{block}{MVP-2: prefetch}
+\footnotesize
+\begin{itemize}
+  \item 基于上一层/上一 token 预测；
+  \item 对下一层 hot expert 预取；
+  \item overlap routing/dispatch；
+  \item 统计 stall 与命中。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.75em}
+\begin{block}{MVP-3: graph-friendly window}
+\footnotesize
+将 slot 数、capacity tier 和权重入口固定成少量变体，
+探索 ACLGraph/static kernel 对 offloaded expert path 的收益和限制。
+\end{block}
+\end{frame}
+
+\begin{frame}[t]{Experiment plan}
+\small
+\vspace{-0.35em}
+
+\begin{tabularx}{\linewidth}{p{0.20\linewidth}X}
+\toprule
+\textbf{维度} & \textbf{设计} \\
+\midrule
+模型 & Qwen3-30B-A3B；优先单机单卡，后续扩展多卡 expert parallel 对照 \\
+场景 & 人工限制 resident expert slots，模拟 HBM 不足；保留真实 KV cache 压力 \\
+Baseline 1 & vLLM Ascend 原生 grouped MoE，全量 expert 常驻 \\
+Baseline 2 & 简单 LRU expert cache，无固定 slot/graph 设计 \\
+Baseline 3 & GPU-style prediction/prefetch 思路移植，不做 Ascend-specific slot 稳定化 \\
+SEW variants & sync slot、prefetch slot、capacity-tier slot、graph replay slot \\
+Workloads & decode-heavy、mixed prefill/decode、长上下文、多请求连续批处理 \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}[t]{Metrics and ablations}
+\small
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{主要指标}
+\footnotesize
+\begin{itemize}
+  \item end-to-end throughput；
+  \item TTFT / TPOT / p95 latency；
+  \item HBM peak / resident expert memory；
+  \item slot hit rate / miss penalty；
+  \item H2D bytes and stalls；
+  \item graph replay hit rate；
+  \item MTE/Cube overlap。
+\end{itemize}
+\end{block}
+\end{column}
+
+\begin{column}{0.49\textwidth}
+\begin{block}{消融实验}
+\footnotesize
+\begin{itemize}
+  \item slot 数量：2/4/8/16；
+  \item replacement：LRU、LFU、token-count weighted；
+  \item prefetch：无、上一层、上一 token、混合；
+  \item capacity tier：关闭/少量 bucket；
+  \item graph：eager、ACLGraph、static kernel。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}[t]{Expected claims}
+\small
+\vspace{-0.4em}
+
+\begin{enumerate}
+  \setlength\itemsep{0.85em}
+  \item \textbf{表示层 claim：}
+  Ascend grouped MoE 已经提供 per-expert count；offloading 应复用这个信号，而不是重新设计 routing。
+  \item \textbf{系统层 claim：}
+  固定 expert-slot residency 能让 HBM 受限 MoE offloading 保持稳定权重入口，减少动态权重对象破坏图复用的问题。
+  \item \textbf{硬件层 claim：}
+  slot 化后，expert load/prefetch 可以与 routing、dispatch、GMM 形成更明确的流水，有机会改善 MTE/Cube overlap。
+  \item \textbf{语义层 claim：}
+  SEW-Offload 不修改 router、不减少 expert 激活、不做 drop，因此 correctness 风险低于重路由或容量裁剪方法。
+\end{enumerate}
+\end{frame}
+
+\begin{frame}[t]{Risks and fallback}
+\small
+\vspace{-0.4em}
+
+\begin{tabularx}{\linewidth}{p{0.28\linewidth}X X}
+\toprule
+\textbf{风险} & \textbf{表现} & \textbf{应对} \\
+\midrule
+slot miss 太多 & 加载阻塞吞吐，尾延迟升高 & decode/prefill 分开评估；引入 token-count weighted replacement \\
+graph 收益有限 & dynamic count 仍导致图变体过多 & 先固定权重 slot 地址，再逐步引入 capacity tier \\
+H2D 搬运太慢 & offload 节省 HBM 但拖慢计算 & 量化 expert store、tile-level prefetch、异步加载 \\
+工程侵入过大 & 影响 vLLM Ascend 主路径稳定性 & 默认关闭；新包封装；先 observer，再 sync slot \\
+正确性难验证 & slot remap 引入 expert 对错风险 & 保留 expert-id checksum、逐层输出对齐、E2E replay 测试 \\
+\bottomrule
+\end{tabularx}
+\end{frame}
+
+\begin{frame}[t]{Roadmap}
+\small
+\vspace{-0.4em}
+
+\begin{block}{Phase 1: Trace and evidence}
+\footnotesize
+实现 routed expert working-set 记录，得到 Qwen3-30B-A3B 在真实 workload 下的 expert locality、active set size、layer-to-layer overlap。
+\end{block}
+
+\begin{block}{Phase 2: Minimal offloading}
+\footnotesize
+构建 host expert store 与固定 HBM slots，先用同步加载跑通 correctness，
+证明在人工 slot budget 下能替代全量 expert 常驻。
+\end{block}
+
+\begin{block}{Phase 3: Ascend-specific optimization}
+\footnotesize
+加入 slot prefetch、capacity tier 和 graph/static-kernel 实验，
+验证固定 slot 地址是否能提升 replay 稳定性并降低搬运 stall。
+\end{block}
+
+\begin{beamercolorbox}[wd=\linewidth,sep=0.7em,rounded=true]{block body}
+\textbf{\textcolor{AccentRed}{一句话总结：}}
+SEW-Offload 的研究价值不在“让 MoE 后端按 expert 分组”，而在“当 expert 不能全量常驻 HBM 时，
+如何把动态 expert 工作集翻译成 Ascend 友好的固定 slot 执行窗口”。
+\end{beamercolorbox}
+\end{frame}
+
+\end{document}

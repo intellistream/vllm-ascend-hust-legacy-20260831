@@ -27,3 +27,9 @@
 - 根据用户指出的问题，重新审视 `token_dispatcher.py`、`moe_comm_method.py`、`moe_mlp.py` 与 `moe_grouped_matmul`。
 - 确认现有 Ascend MoE 后端已经实现 per-expert token count/group_list 表示，不能把它作为 SEW-Offload 新贡献。
 - 修正研究定位：SEW-Offload 应聚焦 HBM 受限 offloading 下的固定 expert-slot residency window、稳定权重地址、slot remap/prefetch，以及可选 capacity-tier graph replay。
+
+## 2026-05-28 slide 落盘
+
+- 已创建正式 slide 文件：`slide/sew_offload_report.tex`。
+- 采用与 `moe_serving_report.tex` 相近的中文技术叙事结构，并把研究主线修正为“已有 grouped count 后端 + 新增 fixed expert-slot residency window”。
+- 由于本机未安装 `xelatex`/`lualatex`/`pdflatex`，本轮仅完成结构检查，未生成 PDF。
