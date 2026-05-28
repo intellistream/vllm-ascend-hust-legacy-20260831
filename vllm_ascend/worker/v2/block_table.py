@@ -69,7 +69,10 @@ class AscendBlockTables(BlockTables):
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
-            self.max_num_batched_tokens,
+            # Only the returned padded slice can be consumed by downstream
+            # kernels. Avoid filling the unused tail of the persistent buffer
+            # on every decode step.
+            num_tokens_padded,
             idx_mapping,
             query_start_loc,
             positions,
