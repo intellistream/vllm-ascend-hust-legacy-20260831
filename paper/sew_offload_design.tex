@@ -17,13 +17,18 @@
 \begin{abstract}
 Mixture-of-Experts (MoE) inference stresses device memory because only a small
 subset of experts is activated per token, while the full expert parameter set
-still has to be stored somewhere. Existing MoE offloading systems are largely
-designed around GPU assumptions: expert caching, host-to-device prefetching,
-and overlap through CUDA streams. These assumptions become incomplete on Ascend
-NPUs. Ascend execution is more sensitive to stable tensor addresses, fixed
-shapes, graph replay, and explicitly scheduled data movement. This document
-describes the design of SEW-Offload, a static expert-window scheduling system
-for HBM-limited MoE inference on Ascend NPUs. SEW-Offload does not retrain the
+still has to be stored somewhere. Existing MoE offloading systems typically
+treat expert weights as dynamically cached device objects and reduce transfer
+costs through cache replacement, host-to-device prefetching, and stream-level
+copy/compute overlap. This formulation is insufficient for Ascend NPUs. Under
+limited HBM, dynamically loading experts into arbitrary device buffers conflicts
+with the stable weight addresses, fixed execution windows, graph replay, and
+explicit movement scheduling that Ascend execution relies on. As a result,
+offloaded MoE inference either exposes host-to-HBM expert loading on the
+critical path or gives up the static execution regularity needed for efficient
+NPU execution. This document describes the design of SEW-Offload, a static
+expert-window scheduling system for HBM-limited MoE inference on Ascend NPUs.
+SEW-Offload does not retrain the
 router, does not alter top-k expert activation, and does not drop tokens.
 Instead, it reinterprets expert offloading as a scheduling problem: fixed HBM
 expert slots provide stable execution entries, deadline-aware prefetching
@@ -50,8 +55,8 @@ overlap host-to-device copies with GPU computation. This abstraction is useful
 but under-specifies the control surface exposed by Ascend NPUs. Ascend runtime
 and kernels benefit from stable tensor addresses, fixed execution shapes, graph
 capture and replay, and explicit memory movement orchestration. If an offloaded
-expert is loaded into arbitrary weight tensors at runtime, the device may lose
-the very regularity that makes Ascend execution efficient.
+expert is loaded into arbitrary weight tensors at runtime, the system may save
+HBM capacity but lose the regularity needed for efficient NPU execution.
 
 SEW-Offload starts from the observation that vLLM Ascend already provides a
 grouped MoE execution representation: token-level routing results are converted
@@ -63,7 +68,23 @@ expert slots are present in HBM, each slot has a stable tensor address, and the
 runtime dynamically maps active expert ids to those slots while orchestrating
 loads, prefetches, replacements, and phased grouped execution.
 
-\section{Problem Statement}
+\section{Problem Definition}
+
+Existing MoE offloading systems treat expert weights as dynamically cached
+device objects and optimize residency mainly through cache replacement and
+prefetch prediction. This abstraction is incomplete for Ascend NPUs. Once HBM
+is insufficient to keep all experts resident, dynamic expert loading conflicts
+with the NPU's preference for stable weight addresses, fixed execution windows,
+graph/static-kernel reuse, and explicitly scheduled data movement. As a result,
+offloaded MoE inference either exposes host-to-HBM expert loading on the
+critical path or gives up the static execution regularity that makes Ascend
+efficient.
+
+The central problem is the mismatch between dynamic expert working sets and
+static NPU execution windows under limited HBM. GPU-style MoE offloading
+optimizes which experts are cached, but Ascend MoE offloading also depends on
+where experts reside, when they are loaded, and whether their loading can be
+hidden behind static, grouped NPU execution.
 
 Given an MoE layer with a set of experts $E$, a limited HBM budget that can hold
 only $S \ll |E|$ expert slots, and a stream of inference steps that produce

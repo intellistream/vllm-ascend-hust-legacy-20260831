@@ -73,3 +73,16 @@
   - 有价值的系统指标是 host-to-HBM load time 中有多少被 routing、dispatch、resident expert compute、后续 layer compute 或下一 decode step 前的空窗隐藏。
 - hit-first phased execution 的核心是：当前层 active experts 中，slot hit 的 expert 先组成 grouped MLP phase 执行，同时 miss experts 异步加载；miss 到齐后再组成少量 follow-up grouped MLP phase，避免 per-expert 小 kernel。
 - 这一路线仍然不修改 router、不改变 top-k expert、不 drop token，只改变 expert 权重驻留、加载、预取和 grouped execution 的相位编排。
+
+## CCF-A 新硬件系统论文的问题定义模式
+
+- 调研对象包括 Dune/OSDI 2012、Arrakis/OSDI 2014、BPFS/SOSP 2009、TPP/ASPLOS 2023、CXL-ANNS/USENIX ATC 2023、eRPC/NSDI 2019、TPU/ISCA 2017、TVM/OSDI 2018。
+- 这些论文的共同写法不是“支持一种新硬件”，而是：
+  1. 旧软件抽象建立在旧硬件假设上；
+  2. 新硬件/设备特性让旧假设失效或不完整；
+  3. 新硬件没有自动解决问题，而是暴露了新的控制面；
+  4. 现有系统要么忽略该控制面，要么用旧抽象间接使用它；
+  5. 论文提出新的系统抽象，把硬件特性转化为可测量收益。
+- 对 SEW-Offload 的启发：研究问题不能写成“在 Ascend 上做 MoE offloading”，而应写成“HBM 受限时，如何把动态 expert 工作集映射到 Ascend 友好的静态、稳定、可预取隐藏的 expert execution windows”。
+- 新主问题定义：现有 MoE offloading 方法通常把 expert 权重视为动态 cached device objects，主要通过 cache replacement 和 prefetch prediction 优化“哪些 expert 在设备上”；这个抽象在 Ascend NPU 上不完整，因为动态 expert loading 会和 stable weight addresses、fixed execution windows、graph/static-kernel reuse、explicit data movement 发生冲突，最终把 host-to-HBM loading 暴露在关键路径上或迫使系统放弃静态执行规律。
+- 论文中的研究问题应写成陈述式问题定义，而不是“how to”式方案句；更合适的写法是“旧方法如何做、依赖什么假设、这个假设在 Ascend 上为什么失效、导致什么系统后果”。
