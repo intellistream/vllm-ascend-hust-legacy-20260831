@@ -46,7 +46,7 @@
   \begin{beamercolorbox}[wd=\linewidth,sep=0.75em,rounded=true]{block body}
   \centering
   \keypoint{不要把 NPU 当 GPU 用：}
-  重点研究 Ascend 的差异化特性——包括静态图重放、固定 GM 地址空间、AIC/AIV 分离执行、显式 MTE 数据搬运以及可控的主机侧数据放置——如何重塑 MoE expert offloading 的设计空间，并据此重新设计专家权重驻留、搬运、窗口化执行与预取机制。
+  重点研究如何利用 Ascend 的差异化特性重塑 MoE expert offloading 的设计空间，并据此重新设计专家权重驻留、搬运、窗口化执行与预取机制。
   \end{beamercolorbox}
 \end{frame}
 
@@ -54,37 +54,63 @@
 \small
 \vspace{-0.4em}
 
-\bluepoint{背景：MoE 总参数量快速增大，单卡 HBM 越来越不够}
+\bluepoint{研究背景：MoE 总参数量快速增大，单卡 HBM 越来越不够}
 
 \vspace{0.45em}
-Qwen3-30B-A3B 这类 MoE 模型每个 token 只激活少量专家，但模型总专家权重仍然需要占用大量 HBM。
-当我们希望在单机单卡上服务更大 MoE，或者把更多 HBM 留给 KV cache、长上下文和并发请求时，
-expert 权重就自然进入 offloading 场景。
+混合专家模型通过为每个 token 仅激活少量专家来扩展模型容量，但专家权重本身仍然给推理阶段的设备显存带来巨大压力。专家卸载因此成为在有限 HBM 条件下部署大规模 MoE 模型的重要路径。然而，现有 MoE offloading 系统大多沿用 GPU 时代的抽象，主要关注哪些专家应常驻显存、缺失专家何时从主机侧加载，以及如何进行专家缓存和预取。
 
 \vspace{0.85em}
-\begin{columns}[T,onlytextwidth]
-\begin{column}{0.48\textwidth}
-\textbf{\textcolor{MainBlue}{GPU offloading 的常见视角}}
+\textbf{\textcolor{MainBlue}{GPU 与 Ascend 在 MoE Offloading 上的硬件适配差异}}
 \footnotesize
-\begin{itemize}
-  \item 哪些 expert 常驻 GPU；
-  \item 哪些 expert 从 CPU/host 预取；
-  \item 如何根据历史路由预测下轮 expert；
-  \item 如何减少 PCIe/NVLink 搬运阻塞。
-\end{itemize}
-\end{column}
+\begin{tabular}{p{0.18\textwidth} p{0.36\textwidth} p{0.38\textwidth}}
+\toprule
+\textbf{适配维度} & \textbf{GPU-style Offloading} & \textbf{Ascend-specific Constraint} \\
+\midrule
+\textbf{动态 routing}
+& routing 后的动态 expert-token shape 通常由 dynamic kernel、stream 和通用 gather/scatter 处理
+& 动态 shape 会削弱 static graph / static-kernel 复用，需要将 expert-token 分布规整为固定窗口 \\
 
-\begin{column}{0.50\textwidth}
-\textbf{\textcolor{MainBlue}{Ascend NPU 暴露的新问题}}
-\footnotesize
-\begin{itemize}
-  \item NPU 后端更偏好固定 shape 与稳定执行图；
-  \item expert 权重地址变化会破坏 graph/static-kernel 复用；
-  \item MTE/权重预取、AIC/AIV 流水是显式控制面；
-  \item grouped MoE 已有，但默认假设 expert 权重常驻。
-\end{itemize}
-\end{column}
-\end{columns}
+\textbf{权重落位}
+& expert miss 后主要关注从 host 到 HBM 的传输时机与 cache replacement
+& miss expert 需要绑定到稳定的 GM weight slot，否则地址变化会影响 graph/slot 复用 \\
+
+\textbf{执行组织}
+& expert GEMM、scatter/gather、combine 多由 GPU kernel 组合完成
+& expert FFN、routing pack、mask、gate、combine 应分别映射到 AIC/Cube 与 AIV/UB \\
+
+\textbf{搬运重叠}
+& 通过 CUDA stream、async copy、prefetch 隐藏 PCIe/NVLink stall
+& 需要显式编排 MTE、weight slot、CopyIn/Compute/CopyOut，才能隐藏 H2D stall \\
+
+\textbf{已有 grouped MoE}
+& 多假设 expert weights 已在 GPU HBM 中，重点优化 resident expert execution
+& offloading 场景还要同时管理 expert residency、动态装载、slot reuse 与 fixed-window replay \\
+\bottomrule
+\end{tabular}
+
+% \begin{columns}[T,onlytextwidth]
+% \begin{column}{0.3\textwidth}
+% \textbf{\textcolor{MainBlue}{GPU offloading 的常见视角}}
+% \footnotesize
+% \begin{itemize}
+%   \item 哪些 expert 常驻 GPU；
+%   \item 哪些 expert 从 CPU/host 预取；
+%   \item 如何根据历史路由预测下轮 expert；
+%   \item 如何减少 PCIe/NVLink 搬运阻塞。
+% \end{itemize}
+% \end{column}
+
+% \begin{column}{0.7\textwidth}
+% \textbf{\textcolor{MainBlue}{Ascend 改变了 Expert Offloading 的优化对象}}
+% \footnotesize
+% \begin{itemize}
+% \item \textbf{从动态执行到静态重放：} MoE routing 产生动态 expert-token shape，但 Ascend 后端更偏好固定 shape、稳定地址与可复用执行图；
+% \item \textbf{从单一计算核到异构流水：} expert FFN 适合由 AIC/Cube 执行，而 routing pack、mask、gate 与 combine 更适合映射到 AIV/UB；
+% \item \textbf{从隐式访存到显式搬运：} expert 权重卸载不仅取决于 cache 命中，还取决于 MTE 搬运、weight slot 绑定与 H2D/compute overlap；
+% \item \textbf{从常驻 grouped MoE 到卸载 grouped MoE：} 现有 grouped expert 执行多默认权重已在 HBM，而 offloading 场景还需要解决专家驻留、动态装载与固定窗口执行的协同。
+% \end{itemize}
+% \end{column}
+% \end{columns}
 
 \vspace{0.75em}
 \begin{beamercolorbox}[wd=\linewidth,sep=0.7em,rounded=true]{block body}
