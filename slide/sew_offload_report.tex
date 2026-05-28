@@ -110,7 +110,7 @@
 \vspace{0.45em}
 \begin{beamercolorbox}[wd=\linewidth,sep=0.45em,rounded=true]{block body}
 \textbf{\textcolor{AccentRed}{核心问题定义：}}
-现有的 MoE 卸载系统通常将专家权重视为动态缓存的设备对象，并通过缓存替换、主机到设备的预取以及流级拷贝与计算重叠来降低传输开销。但这种设计思路对昇腾 NPU 而言并不充分。在 HBM 容量受限的情况下，将专家动态加载到任意的设备缓冲区中，会与昇腾执行所依赖的\textbf{稳定权重地址、固定执行窗口、图重放和显式数据移动调度}产生冲突。因此，卸载后的 MoE 推理要么让主机到 HBM 的专家加载暴露在关键路径上，要么就不得不放弃高效 NPU 执行所需的静态执行规整性。
+现有 MoE 卸载多把专家权重当作动态缓存对象，依靠替换、预取和拷贝/计算重叠来减少传输开销。但在 HBM 受限的昇腾 NPU 上，动态装载专家会破坏\textbf{稳定权重地址、固定执行窗口、图重放和显式搬运调度}。导致要么专家加载暴露在关键路径上，要么牺牲高效 NPU 执行所需的静态规整性。
 \end{beamercolorbox}
 \end{frame}
 
@@ -189,20 +189,20 @@ SEW-Offload 的价值正是在 Ascend 约束下，把动态 expert 工作集转�
 \toprule
 \textbf{工作类型} & \textbf{代表工作} & \textbf{做法} & \textbf{现有不足} \\
 \midrule
-GPU MoE offload &
+GPU MoE 卸载 &
 MoE-Infinity；Fiddler &
-将 expert 作为 GPU cache/CPU-GPU 协同对象，利用 activation trace、专家热度或执行策略决定缓存替换、预取和 CPU/GPU 分工。 &
-优化目标主要是减少 CPU--GPU 传输和提高 GPU 资源利用；默认动态 expert 对象、动态入口和 stream overlap 可接受，未处理 Ascend 对稳定权重地址、固定窗口、图重放和 MTE 编排的要求。 \\
+将专家作为 GPU 缓存或 CPU-GPU 协同对象，利用激活轨迹、专家热度或执行策略决定缓存替换、预取和 CPU/GPU 分工。 &
+优化目标主要是减少 CPU--GPU 传输并提高 GPU 利用率；默认动态专家对象、动态执行入口和流级重叠可以接受，未处理 Ascend 对稳定权重地址、固定窗口、图重放和 MTE 编排的要求。 \\
 \midrule
 Ascend 全量 MoE &
 vLLM Ascend \texttt{AscendFusedMoE}；\texttt{npu\_grouped\_matmul} &
-将 routing 结果整理成 per-expert count/\texttt{group\_list}，再调用 Ascend grouped matmul 执行 MoE MLP。 &
-默认 expert 权重已经全量驻留 HBM；没有 host expert store、固定 resident slot、miss/prefetch/replacement，也没有针对 offload miss 的分阶段执行。 \\
+将路由结果整理成每个专家的 token 计数和 \texttt{group\_list}，再调用 Ascend 分组矩阵乘执行 MoE MLP。 &
+默认专家权重已经全量驻留 HBM；没有主机侧专家存储、固定驻留位置、缺失专家预取与替换，也没有针对卸载缺失的分阶段执行。 \\
 \midrule
 非 Ascend NPU MoE &
 NPUMoE &
-面向 Apple ANE，将 dense/static compute offload 到 NPU；动态 routing、top-k、scatter/gather 等不规则部分走 CPU/GPU fallback，并用 static tiers/grouped execution/graph residency 降低开销。 &
-目标硬件、内存体系和 runtime 不同；解决的是 ANE 静态图与动态算子回退问题，不解决 Ascend 上 host-to-HBM expert 权重装载、稳定 slot 入口和 MTE/Cube 流水。 \\
+面向 Apple ANE，将稠密和静态计算卸载到 NPU；动态路由、top-k、分散/聚集等不规则部分回退到 CPU/GPU，并用静态分层、分组执行和图常驻降低开销。 &
+目标硬件、内存体系和运行时不同；解决的是 ANE 静态图与动态算子回退问题，不解决 Ascend 上主机到 HBM 的专家权重装载、稳定槽位入口和 MTE/Cube 流水。 \\
 \bottomrule
 \end{tabularx}
 \setlength{\tabcolsep}{6pt}
@@ -211,7 +211,7 @@ NPUMoE &
 \vspace{0.3em}
 \begin{beamercolorbox}[wd=\linewidth,sep=0.45em,rounded=true]{block body}
 \textbf{\textcolor{AccentRed}{研究空白：}}
-缺少面向 Ascend 的 \textbf{HBM 受限 expert offloading}：不改变 router/top-k/token 语义，同时处理权重驻留、搬运隐藏和稳定执行入口。
+缺少面向 Ascend 的 \textbf{HBM 受限专家卸载}：不改变路由器、top-k 和 token 语义，同时处理权重驻留、搬运隐藏和稳定执行入口。
 \end{beamercolorbox}
 \end{frame}
 
@@ -230,15 +230,15 @@ NPUMoE &
   idea/.style={draw=MainBlue, fill=SoftGreen, rounded corners=2pt, text width=3.85cm, minimum height=1.75cm, align=center},
   arrow/.style={-{Latex[length=2.4mm]}, very thick, color=MainBlue}
 ]
-\node[challenge] (c1) at (0,0) {\textbf{Challenge 1}\\动态 expert 身份破坏稳定入口};
+\node[challenge] (c1) at (0,0) {\textbf{Challenge 1}\\动态专家如何利用NPU静态特性};
 \node[idea, below=0.55cm of c1] (i1) {\textbf{Static Expert Slots}\\预先分配固定 HBM slots；\\运行时只换 slot 里的 expert，\\不换 NPU 看到的地址。};
 \draw[arrow] (c1) -- (i1);
 
-\node[challenge] (c2) at (4.8,0) {\textbf{Challenge 2}\\只按热度预取，可能搬错 expert};
+\node[challenge] (c2) at (4.8,0) {\textbf{Challenge 2}\\如何避免只按热度预取产生的高开销};
 \node[idea, below=0.55cm of c2] (i2) {\textbf{Deadline-Aware Prefetch}\\把每次加载当作带 deadline 的 job；\\按使用时间、加载成本和 token 数\\决定先搬谁。};
 \draw[arrow] (c2) -- (i2);
 
-\node[challenge] (c3) at (9.6,0) {\textbf{Challenge 3}\\等待 miss 会阻塞整层 MoE};
+\node[challenge] (c3) at (9.6,0) {\textbf{Challenge 3}\\如何让miss不阻塞整层MoE};
 \node[idea, below=0.55cm of c3] (i3) {\textbf{Hit-First Phased Execution}\\不要等所有 expert 到齐；\\先跑已在 HBM 的 experts，\\边算边加载 miss experts。};
 \draw[arrow] (c3) -- (i3);
 
