@@ -72,45 +72,118 @@
   \item \textbf{CUDA stream overlap：} 依赖动态 kernel、stream 并发和异步拷贝隐藏传输开销。
 \end{itemize}
 \end{column}
-
-\begin{column}{0.53\textwidth}
-\textbf{\textcolor{MainBlue}{为什么在 Ascend 上不完整}}
-\scriptsize
-\begin{itemize}
-  \item \textbf{稳定 tensor 地址：} expert 动态装载会改变权重入口，削弱地址绑定和 buffer 复用；
-  \item \textbf{固定 shape 与图重放：} active expert 和 token count 每轮变化，放大 graph/static-kernel 变体；
-  \item \textbf{显式调度的数据移动：} H2D/MTE 搬运若不能被明确编排，会暴露为计算等待；
-\end{itemize}
-\end{column}
+\hfill
+\begin{minipage}{0.45\textwidth}
+\centering
+\vspace{1.8em}
+\textcolor{MainBlue}{\Large $\longrightarrow$} \\
+\vspace{0.5em}
+\textbf{\textcolor{AccentRed}{在 Ascend NPU 上}} \\
+这些 GPU 时代的抽象 \\
+\textbf{\textcolor{AccentRed}{不再完整}} \\
+\vspace{0.5em}
+$\downarrow$ 详见下页
+\end{minipage}
 \end{columns}
-% \begin{columns}[T,onlytextwidth]
-% \begin{column}{0.3\textwidth}
-% \textbf{\textcolor{MainBlue}{GPU offloading 的常见视角}}
-% \footnotesize
-% \begin{itemize}
-%   \item 哪些 expert 常驻 GPU；
-%   \item 哪些 expert 从 CPU/host 预取；
-%   \item 如何根据历史路由预测下轮 expert；
-%   \item 如何减少 PCIe/NVLink 搬运阻塞。
-% \end{itemize}
-% \end{column}
 
-% \begin{column}{0.7\textwidth}
-% \textbf{\textcolor{MainBlue}{Ascend 改变了 Expert Offloading 的优化对象}}
-% \footnotesize
-% \begin{itemize}
-% \item \textbf{从动态执行到静态重放：} MoE routing 产生动态 expert-token shape，但 Ascend 后端更偏好固定 shape、稳定地址与可复用执行图；
-% \item \textbf{从单一计算核到异构流水：} expert FFN 适合由 AIC/Cube 执行，而 routing pack、mask、gate 与 combine 更适合映射到 AIV/UB；
-% \item \textbf{从隐式访存到显式搬运：} expert 权重卸载不仅取决于 cache 命中，还取决于 MTE 搬运、weight slot 绑定与 H2D/compute overlap；
-% \item \textbf{从常驻 grouped MoE 到卸载 grouped MoE：} 现有 grouped expert 执行多默认权重已在 HBM，而 offloading 场景还需要解决专家驻留、动态装载与固定窗口执行的协同。
-% \end{itemize}
-% \end{column}
-% \end{columns}
-
-\vspace{0.45em}
+\vspace{0.7em}
 \begin{beamercolorbox}[wd=\linewidth,sep=0.45em,rounded=true]{block body}
 \textbf{\textcolor{AccentRed}{核心问题定义：}}
 现有 MoE 卸载多把专家权重当作动态缓存对象，依靠替换、预取和拷贝/计算重叠来减少传输开销。但在 HBM 受限的昇腾 NPU 上，动态装载专家会破坏\textbf{稳定权重地址、固定执行窗口、图重放和显式搬运调度}。导致要么专家加载暴露在关键路径上，要么牺牲高效 NPU 执行所需的静态规整性。
+\end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{为什么 GPU 抽象在 Ascend NPU 上不完整}
+\footnotesize
+\vspace{-0.55em}
+
+\bluepoint{昇腾 NPU 的三类差异化特性，决定了 GPU 式 offloading 不能直接迁移}
+
+\vspace{0.3em}
+
+\begin{columns}[T]
+\begin{column}{0.33\textwidth}
+\begin{block}{\textcolor{AccentRed}{1. 静态图执行偏好}}
+\scriptsize
+\vspace{-0.3em}
+\begin{itemize}
+  \item \textbf{NPUGraph / ACLGraph capture-replay：}
+  录制完整执行图后以极低开销重放；捕获时
+  tensor 地址、shape、dtype 被冻结，
+  重放期间\textbf{不允许改变}。
+
+  \item \textbf{Static Kernel 编译：}
+  固定 shape 算子可提前编译为高度优化
+  binary；shape 变体每增一种就多编译一份。
+
+  \item \textbf{稳定权重地址是关键约束：}
+  动态装载 expert → 权重地址每轮变化
+  → graph capture 失效 → 退回 eager 模式；
+  CUDA 上轻量的动态 kernel launch 在
+  Ascend 上代价高昂。
+\end{itemize}
+\end{block}
+\end{column}
+
+\begin{column}{0.33\textwidth}
+\begin{block}{\textcolor{AccentRed}{2. 显式数据搬运编排}}
+\scriptsize
+\vspace{-0.3em}
+\begin{itemize}
+  \item \textbf{三个独立搬运单元：}
+  三套搬运引擎各有专用通路：MTE1 走
+  L1→L0A/L0B（喂矩阵），MTE2 走全局内存
+  →L1/UB（从 HBM 取数），MTE3 走 UB→
+  全局内存（写回结果）。
+
+  \item \textbf{搬运与计算靠事件同步锁协调：}
+  搬运和计算各有独立指令队列，可并行但
+  需显式插入 SetFlag/WaitFlag 控制依赖——
+  前一步没做完后一步必须等。
+
+  \item \textbf{不编排就变成计算空等：}
+  GPU 的隐式并发在昇腾上不存在；数据预取、
+  权重加载、矩阵计算、结果写回必须组织成
+  Ping-Pong 双缓冲流水，否则搬运耗时直接
+  暴露为矩阵单元的停顿。
+\end{itemize}
+\end{block}
+\end{column}
+
+\begin{column}{0.33\textwidth}
+\begin{block}{\textcolor{AccentRed}{3. 异构计算单元分工}}
+\scriptsize
+\vspace{-0.3em}
+\begin{itemize}
+  \item \textbf{矩阵计算单元：} 专门针对大规模矩阵乘
+  优化，适合 MoE MLP 的主计算负载；
+
+  \item \textbf{向量计算单元：} 适合元素级操作，
+  如激活函数、路由选择、重排与合并；
+
+  \item \textbf{标量单元与指令调度：} 把不同阶段
+  计算分配到合适单元，避免小专家执行被
+  调度开销淹没。
+
+  \item \textbf{GPU 卸载为何不能直接搬：}
+  GPU 上一个核包揽矩阵乘、激活和搬运，
+  动态装 expert 直接跑；昇腾上这些被拆到
+  三条独立流水线——动态装载让同步时序每轮
+  变化，无法预编排，只能串行等。
+  \textbf{固定槽位让编排可复用：} 槽位地址和尺寸
+  不变，只替换专家到槽位的映射即可。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.1em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.35em,rounded=true]{block body}
+\scriptsize
+\textbf{\textcolor{AccentRed}{核心洞察：}}
+Ascend NPU 不是"慢一点的 GPU"，而是一台有\textbf{静态图执行器、独立搬运引擎和异构计算单元}的加速器。
+GPU 的动态 cache 抽象忽略这三个维度，直接移植 MoE offloading 会导致 graph 退化、搬运等待和计算单元错配。
+SEW-Offload 的设计正是围绕这三个特性展开。
 \end{beamercolorbox}
 \end{frame}
 
@@ -256,7 +329,7 @@ NPUMoE &
 \end{beamercolorbox}
 \end{frame}
 
-\begin{frame}[t]{Old assumption fails: 旧 GPU 假设为什么不够}
+\iffalse
 \small
 \vspace{-0.4em}
 
@@ -695,4 +768,5 @@ SEW-Offload 的研究价值不在“让 MoE 后端按 expert 分组”，而在�
 \end{beamercolorbox}
 \end{frame}
 
+\fi
 \end{document}
