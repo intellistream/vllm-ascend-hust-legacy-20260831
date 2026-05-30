@@ -10,7 +10,7 @@
 
 ## 当前阶段
 
-阶段 2：论文蓝图与整体系统设计撰写。
+阶段 8：现有单卡 offloading baseline 实测与瓶颈定位完成；最小可复用 benchmark 规范已落盘，进入 SEW-Offload runtime MVP 准备。
 
 ## 阶段清单
 
@@ -20,13 +20,18 @@
 | 1. 研究问题冻结 | complete | RQ、假设链、贡献点、非目标 |
 | 2. 论文蓝图 | in_progress | `paper/outline.md`、`paper/related_work_matrix.md`、LaTeX skeleton |
 | 3. Slide 蓝图 | pending | `slide/sew_offload_report.tex` skeleton 与图表清单 |
-| 4. Runtime 架构设计 | pending | 高内聚低耦合模块边界、配置开关、集成点 |
-| 5. MVP-0/MVP-1 实现计划 | pending | routing trace、expert store、slot manager、fixed window |
-| 6. 实验计划 | pending | baseline、workload、metrics、ablation、artifact layout |
-| 7. 质量门禁 | pending | correctness、性能、citation、复现、默认关闭验证 |
+| 4. Runtime 架构设计 | complete | 高内聚低耦合模块边界、配置开关、集成点 |
+| 5. MVP-0/MVP-1 实现计划 | complete | routing trace、expert store、slot manager、fixed window |
+| 6. 实验计划 | complete | baseline、workload、metrics、ablation、artifact layout |
+| 6.5. 最小 Benchmark 协议 | complete | `docs/sew-offload/06-benchmark-design.md`、`docs/sew-offload/benchmark_config.yaml`：只固定模型、数据集、workload buckets、13.5GB offload budget、指标 |
+| 7. 质量门禁 | in_progress | correctness、性能、citation、复现、默认关闭验证 |
+| 8. 现有 offloading 实测 | complete | Qwen3-30B-A3B 单卡 baseline、UVA/offload-prefetch 日志、失败/瓶颈定位 |
+| 9. Native offload benchmark pilot | complete | `tools/sew_offload/run_minimal_offload_benchmark.py`、native prefetch expert/all-param 失败证据、no-offload 三指标 sanity |
+| 10. SEW runtime MVP | pending | trace-and-measure、固定 expert slot、同步 miss load、异步 prefetch |
 
 ## 关键约束
 
+- 后续可比较的 SEW-Offload 实验都必须先检查 `docs/sew-offload/benchmark_config.yaml` 是否匹配；当前配置只固定模型、数据集、workload buckets、13.5GB offload budget 和指标，暂不引入复杂 benchmark framework。
 - 不重训练、不微调、不修改 router，不改变 top-k expert 激活语义。
 - 第一目标是单机单卡 HBM 不足时的 Qwen3-30B-A3B expert offloading。
 - 所有 runtime 功能默认关闭，通过 `VLLM_ASCEND_*` 环境变量或显式配置启用。
@@ -68,9 +73,38 @@
 - 严控边界：暂不改 `model_runner` 主路径、暂不改 scheduler、暂不大改 Ascend C kernels。
 - 目标文档：`docs/sew-offload/00-charter.md`、`01-system-design.md`、`02-implementation-plan.md`、`03-experiment-plan.md`、`04-reproduction.md`。
 
+## 当前文档状态
+
+| 文档 | 状态 | 说明 |
+| --- | --- | --- |
+| `docs/sew-offload/00-charter.md` | complete | 项目目标、研究问题、目标模型、贡献与非目标 |
+| `docs/sew-offload/01-system-design.md` | complete | 固定 slot、deadline-aware prefetch、hit-first phased execution |
+| `docs/sew-offload/02-implementation-plan.md` | complete | runtime 模块、TDD 任务、hook、测试与 commit 切分 |
+| `docs/sew-offload/03-experiment-plan.md` | complete | workloads、baselines、metrics、ablation、图表计划 |
+| `docs/sew-offload/04-reproduction.md` | complete | 环境检查、trace、simulator、NPU 实测、故障排查 |
+| `docs/sew-offload/05-existing-offload-baseline.md` | complete | Qwen3-30B-A3B 单卡现有 offload 实测结果与瓶颈诊断 |
+| `docs/sew-offload/06-benchmark-design.md` | complete | 最小可复用 benchmark：固定模型、数据集、workload buckets、13.5GB offload budget、指标 |
+| `docs/sew-offload/benchmark_config.yaml` | complete | 上述最小 benchmark 的机器可读配置 |
+| `docs/sew-offload/07-native-offload-benchmark-results.md` | complete | 最小 benchmark runner、native prefetch offload 失败结果、no-offload throughput/TTFT/TPOT sanity |
+
 ## 未决问题
 
 - 目标 CCF-A 会议优先级：系统会议优先还是体系结构会议优先。
 - 论文初稿语言：英文为主，是否保留中文 slide。
 - 是否允许在 `paper/` 和 `slide/` 下立即创建 skeleton。
 - 单卡 HBM 不足的实验模拟方式：真实限制 cache budget、保留 KV cache 压力、或人工减少 expert resident slots。
+
+## 当前实测任务：现有 offloading baseline
+
+- 模型路径：用户给出 `/data/Qwen3-30B-A3B`，当前机器实际存在 `/data/shared-models/Qwen3-30B-A3B`。
+- 运行栈：`/root/miniconda3/envs/vllm-hust-dev/bin/python`，editable `vllm-hust` + `vllm-ascend-hust`。
+- 首选设备：NPU 4，其次 NPU 6/3；避免占用较高的 0/1/2/5/7。
+- 目标：用现有 vLLM weight offloading 方法跑 baseline，不修改 runtime 主代码；收集启动、加载、OOM/报错、HBM 曲线、吞吐/延迟数据，判断现有方法在 Ascend 单卡 MoE expert offloading 场景到底缺什么。
+
+## 阶段 8 实测结论
+
+- artifact：`artifacts/sew_offload/existing_offload_20260529T143705Z`
+- no-offload：成功，`LOAD_OK 49.062s`，`GENERATE_OK 17.158s`，日志显示模型权重 `56.9001 GB`，NPU 4 HBM 峰值约 `63886 MB`。
+- UVA expert offload：失败于 `get_accelerator_view_from_cpu_tensor`，当前 NPU 平台不支持该 UVA accelerator view。
+- prefetch expert offload：能把模型权重驻留降到 `43.4001 GB`、HBM 峰值约 `50697 MB`，但原始路径失败于裸 `torch.cuda.is_current_stream_capturing()`；补齐 CUDA-to-NPU wrapper 后，进一步失败于 `npu_grouped_matmul` 收到 CPU weight。
+- 研究判断：现有 offload 能证明“省 HBM 有价值”，但不是 Ascend MoE 可直接采用的运行时抽象。SEW-Offload 应聚焦 MoE execution boundary 上的 fixed expert slot、post-processed layout-stable NPU buffers、expert-aware prefetch 和 hit-first phased execution。

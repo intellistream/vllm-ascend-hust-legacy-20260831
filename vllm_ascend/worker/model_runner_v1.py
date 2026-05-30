@@ -3951,6 +3951,9 @@ def _torch_cuda_wrapper():
         def __init__(self, *args, **kwargs) -> None:
             pass
 
+    def _not_capturing(*args, **kwargs) -> bool:
+        return False
+
     try:
         # replace cuda APIs with xpu APIs, this should work by default
         torch.Event = torch.npu.Event
@@ -3961,6 +3964,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = torch.npu.stream
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
         yield
     except Exception as e:
         torch.cuda.Event = _EventPlaceholder
@@ -3970,6 +3974,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = _StreamPlaceholder
         torch.cuda.synchronize = _StreamPlaceholder
         torch.cuda.mem_get_info = _StreamPlaceholder
+        torch.cuda.is_current_stream_capturing = _not_capturing
         raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
     finally:
         # if anything goes wrong, just patch it with a placeholder
@@ -3980,6 +3985,7 @@ def _torch_cuda_wrapper():
         torch.cuda.stream = torch.npu.stream
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        torch.cuda.is_current_stream_capturing = torch.npu.is_current_stream_capturing
 
 
 # TODO: This method will be removed subsequently and implemented in platform.

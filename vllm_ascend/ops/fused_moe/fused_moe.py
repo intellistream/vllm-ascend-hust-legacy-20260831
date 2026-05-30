@@ -29,8 +29,15 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, UnquantizedFusedMoEMethod, get_compressed_expert_map
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsCapturer
-from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import DefaultMoERunner  # type: ignore
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner  # type: ignore
+try:
+    from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+except ModuleNotFoundError:
+    class SharedFusedMoE:
+        """Compatibility mixin for vLLM versions where shared experts moved
+        into FusedMoE/MoERunner instead of a separate SharedFusedMoE class."""
+
+        pass
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -229,13 +236,27 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         return final_hidden_states
 
 
-# Please remove this inheritance after extending vllm, todo(wxs)
-class AscendMoERunner(DefaultMoERunner):
+class AscendMoERunner(MoERunner):
     @property
     def use_dp_chunking(self) -> bool:
         """Ascend uses its own forward_impl path, not the FlashInfer Cutlass
         chunked path. Always return False to stay on forward_impl."""
         return False
+
+    @property
+    def _fused_output_is_reduced(self) -> bool:
+        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        return moe_comm_type in {
+            MoECommType.ALLTOALL,
+            MoECommType.MC2,
+            MoECommType.FUSED_MC2,
+        } or (moe_comm_type == MoECommType.ALLGATHER and _EXTRA_CTX.flash_comm_v1_enabled)
+
+    def _maybe_reduce_shared_expert_output(
+        self,
+        shared_output: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        return shared_output
 
     # TODO: Remove this after drop v0.19.1 support
     def forward_impl(
@@ -250,18 +271,22 @@ class AscendMoERunner(DefaultMoERunner):
         This delegates to the layer's forward_impl method which contains the
         Ascend-specific MoE computation logic.
         """
-        result = layer.forward_impl(hidden_states, router_logits)
+        if self.shared_experts is None:
+            result = layer.forward_impl(hidden_states, router_logits)
+        else:
+            result = layer.shared_forward_impl(hidden_states, router_logits)
         # If the layer has shared experts, forward_impl returns a tuple (shared_out, routed_out)
         # Otherwise, it returns just routed_out
         # The torch op expects the same return type based on whether it's moe_forward or moe_forward_shared
         return result
 
-    def forward_dispatch(
+    def _forward_impl(
         self,
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         with self._sequence_parallel_context():
             return self.forward_impl(
@@ -370,12 +395,15 @@ class AscendFusedMoE(FusedMoE):
             self.layer_name,
             self.moe_config,
             self.router,
-            self._routed_input_transform,
+            kwargs.get("routed_input_transform"),
             kwargs.pop("gate", None),
             kwargs.pop("shared_experts", None),
             self.quant_method,
-            self.reduce_results,
             self.vllm_config.parallel_config.enable_dbo,
+            routed_output_transform=kwargs.get("routed_output_transform"),
+            routed_scaling_factor=kwargs.get("routed_scaling_factor", 1.0)
+            if kwargs.get("apply_routed_scale_to_output", False)
+            else 1.0,
         )
 
     def _get_quant_type(self) -> QuantType:
@@ -539,7 +567,7 @@ class AscendFusedMoE(FusedMoE):
                 self.moe_load.add_(local_load)
         routed_out = _EXTRA_CTX.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
-            reduce_results=self.reduce_results,
+            reduce_results=getattr(self, "reduce_results", False),
             padded_hidden_states_shape=padded_hidden_states_shape,
         )
 
@@ -599,8 +627,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             self.gate,
             self._shared_experts,
             self.quant_method,
-            self.reduce_results,
             self.vllm_config.parallel_config.enable_dbo,
+            routed_output_transform=getattr(self, "_routed_output_transform", None),
         )
 
         if self.multistream_overlap_shared_expert:

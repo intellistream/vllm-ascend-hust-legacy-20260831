@@ -1,0 +1,91 @@
+# Minimal reusable benchmark config for current Ascend MoE offloading experiments.
+# 当前阶段只固定模型、数据集、workload buckets、13.5GB offload budget 和指标。
+
+benchmark:
+  id: sew_bench_ascend_moe_30b
+  config_version: 0.2.0
+  design_doc: docs/sew-offload/06-benchmark-design.md
+  note: >
+    Before running any comparable SEW-Offload experiment, check whether it
+    follows this config. This file intentionally does not define future SEW
+    methods, artifact layout, or complex validity gates.
+
+model:
+  name: Qwen3-30B-A3B
+  path: /data/shared-models/Qwen3-30B-A3B
+  architecture: qwen3_moe
+  dtype: bfloat16
+  tensor_parallel_size: 1
+  device: single Ascend 910B3
+  num_layers: 48
+  num_experts_per_layer: 128
+  top_k: 8
+  constraints:
+    retrain_router: false
+    change_top_k: false
+    change_expert_activation: false
+    drop_tokens: false
+    drop_experts: false
+
+dataset:
+  source: lmsys/lmsys-chat-1m
+  seed: 20260529
+  num_requests: 1000
+  manifest_path: artifacts/sew_offload/benchmarks/sew_bench_ascend_moe_30b/requests.jsonl
+  smoke_dataset_allowed_for_debug: true
+  smoke_dataset_publishable: false
+
+workload_buckets:
+  - name: short_chat
+    num_requests: 200
+    prompt_tokens: [128, 256]
+    output_tokens: 128
+  - name: medium_chat
+    num_requests: 300
+    prompt_tokens: [512, 1024]
+    output_tokens: 128
+  - name: long_prefill
+    num_requests: 200
+    prompt_tokens: [2048, 4096]
+    output_tokens: 128
+  - name: decode_heavy
+    num_requests: 200
+    prompt_tokens: [128, 512]
+    output_tokens: 512
+  - name: burst_mixed
+    num_requests: 100
+    prompt_tokens: mixed
+    output_tokens: 256
+
+concurrency:
+  main: [1, 4, 8]
+
+offload_budget:
+  target_offloaded_weight_gb: 13.5
+  target_resident_weight_gb: 43.4
+  tolerance_gb: 0.5
+  basis:
+    no_offload_resident_weight_gb: 56.9001
+    native_prefetch_resident_weight_gb: 43.4001
+    no_offload_peak_hbm_mb: 63886
+    native_prefetch_peak_hbm_mb: 50696
+
+metrics:
+  end_to_end:
+    - ttft_ms
+    - tpot_ms
+    - inter_token_latency_ms
+    - latency_p50_ms
+    - latency_p90_ms
+    - latency_p99_ms
+    - output_tokens_per_second
+    - success_rate
+  offloading:
+    primary: exposed_stall_per_output_token_ms
+    required:
+      - resident_weight_gb
+      - peak_hbm_mb
+      - host_to_hbm_bytes
+      - host_to_hbm_copy_time_ms
+      - prefetch_wait_time_ms
+      - exposed_stall_per_output_token_ms

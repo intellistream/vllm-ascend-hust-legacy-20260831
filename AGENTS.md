@@ -2,6 +2,14 @@
 
 This document provides instructions for contributors to the vLLM Ascend project. Please read and follow these guidelines to ensure code quality, maintainability, and consistency.
 
+## SEW-Offload Benchmark Rule
+
+For comparable SEW-Offload experiments, first check
+`docs/sew-offload/benchmark_config.yaml`. The current benchmark intentionally
+only fixes the model, dataset, workload buckets, 13.5GB offload budget, and
+metrics; do not add broader benchmark-framework requirements unless the
+research stage needs them.
+
 ---
 
 ## Table of Contents
