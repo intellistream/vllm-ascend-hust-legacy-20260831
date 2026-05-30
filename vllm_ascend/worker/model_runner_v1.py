@@ -43,6 +43,7 @@ from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_co
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.offloader import get_offloader
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.sequence import IntermediateTensors
@@ -3073,6 +3074,8 @@ class NPUModelRunner(GPUModelRunner):
                 enable_enpu=self.enable_enpu,
             )
 
+        get_offloader().post_init()
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -3944,8 +3947,8 @@ def _get_gpu_model_runner_module_name(model_runner) -> str:
 def _torch_cuda_wrapper():
     class _EventPlaceholder:
         def __init__(self, *args, **kwargs) -> None:
-            self.record = lambda: None
-            self.synchronize = lambda: None
+            self.record = lambda *args, **kwargs: None
+            self.synchronize = lambda *args, **kwargs: None
 
     class _StreamPlaceholder:
         def __init__(self, *args, **kwargs) -> None:
@@ -3977,8 +3980,8 @@ def _torch_cuda_wrapper():
         torch.cuda.is_current_stream_capturing = _not_capturing
         raise RuntimeError(f"NPUModelRunner init failed, error is {e}")
     finally:
-        # if anything goes wrong, just patch it with a placeholder
-        torch.cuda.Event = _EventPlaceholder
+        # Keep CUDA-shaped APIs routed to NPU implementations after init.
+        torch.cuda.Event = torch.npu.Event
         torch.cuda.Stream = torch.cuda.Stream
         torch.cuda.default_stream = torch.npu.default_stream
         torch.cuda.current_stream = torch.npu.current_stream
