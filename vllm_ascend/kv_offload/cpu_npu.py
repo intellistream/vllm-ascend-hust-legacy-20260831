@@ -5,8 +5,8 @@ import numpy as np
 import torch
 from vllm.logger import logger
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.attention.backend import AttentionBackend  # type: ignore
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
+from vllm.v1.kv_offload.base import CanonicalKVCaches, GPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler, TransferResult, TransferSpec
 
 
@@ -54,14 +54,12 @@ def expand_block_ids(
 class CpuNpuOffloadingHandler(OffloadingHandler):
     def __init__(
         self,
-        gpu_block_size: int,
-        cpu_block_size: int,
+        kv_caches: CanonicalKVCaches,
+        block_size_factor: int,
         num_cpu_blocks: int,
-        gpu_caches: dict[str, torch.Tensor],
-        attn_backends: dict[str, type[AttentionBackend]],
     ):
-        assert cpu_block_size % gpu_block_size == 0
-        self.block_size_factor = cpu_block_size // gpu_block_size
+        assert block_size_factor >= 1
+        self.block_size_factor = block_size_factor
 
         # npu streams for npu->cpu and cpu->npu
         self.d2h_stream = torch.npu.Stream()
@@ -76,54 +74,36 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
 
         pin_memory = is_pin_memory_available()
 
-        # allocate cpu tensors
-        logger.info("Allocating %d CPU tensors...", len(gpu_caches))
+        # allocate CPU tensors matching canonical NPU page tensors.
+        logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         self.npu_tensors: list[torch.Tensor] = []
         self.cpu_tensors: list[torch.Tensor] = []
-        for layer_name, gpu_tensor in gpu_caches.items():
-            self.npu_tensors.append(gpu_tensor)
 
-            gpu_shape = gpu_tensor[0].shape
-
-            num_blocks_idx = 0
-            cpu_shape = list(gpu_shape)
-            cpu_shape[num_blocks_idx] = num_cpu_blocks * self.block_size_factor
-
-            logger.debug("Allocating CPU tensor of shape %r", cpu_shape)
-            self.cpu_tensors.append(
-                (
-                    torch.zeros(
-                        cpu_shape,
-                        dtype=gpu_tensor[0].dtype,
-                        device="cpu",
-                        pin_memory=pin_memory,
-                    ),
-                    torch.zeros(
-                        cpu_shape,
-                        dtype=gpu_tensor[0].dtype,
-                        device="cpu",
-                        pin_memory=pin_memory,
-                    ),
-                )
+        for kv_cache_tensor in kv_caches.tensors:
+            npu_tensor = kv_cache_tensor.tensor.view(torch.int8).view(
+                (-1, kv_cache_tensor.page_size_bytes)
             )
+            cpu_page_size = kv_cache_tensor.page_size_bytes * self.block_size_factor
+            cpu_tensor = torch.zeros(
+                (num_cpu_blocks, cpu_page_size),
+                dtype=torch.int8,
+                device="cpu",
+                pin_memory=pin_memory,
+            )
+            self.npu_tensors.append(npu_tensor)
+            self.cpu_tensors.append(cpu_tensor)
+
+        self.kv_cache_groups_data_refs = kv_caches.group_data_refs
 
         # Pre-compute base pointers and block sizes for batch copies.
-        # In vllm-ascend, each layer's KV cache is stored as a tuple
-        # (key_cache, value_cache), so we flatten them into individual
-        # sub-tensors for batching: [layer0_key, layer0_value,
-        # layer1_key, layer1_value, ...].
         npu_base_ptrs = []
         cpu_base_ptrs = []
         block_sizes_in_bytes = []
 
         for npu_tensor, cpu_tensor in zip(self.npu_tensors, self.cpu_tensors):
-            for kv_idx in range(2):  # 0=key, 1=value
-                npu_t = npu_tensor[kv_idx]
-                cpu_t = cpu_tensor[kv_idx]
-                npu_base_ptrs.append(npu_t.data_ptr())
-                cpu_base_ptrs.append(cpu_t.data_ptr())
-                # block size in bytes = stride of dim 0 (elements) * element size
-                block_sizes_in_bytes.append(npu_t.stride(0) * npu_t.element_size())
+            npu_base_ptrs.append(npu_tensor.data_ptr())
+            cpu_base_ptrs.append(cpu_tensor.data_ptr())
+            block_sizes_in_bytes.append(npu_tensor.shape[1])
 
         self._npu_base_ptrs = np.array(npu_base_ptrs, dtype=np.int64)
         self._cpu_base_ptrs = np.array(cpu_base_ptrs, dtype=np.int64)
