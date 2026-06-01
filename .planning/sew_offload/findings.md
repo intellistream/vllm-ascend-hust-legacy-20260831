@@ -171,3 +171,210 @@
 - native all-param layer prefetch：group4/num1/step1、offload all layer params，resident weight `42.9722 GB`，也在生成前失败；普通 `wrapper_NPU__matmul` 收到 CPU tensor，并伴随 Ascend vector core / MTE DDR address out-of-range 异常。
 - no-offload sanity：resident weight `56.9001 GB`，1 条 short_chat 成功，128 output tokens，output throughput `7.6207 tok/s`，TTFT `465.78 ms`，TPOT `128.59 ms`。这只证明 runner 能产出三指标，不是 offloading 结果。
 - 关键结论：当前 vLLM 原生 offloading 对 Qwen3-30B-A3B 单卡 Ascend MoE 还不能产生可报告性能；真实优化起点是 fixed NPU expert slots、layout-stable post-processed weight buffers、MoE execution boundary 集成、native torch.npu transfer/synchronization，而不是先调 prefetch policy。
+
+## 2026-05-31 再核实：当前确实不支持 Ascend MoE expert offloading 服务
+
+- 代码层面确认 `vllm-hust` 的 weight offloading 只有 `auto`、`uva`、`prefetch` 三类，配置入口是 `cpu_offload_gb/cpu_offload_params` 与 `offload_group_size/offload_num_in_group/offload_prefetch_step/offload_params`；它们是通用参数/层级 offload，不读取当前 MoE 层 `topk_ids`、per-expert token counts、slot hit/miss 或 expert deadline。
+- 官方文档交叉验证：vLLM `OffloadConfig` 文档同样描述 `auto/uva/prefetch` 三类 weight offload；vLLM Ascend KV Cache CPU Offload 文档是针对 KV cache block 的 `NPUOffloadingSpec`；vLLM Ascend Weight Prefetch 文档是将已在设备侧的权重预取到 L2/cache，不是 host-to-HBM expert weight offload。
+- `PrefetchOffloader` 通过 module forward hook 插入 `wait_prefetch/start_prefetch`，按静态层组和参数名选择 offload 对象；内部使用 `torch.cuda.Stream/Event/current_stream/is_current_stream_capturing/stream`。即使被 Ascend wrapper 部分兼容，它仍不是 Ascend-native MoE expert working-set runtime。
+- `UVAOffloader` 依赖 `get_accelerator_view_from_cpu_tensor(cpu_data)`；本地 Qwen3-30B-A3B 实测明确失败：`ValueError: get_accelerator_view_from_cpu_tensor is currently not supported in: npu`。
+- `vllm-ascend-hust` 具备 MoE routing、per-expert token grouping、`npu_grouped_matmul`、EP/EPLB、ACLGraph/NPUGraph、HBM/cache weight prefetch、KV offload 等能力，但没有 host expert store、固定 HBM expert slots、expert miss/replacement、deadline-aware host->HBM expert load、hit-first phased grouped MoE execution。
+- Ascend weight prefetch 文档和 `vllm_ascend/ops/weight_prefetch.py` 说明现有 prefetch 是把已在设备侧/HBM 的权重通过 CMO/npu_prefetch 预热到 cache，利用 MoE gating/RMSNorm/SwiGLU 等 vector 窗口隐藏访问，不是 CPU/host 到 HBM 的 expert offloading。
+- 当前实测证据仍成立：expert-only native prefetch 可把 resident weight 从 `56.9001 GB` 降到 `43.4001 GB`，但 profile forward 在 `wrapper__npu_grouped_matmul` 前失败，原因是 expert weight 仍在 CPU 而 hidden states 在 `npu:0`。all-param prefetch 降到 `42.9722 GB`，但 dense matmul 也出现 CPU/NPU tensor mixing 和 MTE DDR out-of-range 异常。
+- 结论：问题真实存在。不是简单参数没开，而是缺少 Ascend-specific MoE expert offloading 抽象。下一步应实现 `trace -> simulator -> fixed NPU expert slots + sync miss load -> async prefetch -> hit-first phases`，而不是继续调 `offload_group_size` 或补零散 CUDA wrapper。
+
+## 2026-05-31 总体架构决策
+
+- 新设计文档落盘：`docs/sew-offload/08-ascend-moe-offload-architecture.md`。
+- 系统边界继续选择 `AscendUnquantizedFusedMoEMethod.apply()` 中 `select_experts(...) -> build_fused_experts_input(...) -> moe_comm_method.fused_experts(...)` 之间；此处能看到 `topk_ids/topk_weights/layer_id/expert_map/weights/backend metadata`，是最低侵入的 expert execution boundary。
+- 控制面模块：`TraceCollector`、`Deadline-Aware PrefetchPlanner`、`CostModel`、`Replacement/Residency Policy`、`Hit-First PhaseScheduler`。
+- 数据面模块：`HostExpertStore`、`ExpertSlotBank`、`TransferEngine(torch.npu streams/events)`、`Layout/Postprocess Validator`、可选 `npu_prefetch` cache warmup。
+- 关键不变量：不改 router/top-k/gate weights；每个 active expert 计算前必须映射到 ready slot；slot 地址稳定；slot layout/dtype/stride/shape 与 Ascend grouped MoE backend 契约一致；phase split 输出必须等价于 single phase。
+
+## 2026-05-31 MVP-A 实现发现
+
+- MVP-A 选择最小可验证 trace-only 范围：在 `select_experts(...)` 后记录 `topk_ids` 派生出的 active experts 和 per-expert token counts，并把原始 `topk_ids/topk_weights` 对象原样返回。
+- `TraceCollector.record()` 会 detach `topk_ids`，必要时搬到 CPU 后统计；该同步只在 `VLLM_ASCEND_MOE_OFFLOAD_ENABLED=1` 且 `VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY=1` 时发生，默认关闭路径不统计。
+- 全局 runtime 使用懒初始化，读取集中定义在 `vllm_ascend/envs.py` 的 `VLLM_ASCEND_MOE_OFFLOAD_*` 变量；`trace_max_records` 用 bounded deque 控制内存。
+- MVP-A 不含 host expert store、slot bank、transfer engine、replacement、phase scheduler 或任何权重/执行路径变更，因此符合“无偏移”要求。
+- 现有 `tests/ut/test_envs.py` 的类型推断漏掉 `float(...)` env handlers，导致已有 `VLLM_ASCEND_UTILITY_*` float 环境变量测试失败；已将测试输入生成逻辑扩展到 float 类型。
+
+## 2026-05-31 下一步规划判断
+
+- 下一步最优顺序是先做 trace export 和 offline simulator，而不是直接做 fixed slot 或 async prefetch。
+- 原因：fixed slot 是第一个改变执行路径的阶段，必须先有可复现 trace 和 slot/policy 证据，避免在真实 NPU copy 与 grouped MoE backend 上盲调。
+- MVP-B 只改变观测与 artifact，不改变推理；MVP-C 只做离线策略评估；MVP-D 才进入同步 fixed slot correctness。
+- fixed slot correctness 的 hard gate 是：`npu_grouped_matmul` 前不能出现 CPU expert weight，slot tensor 地址稳定，输出与 no-offload 容差内一致。
+- async transfer 和 hit-first phases 必须等 fixed slot correctness 成立后再做，否则会把 correctness bug 和 overlap scheduling bug 混在一起。
+
+## 2026-05-31 MVP-B 实现发现
+
+- JSONL trace schema 复用 `TraceRecord.to_jsonable()`，因此字段稳定为 `layer_id/step_id/mode/num_tokens/top_k/num_experts/active_experts/expert_token_counts`。
+- `TraceCollector.write_jsonl(path)` 返回记录数；空 collector 会写出空文件，这使默认关闭路径也能明确产出 0 条记录。
+- `collect_moe_trace.py` 在运行 vLLM 前显式设置 `VLLM_ASCEND_MOE_OFFLOAD_ENABLED=1` 和 `VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY=1`，并 `reset_moe_offload_runtime()`，避免进程内旧 runtime 缓存错误配置。
+- CLI 的 synthetic smoke manifest 生成不依赖 tokenizer，避免 prepare-only 阶段加载大模型；真实 trace collection 才实例化 `vllm.LLM`。
+- 当前 prepare-only smoke 已验证 manifest 生成链路；真实 Qwen3-30B-A3B trace collection 仍需 NPU 空闲窗口。
+
+## 2026-05-31 MVP-C 实现发现
+
+- Offline simulator 可以完全独立于 `torch_npu` 与真实 NPU 执行路径运行，适合先做 slot budget/policy sweep。
+- 当前 simulator 的 hit/miss 粒度是 `(layer_id, expert_id)` whole-expert residency；这与 MVP-D 的 whole-expert fixed slot 一致。
+- `phase_opportunity_count` 的首版定义是同一 trace record 内同时出现 resident hit 和 miss；它只表示 hit-first phase 有机会，不表示一定值得 split。
+- 默认 expert size 估算为 `14,680,064` bytes，来自 Qwen3-30B-A3B 单个 expert 的 bf16 whole-expert 近似：`w13 + w2`。
+- `sticky_layer_lru` 当前是保守启发式：incoming 同层 expert miss 时，优先驱逐其他层 resident expert；这用于捕捉 decode temporal locality，但后续需要真实 trace sweep 验证。
+
+## 2026-05-31 MVP-D 设计反思
+
+- Fixed slot 接入不能只把 `w13/w2` 从 `num_experts` 维替换成 `num_slots` 维，并保持原始 `topk_ids` 不变；这样 grouped MoE backend 会用 expert id 索引 slot tensor，语义会错。
+- 当前代码中 `MoECommMethod.fused_experts()` 已支持 `routing.log2phy`，会在 token dispatch 前把 `topk_ids` remap；这可能是 expert-to-slot remap 的正确接入口。
+- 因此 MVP-D 分成两层：
+  1. 安全底座：HostExpertStore、ExpertSlotBank、LayoutValidator、TransferEngine，同步 load 可单测。
+  2. 执行接入：slot-backed weights + log2phy/topk remap + backend-ready layout 验证。该层尚未接入主路径。
+- Layout 校验必须区分 copy-compatible 与 backend-ready：CPU host bundle 到 NPU slot copy 时设备类型可以不同；进入 grouped MoE backend 前才必须验证 slot tensors 在 NPU 上。
+- Runtime 的 fixed-slot path 当前采用 fail-closed guard：只有 enabled、non-trace、num_slots>0 时认为应进入 fixed slot，但在 log2phy remap 完成前 `prepare_weights_for_execution()` 明确抛 `NotImplementedError`，避免静默错误。
+
+## 2026-05-31 MVP-D.2 Remap 设计反思
+
+- `log2phy` remap 是必要条件，但不是充分条件。当前 `MoECommMethod.fused_experts()` 会把 `topk_ids` remap 到 physical id，但 `TokenDispatcherWithAllGather` 默认仍使用 `self.num_experts_local` 作为 `expert_num`，All2All/MC2 也有各自基于原 MoE config 的 expert count 逻辑。
+- 因此 slot-backed weights 的安全执行契约至少包含三件事：
+  1. `w13/w2` 第 0 维是 physical slot id，地址稳定。
+  2. `topk_ids` 通过 `logical_to_physical` remap 到 slot id。
+  3. token dispatch 生成的 `expert_tokens/group_list` 使用 physical slot count，而不是 logical expert count。
+- 已新增 `physical_expert_count` 路由字段，并只在 AllGather 无 `expert_map`、无 redundant experts 的窄路径启用。这样默认路径完全不变，slot path 也不会误入 EP/EPLB 复杂语义。
+- `ExpertSlotBank` 从“每 slot 一个独立 tensor”升级为 `[num_slots, ...]` backing tensors；单 slot object 只持有 view。这是为了满足 Ascend grouped MoE 对稳定连续权重张量的输入需求。
+- `HostExpertStore` 显式 `.cpu().clone()`，因此它是 host expert store 的真实方向；但当前没有从原 layer 参数中释放 full expert 权重，所以只能声明为 correctness prototype，不能声称已经达到 13.5GB offload budget。
+- 下一步接主路径前必须再加 hard gate：
+  - 仅支持 unquantized、单卡、AllGather、无 `expert_map`、无 dynamic EPLB、无 redundant experts。
+  - bias/scale 暂不支持或必须随 slot 同步搬运。
+  - backend-ready 校验必须确认 `PreparedSlotWeights.w1/w2` 在 NPU 上，且 `physical_expert_count == w1.shape[0] == w2.shape[0]`。
+
+## 2026-05-31 MVP-D.3 主路径窄接入发现
+
+- 已把 `PreparedSlotWeights` 接入 `AscendUnquantizedFusedMoEMethod.apply()`，但只在 fixed-slot enabled 且 `MoECommType.ALLGATHER` 的窄路径启用。
+- 主路径 hard gates 是正确性设计的一部分，不是临时偷懒：
+  - MC2/FUSED_MC2/All2All 的 dispatch/combine metadata、expert_map、global expert num 语义更复杂，不能假设 `physical_expert_count` 足够。
+  - bias 目前没有进入 `HostExpertStore`/slot bank，因此开启 bias 时必须 fail closed。
+  - force load balance 会在 trace/active expert 提取后改写 `topk_ids`，当前顺序下会让 prepared slots 与实际 topk 不一致，因此必须拒绝。
+  - zero-expert path 会在 grouped MoE 前改写 expert index/scale 并合并额外输出，当前 fixed-slot path 不能只按原 active experts 准备 slot，必须拒绝。
+- 当前 `apply()` 内 lazy registration 主要服务生命周期安全；真实路径的主要注册点是 `process_weights_after_loading()` 后的 post-processed weights。后续释放原始 full expert 权重时，必须确认 slot bank 已经基于 post-processed layout 初始化。
+- 当前 fixed-slot path 依然会同步读取 `topk_ids` 到 CPU 计算 active expert working set；这与“先正确、后 overlap”一致，但不是最终高性能路径。
+
+## 2026-06-01 MVP-D.4 兼容性反查与 backend-ready 门禁
+
+- 反向检查默认路径后补充回归护栏：`VLLM_ASCEND_MOE_OFFLOAD_ENABLED` 未开启时，`AscendUnquantizedFusedMoEMethod.apply()` 仍把原始 `layer.w13_weight/layer.w2_weight` 传给 backend，`routing.log2phy` 与 `routing.physical_expert_count` 均保持 `None`。
+- `build_fused_experts_input(...)` 的默认 routing 仍是 logical expert space；新增 `physical_expert_count` 不应改变未显式传参的既有调用。
+- `TokenDispatcherWithAllGather` 默认仍使用 `self.num_experts_local` 生成 `expert_num/active_expert_range`；只有 fixed-slot 显式传入 `physical_expert_count` 时才切到 slot space。
+- `PreparedSlotWeights.validate_backend_ready(expected_device_type=...)` 已成为 fixed-slot backend 前置门禁：检查 `physical_expert_count > 0`、`w1/w2` 第 0 维等于 physical expert count，并复用 `LayoutValidator.validate_backend_ready` 检查设备类型。
+- `apply()` 中调用该门禁时使用 `x.device.type` 作为期望设备；这样 CPU mock UT 仍可运行，真实 NPU 推理时 CPU slot tensor 会在 Python 边界被清晰拒绝，而不是让 `npu_grouped_matmul` 抛混乱的 CPU/NPU 混用错误。
+- 新增 `tools/sew_offload/run_fixed_slot_smoke.py`，只用于 MVP-D correctness smoke：通过 env 启用 fixed-slot sync path，生成 `summary.json` artifact；它不是正式 benchmark runner，也不能用于论文性能数据。
+- 自我反思：当前仍未释放原始 full expert 参数，不能声称已经实现 HBM saving；当前的系统价值是验证 slot remap、slot residency 和 backend-ready 契约是否成立。真实节省 HBM 需要后续在 post-load 后释放/替换原 expert 参数，并确认 vLLM weight loader 生命周期安全。
+- 自我反思：真实 NPU smoke 尚未执行；当前只能说 mock backend 和 Python 边界门禁通过，不能声称 `npu_grouped_matmul` 已接受 slot weights。
+
+## 2026-06-01 MVP-D.4 profile dummy routing 反查
+
+- 真实 NPU prefetch+fixed-slot smoke 曾越过模型加载，显示 `Loading model weights took 46.7751 GB`，但在 vLLM profile/dummy run 中失败于 `enable_force_load_balance` 与 fixed-slot 小窗口的冲突。
+- 原因不是真实请求语义，而是 profile run 会把 dummy `topk_ids` 改写成均衡覆盖 logical experts 的随机集合；当 `num_slots` 很小（例如 8）时，dummy active expert working set 会超过 fixed-slot budget。
+- 新设计：仅在 `enable_force_load_balance and fixed_slots` 的 profile 路径中，把 dummy routing 限制为 `[0, top_k)` 且要求 `num_slots >= top_k`；真实请求不走该分支，仍保留 router/top-k 语义和 active expert working set。
+- 单测失败根因：CPU mock backend 使用 CPU hidden states，但 lazy fixed-slot registration 为 CPU/offloaded weight 选择当前 NPU slot，这是实机正确策略；因此单测应显式注册 CPU slot bank，而不是放宽实机 backend-ready 设备门禁。
+- 反向兼容结论：默认路径未开启 offload 时不会进入 profile dummy slot 路径；AllGather dispatcher 仍默认使用 logical expert count，只有 fixed-slot 显式传入 `physical_expert_count` 才切到 slot count。
+
+## 2026-06-01 PrefetchOffloader 生命周期缺口
+
+- 修正 profile dummy routing 后，真实 NPU prefetch+fixed-slot smoke 继续推进，但在 profile run 的现有 vLLM `PrefetchOffloader` forward hook 中失败：`AssertionError: Buffer pool not assigned`。
+- 栈显示失败发生在 `/root/vllm-hust/vllm/model_executor/offloader/prefetch.py::start_onload_to_static()`，说明 module forward hook 已安装并执行，但 `_ModuleOffloader.assign_buffer_slot(...)` 未被调用。
+- 对比上游 `GPUModelRunner.load_model()`：加载模型、可选 cudagraph wrapper 后调用 `get_offloader().post_init()`；`PrefetchOffloader.post_init()` 正是在这里同步 processed CPU storage、分配 `StaticBufferPool`、给 module offloaders 指向 GPU/NPU static buffers，并启动初始 prefetch。
+- Ascend `NPUModelRunner.load_model()` 重写了加载流程，但此前漏掉了这一步。这不是 SEW fixed-slot 自身错误，而是现有 prefetch offload 在 Ascend 重写加载路径上的生命周期缺口；SEW smoke 暴露了它。
+- 最小修正：在 Ascend `load_model()` 的可选 ACLGraph wrapper 之后补齐 `get_offloader().post_init()`，与上游顺序一致。`NoopOffloader.post_init()` 为空，因此默认不开 weight offload 时不改变执行逻辑。
+
+## 2026-06-01 CUDA-to-NPU wrapper Event 兼容缺口
+
+- 补齐 `PrefetchOffloader.post_init()` 后，真实 smoke 进一步推进，日志显示 `[PrefetchOffloader] Initialized 12 modules ... Static buffer pool: 1.2080 GB`，说明 buffer pool 生命周期问题已解。
+- 新失败发生在 `PrefetchOffloader.post_init()` 的初始 prefetch：`torch.cuda.current_stream().record_event(fork_event)` 调到 `torch_npu.npu.Stream.record_event`，后者执行 `event.record(self)`，但 `_torch_cuda_wrapper()` 退出后把 `torch.cuda.Event` 改成了 `_EventPlaceholder`，其 `record` lambda 不接受 stream 参数。
+- 这属于 CUDA-to-NPU wrapper 的 API family 不一致：`torch.cuda.current_stream/default_stream/stream` 在 finally 中保持为 NPU 实现，但 `torch.cuda.Event` 却变回 placeholder，导致 NPU stream 与 placeholder event 混用。
+- 最小修正：wrapper 退出后也保持 `torch.cuda.Event = torch.npu.Event`，与其它 stream API 一致。targeted UT 已证明修正前失败、修正后通过。
+
+## 2026-06-01 internal-router gate 与 fixed-slot smoke 结论
+
+- `ExpertKey(layer_id=0, expert_id=266)` 的根因不是 slot mapping 自身，而是 Ascend MoE runner 漏掉上游 `MoERunner._forward_impl()` 中的 internal-router gate 生命周期：Qwen3Moe internal-router 场景传入 `router_logits=hidden_states`，如果不先执行 gate，`select_experts()` 会在 hidden size 2048 维上取 top-k，因此产生 266、362、2003 这类小于 2048 但大于 127 的非法 expert id。
+- 正确修复位置是 `AscendMoERunner._forward_impl()`，不是 `AscendFusedMoE.forward_impl()`；真实调用栈由 custom op 进入 `layer.runner._forward_impl()`，再委托到 `layer.forward_impl(...)`。
+- fixed-slot 越界 id 护栏仍有价值：它不是根因修复，但能把错误从 host-store `KeyError` 提前为带 `layer_id/num_logical_experts/expert_ids` 的 `ValueError`，避免后续类似问题以模糊查表错误出现。
+- 真实 Qwen3-30B-A3B NPU smoke 已通过：
+  - artifact：`artifacts/sew_offload/runs/fixed_slot_sync_smoke_20260601_runnergate_slots8_inline_prefetch/summary.json`
+  - 状态：`ok`
+  - 请求：1
+  - 输出 token：1
+  - `load_seconds=125.49`
+  - `duration_s=1.77`
+  - 日志显示 `Loading model weights took 46.7751 GB`，`PrefetchOffloader` 初始化 12 modules，static buffer pool `1.2080 GB`。
+- 设计边界：这只证明 MVP-D fixed-slot sync correctness 的最小闭环已经通过真实硬件，覆盖 profile dummy run、slot load、slot remap、AllGather physical count 和 grouped MoE backend。它不是性能结果，也不能证明 SEW 自身已节省 HBM，因为当前 full expert 参数尚未从原模型结构释放，HBM 降低主要来自组合使用的现有 vLLM `prefetch` backend。
+
+## 2026-06-01 MVP-D.5 correctness 对照与默认路径反查
+
+- correctness 对照应以独立进程分别运行 baseline 和 candidate，而不是在同一 Python 进程中构造两个 `LLM` 实例；原因是 vLLM/NPU runtime、offloader 全局状态和 HBM 占用会互相污染。
+- `run_fixed_slot_smoke.py` 已扩展为三种单次运行模式：
+  - `no_offload`：清理所有 `VLLM_ASCEND_MOE_OFFLOAD_*` 环境变量，且不向 `LLM(...)` 传入 native weight offload kwargs；这比把 env 设成 `"0"` 更贴近真实默认路径，也避免 vLLM unknown-env warning。
+  - `trace_only`：启用 SEW trace-only，但 `num_slots=0`，用于后续观测对照。
+  - `fixed_slot_sync`：显式启用 fixed-slot sync，继续组合现有 `prefetch` offloader 作为当前 correctness 原型的 host/offload 触发方式。
+- 新增 `outputs.jsonl` artifact，记录 `request_id/output_text/output_token_ids/output_tokens`。新增 `tools/sew_offload/compare_smoke_outputs.py`，默认只接受 token id 完全一致；不做文本相似度或容忍式比较，避免 correctness 门禁漂移。
+- 真实 Qwen3-30B-A3B 单卡对照结果：
+  - no-offload baseline：`artifacts/sew_offload/runs/no_offload_smoke_20260601_inline_1tok_cleanenv/summary.json`，状态 `ok`，`load_seconds=33.4295`，日志显示 `Loading model weights took 56.9001 GB`，输出 token id `[353]`。
+  - fixed-slot candidate：`artifacts/sew_offload/runs/fixed_slot_sync_smoke_20260601_inline_1tok_compare/summary.json`，状态 `ok`，`num_slots=8`，`load_seconds=137.3632`，日志显示 `Loading model weights took 46.7751 GB` 和 `PrefetchOffloader` static buffer pool `1.2080 GB`，输出 token id `[353]`。
+  - strict compare：`artifacts/sew_offload/runs/fixed_slot_sync_smoke_20260601_inline_1tok_compare/correctness_compare.json`，状态 `ok`，`matched=1`，`mismatched=0`。
+- 设计边界继续成立：该对照证明 1-token 最小输出一致性，不是性能结论；`fixed_slot_sync` 的 HBM 降低仍主要来自现有 vLLM prefetch backend，SEW fixed-slot 尚未释放/替换原始 full expert 参数。
+
+## 2026-06-01 fixed-slot working-set 容量边界
+
+- 2 prompt × 8 token smoke 中，baseline no-offload 能成功完成两条请求，但 fixed-slot `num_slots=8` candidate 在第二条较长 prompt 的 prefill 阶段失败，底层症状为 `active expert working set size 46 exceeds num_slots=8`。
+- 该现象说明当前 fixed-slot correctness 原型的 slot budget 语义是“单层单次 MoE execution 的 active expert 并集上限”，不是“全模型缓存容量”或“长期 resident experts 总数”。
+- 因此这个失败应被归类为容量预算不足的 fail-closed 成功案例，而不是执行正确性错误：
+  - 不能 drop active expert；
+  - 不能 clamp expert id；
+  - 不能把多个 logical expert 强行映射到同一 physical slot；
+  - 不能在 grouped MoE 前静默跳过超预算 expert。
+- 直接提高到 `num_slots=64` 需要谨慎：当前 slot bank 按 layer 注册，slot tensor 在每个 MoE 层各自分配；对于 Qwen3-30B-A3B 这类 48 层模型，大幅增大 per-layer slots 会显著增加 HBM 占用。后续要支持更大 prefill working set，应优先审查 post-load 后释放/替换原 full expert 参数的生命周期，或重新设计更接近全局预算的 slot residency，而不是把 per-layer fixed slots 当作免费旋钮。
+
+## 2026-06-01 2 short prompt × 8 token correctness 结论
+
+- 在 `num_slots=8` 保持不变的情况下，使用两个短 prompt（`Hello`、`Hi`）各生成 8 token，可以通过 no-offload baseline 与 fixed-slot sync candidate 的独立进程严格 token-id 对照。
+- artifact：
+  - baseline：`artifacts/sew_offload/runs/no_offload_smoke_20260601_2short_8tok/outputs.jsonl`
+  - candidate：`artifacts/sew_offload/runs/fixed_slot_sync_smoke_20260601_2short_8tok/outputs.jsonl`
+  - compare：`artifacts/sew_offload/runs/fixed_slot_sync_smoke_20260601_2short_8tok/correctness_compare.json`
+- compare 结果为 `status=ok`、`matched=2`，说明当前窄路径覆盖了多请求、8-token decode 的最小 correctness。
+- 该结果与较长 prompt 的 `active working set size 46 > num_slots=8` 失败并不矛盾：前者验证 slot-budget-compatible decode correctness，后者暴露 prefill active expert 并集容量边界。两者共同支持下一步先做生命周期/容量模型审查，而不是直接进入 async transfer。
+
+## 2026-06-01 fixed-slot memory ledger 与生命周期审查
+
+- 当前 fixed-slot correctness 原型在权重生命周期上同时存在三份 expert 权重相关状态：
+  - 原始 `layer.w13_weight/layer.w2_weight` 仍保留，用于默认路径和当前模型对象所有权；
+  - `HostExpertStore` 对每个 expert 做 `.detach().cpu().clone()`；
+  - `ExpertSlotBank` 为每层分配 `[num_slots, ...]` 的 backing tensors，供 grouped MoE backend 使用稳定 slot 地址。
+- 因此当前不能声称 SEW fixed-slot 自身已经节省 HBM。现有真实 smoke 中 candidate 的 resident weight 降低主要来自组合使用的 vLLM `prefetch` backend，而不是 SEW 释放了 full expert 参数。
+- 新增只读账本接口：
+  - `MoeOffloadRuntime.memory_ledger()` 返回 registered layers、host experts、original expert bytes、host store bytes、slot bank bytes 和 total managed bytes；
+  - `HostExpertStore.total_bytes` 统计 CPU clone；
+  - `ExpertSlotBank.total_bytes` 统计 slot backing tensors。
+- 新增离线估算工具：`tools/sew_offload/estimate_fixed_slot_memory.py`，默认使用 Qwen3-30B-A3B 的 48 层、128 experts/layer、单 expert `14,680,064` bytes。
+- 默认 Qwen3-30B-A3B 估算结果：
+  - `num_slots=8`：原始 expert 权重约 `90.19 GB`，host store 约 `90.19 GB`，slot bank 约 `5.64 GB`，当前原型 total managed 约 `186.03 GB`。
+  - `num_slots=64`：slot bank 约 `45.10 GB`，当前原型 total managed 约 `225.49 GB`。
+  - 若假设释放原始 expert 参数，`num_slots=8` 的 managed bytes 仍约 `95.83 GB`（host store + slot bank），这说明释放原始参数只是第一步，host store 表示和 slot 生命周期还需要进一步设计。
+- 设计结论：下一步不应直接进入 async transfer，也不应把 `num_slots=64` 当作简单 smoke 参数。必须先定义 post-load 后原始 full expert 参数的所有权转移、vLLM loader/offloader 的引用边界、slot bank 的 per-layer vs 全局容量语义，以及失败时如何 fail closed。
+
+## 2026-06-01 original expert release readiness guard
+
+- 新增 `MoeOffloadRuntime.plan_original_weight_release(...)`，但它只是只读 readiness guard，不执行释放、不替换 `layer.w13_weight/layer.w2_weight`，也不改变默认路径。
+- 该 guard 的 blockers 设计刻意保守：
+  - `default_path_not_preserved`：调用者没有证明默认 no-offload 路径仍可使用原始参数；
+  - `host_store_not_marked_complete`：调用者没有证明 host store 已完整持有 post-processed expert layout；
+  - `original_expert_weights_still_retained`：当前 runtime ledger 仍看到原始 expert 参数字节数，除非调用者显式允许在 planning 阶段保留；
+  - `layers_not_registered:[...]`：目标 MoE 层没有全部注册到 fixed-slot runtime。
+- 设计反思：当前 `host_store_is_complete` 仍是人工前置条件，这是有意保守的中间状态。下一步应把它升级成 runtime 自检，例如按 layer 记录 expected expert count、host bundle count、layout signature、dtype/stride/device，以及与 slot bank shape 的 copy-compatible 校验结果。
+- 这样做的价值是把“什么时候可以释放原始 full expert 参数”从口头判断变成可测试的 release plan，同时避免在当前 correctness prototype 中贸然释放参数，影响默认执行逻辑。
+
+## 2026-06-01 host store completeness self-check
+
+- `HostExpertStore` 现在在 `register_layer(...)` 时记录每层 expert 数量以及单 expert `w13/w2` 的 shape、dtype、stride。它仍然把 bundle `.detach().cpu().clone()`，因此自检要求 host bundle 的 device type 为 `cpu`。
+- `validate_complete_layers(expected_layer_ids)` 会返回 `HostStoreCompletenessReport`，blockers 覆盖缺层、缺 expert、shape/dtype/stride mismatch 和非 CPU bundle。
+- `MoeOffloadRuntime.plan_original_weight_release(...)` 默认调用 runtime 自检，不再需要调用方传 `host_store_is_complete=True` 才能通过；但传 `host_store_is_complete=False` 仍会添加 `host_store_not_marked_complete`，作为旧调用方的保守阻断。
+- 设计结论：release readiness guard 已从“人工声明完整”推进到“runtime 可测试地证明完整”。下一步真正危险的部分不是 completeness，而是参数所有权转移：如何在 post-load 后释放/替换原始 full expert 参数，同时不破坏默认路径、weight loader/offloader 引用和 fixed-slot fallback。
