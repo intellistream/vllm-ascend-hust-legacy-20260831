@@ -6,7 +6,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner, _torch_cuda_wrapper
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
@@ -225,6 +225,52 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         actual_output_token_ids = actual_sampling_metadata.output_token_ids
         self.assertEqual(actual_output_token_ids[0], [1, 2, 3, 6])
         self.assertEqual(actual_output_token_ids[1], [4, 5, 7])
+
+
+class TestNPUModelRunnerOffloaderLifecycle(unittest.TestCase):
+    def test_load_model_post_inits_weight_offloader(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.model_config = SimpleNamespace(model="/tmp/mock-model")
+        runner.ascend_config = SimpleNamespace(mix_placement=False)
+        runner.eplb_enable = False
+        runner.dynamic_eplb = False
+        runner.drafter = None
+        runner.use_aux_hidden_state_outputs = False
+        runner.lora_config = None
+        runner.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(enable_eplb=False),
+            quant_config=None,
+        )
+        runner.compilation_config = SimpleNamespace(
+            cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False)
+        )
+        mock_model = MagicMock(spec=torch.nn.Module)
+        mock_offloader = MagicMock()
+        memory_profiler = MagicMock()
+        memory_profiler.__enter__.return_value = SimpleNamespace(consumed_memory=0)
+        memory_profiler.__exit__.return_value = False
+
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.get_model", return_value=mock_model),
+            patch("vllm_ascend.worker.model_runner_v1.DeviceMemoryProfiler", return_value=memory_profiler),
+            patch("vllm_ascend.worker.model_runner_v1.get_offloader", return_value=mock_offloader, create=True),
+        ):
+            runner.load_model()
+
+        mock_offloader.post_init.assert_called_once_with()
+        self.assertIs(runner.model, mock_model)
+
+
+class TestTorchCudaWrapper(unittest.TestCase):
+    def test_cuda_event_remains_npu_event_after_wrapper_exit(self):
+        original_event = torch.cuda.Event
+        try:
+            with _torch_cuda_wrapper():
+                self.assertIs(torch.cuda.Event, torch.npu.Event)
+
+            self.assertIs(torch.cuda.Event, torch.npu.Event)
+        finally:
+            torch.cuda.Event = original_event
 
 
 if __name__ == "__main__":

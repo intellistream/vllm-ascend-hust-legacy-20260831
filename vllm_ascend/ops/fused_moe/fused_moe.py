@@ -48,6 +48,7 @@ from vllm_ascend.flash_common3_context import get_flash_common3_context, set_fla
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
+from vllm_ascend.moe_offload.runtime import get_moe_offload_runtime
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
@@ -82,6 +83,26 @@ def mock_true():
     return True
 
 
+def _fixed_slot_device_for_processed_weight(weight: torch.Tensor) -> torch.device:
+    if weight.device.type == "cpu":
+        return torch.device("npu", torch.npu.current_device())
+    return weight.device
+
+
+def _build_fixed_slot_profile_topk_ids(
+    *,
+    num_tokens: int,
+    top_k: int,
+    num_slots: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    if top_k > num_slots:
+        raise RuntimeError(f"fixed-slot profile run requires num_slots >= top_k, got {num_slots} < {top_k}")
+    base_ids = torch.arange(top_k, device=device, dtype=dtype)
+    return base_ids.unsqueeze(0).expand(num_tokens, top_k).contiguous()
+
+
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None):
         super().__init__(moe=moe)
@@ -112,6 +133,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        moe_offload_runtime = get_moe_offload_runtime()
+        if moe_offload_runtime.should_use_fixed_slots:
+            moe_offload_runtime.register_layer_for_fixed_slots(
+                layer,
+                slot_device=_fixed_slot_device_for_processed_weight(layer.w13_weight),
+            )
 
     def apply(
         self,
@@ -162,6 +189,13 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             num_experts=num_logical_experts,
         )
+        moe_offload_runtime = get_moe_offload_runtime()
+        topk_ids, topk_weights = moe_offload_runtime.trace_routing(
+            layer_id=getattr(layer, "layer_id", -1),
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            num_experts=num_logical_experts,
+        )
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
@@ -169,6 +203,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     layer_id=layer.layer_id,
                     topk_ids=topk_ids,
                 )
+
+        if moe_offload_runtime.should_use_fixed_slots and zero_expert_num > 0 and zero_expert_type is not None:
+            raise NotImplementedError("MoE offload fixed slots do not support zero expert path yet")
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
@@ -183,7 +220,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
-        if enable_force_load_balance:
+        if enable_force_load_balance and moe_offload_runtime.should_use_fixed_slots:
+            topk_ids = _build_fixed_slot_profile_topk_ids(
+                num_tokens=topk_ids.size(0),
+                top_k=topk_ids.size(1),
+                num_slots=moe_offload_runtime.config.num_slots,
+                device=topk_ids.device,
+                dtype=topk_ids.dtype,
+            )
+        elif enable_force_load_balance:
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
@@ -208,6 +253,36 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale = None
             w2 = layer.w2_weight
             w2_scale = None
+        physical_expert_count = None
+
+        if moe_offload_runtime.should_use_fixed_slots:
+            if _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER:
+                raise NotImplementedError("MoE offload fixed slots currently support AllGather only")
+            if expert_map is not None:
+                raise NotImplementedError("MoE offload fixed slots do not support expert_map yet")
+            if global_redundant_expert_num != 0:
+                raise NotImplementedError("MoE offload fixed slots do not support redundant experts yet")
+            if self.moe.has_bias:
+                raise NotImplementedError("MoE offload fixed slots do not support expert bias yet")
+
+            active_experts = tuple(int(expert_id) for expert_id in torch.unique(topk_ids.detach().cpu()).tolist())
+            layer_id = getattr(layer, "layer_id", -1)
+            if not moe_offload_runtime.is_layer_registered(layer_id):
+                moe_offload_runtime.register_layer_for_fixed_slots(
+                    layer,
+                    slot_device=_fixed_slot_device_for_processed_weight(layer.w13_weight),
+                )
+            prepared_weights = moe_offload_runtime.prepare_fixed_slot_plan(
+                layer_id=layer_id,
+                active_experts=active_experts,
+                num_logical_experts=num_logical_experts,
+                device=topk_ids.device,
+            )
+            prepared_weights.validate_backend_ready(expected_device_type=x.device.type)
+            w1 = prepared_weights.w1
+            w2 = prepared_weights.w2
+            log2phy = prepared_weights.log2phy
+            physical_expert_count = prepared_weights.physical_expert_count
 
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
@@ -225,6 +300,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 mc2_mask=mc2_mask,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 log2phy=log2phy,
+                physical_expert_count=physical_expert_count,
                 pertoken_scale=pertoken_scale,
                 activation=activation,
                 w1_scale=w1_scale,
@@ -288,6 +364,9 @@ class AscendMoERunner(MoERunner):
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.gate is not None:
+            router_logits, _ = self.gate(hidden_states)
+
         with self._sequence_parallel_context():
             return self.forward_impl(
                 layer,

@@ -43,8 +43,8 @@ from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_co
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.offloader import get_offloader
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.offloader import get_offloader
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
@@ -3073,7 +3073,6 @@ class NPUModelRunner(GPUModelRunner):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
-
         get_offloader().post_init()
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:

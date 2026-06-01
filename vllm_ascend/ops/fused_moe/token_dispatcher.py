@@ -365,6 +365,14 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
+        if token_dispatch_input.routing.physical_expert_count is not None:
+            if expert_map is not None:
+                raise RuntimeError("physical_expert_count is only supported without expert_map")
+            if global_redundant_expert_num != 0:
+                raise RuntimeError("physical_expert_count is only supported without redundant experts")
+            global_num_experts = int(token_dispatch_input.routing.physical_expert_count)
+            first_expert_idx = 0
+            last_expert_idx = global_num_experts
         sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = DeviceOperator.npu_moe_init_routing(
             hidden_states,
             topk_ids,

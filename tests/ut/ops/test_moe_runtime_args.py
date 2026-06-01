@@ -91,6 +91,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
                     mc2_mask=torch.tensor([True, False, True, False]),
                     apply_router_weight_on_input=True,
                     log2phy=torch.tensor([3, 2, 1, 0], dtype=torch.int32),
+                    physical_expert_count=4,
                     pertoken_scale=torch.randn(4),
                     activation="gelu",
                     mxfp_act_quant_type=_get_test_mxfp_dtype(quant_type),
@@ -102,8 +103,23 @@ class TestMoERuntimeArgs(unittest.TestCase):
                 self.assertTrue(fused_experts_input.dynamic_eplb)
                 self.assertTrue(fused_experts_input.routing.apply_router_weight_on_input)
                 self.assertEqual(fused_experts_input.routing.global_redundant_expert_num, 2)
+                self.assertEqual(fused_experts_input.routing.physical_expert_count, 4)
                 self.assertEqual(fused_experts_input.activation, "gelu")
                 self.assertEqual(fused_experts_input.quant.quant_type, quant_type)
+
+    def test_build_fused_experts_input_defaults_to_logical_expert_routing(self):
+        fused_experts_input = build_fused_experts_input(
+            hidden_states=torch.randn(2, 8),
+            topk_weights=torch.randn(2, 2),
+            topk_ids=torch.tensor([[0, 1], [1, 0]], dtype=torch.int32),
+            w1=torch.randn(4, 8, 16),
+            w2=torch.randn(4, 16, 8),
+            quant_type=QuantType.NONE,
+            dynamic_eplb=False,
+        )
+
+        self.assertIsNone(fused_experts_input.routing.log2phy)
+        self.assertIsNone(fused_experts_input.routing.physical_expert_count)
 
     def test_build_fused_experts_input_merges_dense_and_quant_weights(self):
         w1 = torch.randn(2, 8, 16)

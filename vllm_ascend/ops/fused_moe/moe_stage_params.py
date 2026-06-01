@@ -39,6 +39,7 @@ class MoERoutingParams:
     mc2_mask: torch.Tensor | None
     apply_router_weight_on_input: bool
     log2phy: torch.Tensor | None = None
+    physical_expert_count: int | None = None
     # Precomputed activation scales from prepare stage for quantized dispatch.
     pertoken_scale: torch.Tensor | None = None
 

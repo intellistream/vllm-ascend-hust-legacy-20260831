@@ -52,6 +52,7 @@ def build_token_dispatch_input_fixture(
     global_redundant_expert_num: int = 0,
     apply_router_weight_on_input: bool = False,
     pertoken_scale: torch.Tensor | None = None,
+    physical_expert_count: int | None = None,
     quant_type: QuantType = QuantType.NONE,
     comm_quant_mode: int | None = None,
     act_quant_type: torch.dtype | None = None,
@@ -68,6 +69,7 @@ def build_token_dispatch_input_fixture(
             global_redundant_expert_num=global_redundant_expert_num,
             mc2_mask=None,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            physical_expert_count=physical_expert_count,
             pertoken_scale=pertoken_scale,
         ),
         quant=MoEQuantParams(
@@ -276,7 +278,10 @@ class TestTokenDispatcherWithAllGather(TestBase):
         self.dispatcher = TokenDispatcherWithAllGather(**kwargs)
 
         # Mock NPU functions
-        self.patcher_npu_moe_init_routing_custom = patch("torch.ops._C_ascend.npu_moe_init_routing_custom")
+        self.patcher_npu_moe_init_routing_custom = patch(
+            "torch.ops._C_ascend.npu_moe_init_routing_custom",
+            create=True,
+        )
         self.mock_npu_moe_init_routing_custom = self.patcher_npu_moe_init_routing_custom.start()
         self.mock_npu_moe_init_routing_custom.return_value = (
             torch.randn(6, 128),  # sorted_hidden_states
@@ -291,6 +296,42 @@ class TestTokenDispatcherWithAllGather(TestBase):
     def tearDown(self):
         self.patcher_npu_moe_init_routing_custom.stop()
         self.patcher_npu_moe_token_unpermute.stop()
+
+    def test_token_dispatch_uses_physical_expert_count_for_slot_routing(self):
+        hidden_states = torch.randn(3, 128)
+        topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
+        topk_ids = torch.tensor([[0, 1], [1, 0], [0, 1]])
+
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            physical_expert_count=2,
+        )
+        self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+        self.mock_npu_moe_init_routing_custom.assert_called_once()
+        _, kwargs = self.mock_npu_moe_init_routing_custom.call_args
+        self.assertEqual(kwargs["expert_num"], 2)
+        self.assertEqual(kwargs["active_expert_range"], [0, 2])
+
+    def test_token_dispatch_defaults_to_local_logical_expert_count(self):
+        self.dispatcher.num_experts_local = 128
+        hidden_states = torch.randn(3, 128)
+        topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
+        topk_ids = torch.tensor([[0, 1], [1, 0], [0, 1]])
+
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
+        self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+
+        self.mock_npu_moe_init_routing_custom.assert_called_once()
+        _, kwargs = self.mock_npu_moe_init_routing_custom.call_args
+        self.assertEqual(kwargs["expert_num"], 128)
+        self.assertEqual(kwargs["active_expert_range"], [0, 128])
 
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_dispatch_without_expert_map(self):
