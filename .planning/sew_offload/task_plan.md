@@ -74,7 +74,8 @@
 - 已新增 fixed-slot memory ledger：runtime 可只读报告原始 expert 参数、CPU host store clone 与 slot bank backing tensors 的字节账本；离线工具 `tools/sew_offload/estimate_fixed_slot_memory.py` 可估算 Qwen3-30B-A3B 的 per-layer slot bank 成本。
 - 已新增原始 expert 参数释放 readiness guard：`plan_original_weight_release(...)` 只读返回 blockers/layers_ready，当前不释放、不替换任何参数；默认需要证明默认路径已保留、所有目标层均已注册，且 host store 自检完整。
 - 已把 `host_store_is_complete` 从人工布尔前置条件升级为 runtime 自检：`HostExpertStore` 会按 expected layers 检查 layer 注册、expert 覆盖、shape/dtype/stride 与 CPU host bundle，不满足则 fail closed。
-- 下一步：在通过更多默认路径验证后，设计 post-load 后释放/替换原始 full expert 参数的实际参数所有权转移方案；之后再进入 MVP-E async transfer。
+- 架构澄清：MVP-D 当前 fixed-slot bank 是 CPU-backed expert cache，不代表最终系统要把所有专家都卸载到 CPU；后续应支持 NPU pinned/full-resident experts 与 CPU-backed cache slots 并存。
+- 下一步：在通过更多默认路径验证后，设计 post-load 后“分层驻留”的参数所有权转移方案，包括保留若干完整层/热点专家在 NPU、只释放 cold/offloaded experts、并让 fixed-slot cache 处理 CPU expert miss；之后再进入 MVP-E async transfer。
 
 ## 关键约束
 
@@ -142,6 +143,8 @@
 - 论文初稿语言：英文为主，是否保留中文 slide。
 - 是否允许在 `paper/` 和 `slide/` 下立即创建 skeleton。
 - 单卡 HBM 不足的实验模拟方式：真实限制 cache budget、保留 KV cache 压力、或人工减少 expert resident slots。
+- 分层驻留策略如何配置：按层保留完整 experts、按全局热点 expert 保留、还是二者组合；需要 trace/simulator 给出保留预算与命中/搬运收益曲线。
+- 参数所有权转移应支持 partial release：未卸载专家继续由 NPU 原始参数/常驻 bank 拥有，卸载专家由 HostExpertStore + ExpertSlotBank 拥有，避免错误地把“释放全部 expert 参数”当作唯一优化目标。
 
 ## 当前实测任务：现有 offloading baseline
 

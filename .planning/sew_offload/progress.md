@@ -580,5 +580,13 @@
 - 唯一真实差异是 `vllm_ascend/worker/model_runner_v1.py` 中 `_torch_cuda_wrapper()` 的 3 行旧内容：
   - 本地旧内容会把 `_EventPlaceholder.record/synchronize` 从可接收 `*args, **kwargs` 改回无参数 lambda。
   - 本地旧注释会覆盖远端 `Keep CUDA-shaped APIs routed to NPU implementations after init.`。
-  - 该差异属于旧工作区对远端修复的回退，不应提交到 `research`。
+- 该差异属于旧工作区对远端修复的回退，不应提交到 `research`。
 - 同步策略：本轮不上传任何代码文件；只把本次审查记录同步到 `.planning/sew_offload/progress.md`，保留规划文件作为项目整体状态来源。
+
+## 2026-06-01 PrefetchOffloader 与分层驻留问题澄清
+
+- 用户提醒 `.planning` 是项目整体规划方案，后续必须同步更新；本轮已把设计澄清写入 `findings.md` 和 `task_plan.md`。
+- 核对代码后确认：`PrefetchOffloader` 是 `vllm-hust/vllm/model_executor/offloader/prefetch.py` 的通用参数 offloader，不是 `vllm_ascend` 的 MoE 专用模块。
+- 结论：它可以借鉴 CPU storage、静态 buffer pool、copy stream/event、post-init sync 等机制，但不能直接作为 SEW-Offload 核心接口，因为它按 layer/module forward 顺序调度，不理解 MoE routing、active expert working set、logical-to-physical slot remap、per-expert token count 和 Ascend grouped MoE layout 契约。
+- 反向设计审查发现：若把 fixed-slot MVP 理解成“所有专家都卸载到 CPU”，会走向另一个极端。最终设计应是分层驻留：NPU 中可保留若干完整层或热点专家，同时维护 CPU-backed fixed-slot cache 处理剩余专家 miss。
+- 已更新计划：后续参数所有权转移从“释放全部原始 expert 参数”修正为“partial release + pinned/full-resident experts + CPU-backed cache slots”的分层驻留方案。

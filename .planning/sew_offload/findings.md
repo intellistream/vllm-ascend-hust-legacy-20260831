@@ -259,6 +259,21 @@
 - 当前 `apply()` 内 lazy registration 主要服务生命周期安全；真实路径的主要注册点是 `process_weights_after_loading()` 后的 post-processed weights。后续释放原始 full expert 权重时，必须确认 slot bank 已经基于 post-processed layout 初始化。
 - 当前 fixed-slot path 依然会同步读取 `topk_ids` 到 CPU 计算 active expert working set；这与“先正确、后 overlap”一致，但不是最终高性能路径。
 
+## 2026-06-01 PrefetchOffloader 与分层驻留设计澄清
+
+- `PrefetchOffloader` 位于 `vllm-hust/vllm/model_executor/offloader/prefetch.py`，是 vLLM-Hust/vLLM 侧通用参数 offloader，不是 `vllm_ascend` 的 MoE 专用模块。
+- 它的核心功能是：按 decoder layer 的静态顺序和 `offload_group_size/offload_num_in_group/offload_prefetch_step/offload_params` 选择模块参数，把参数保存在 CPU storage 中，再用静态 device buffer pool 和 forward hook 在层执行前后触发 `wait_prefetch/start_prefetch`。
+- `PrefetchOffloader` 可复用的思想包括 CPU 参数副本、静态 device buffer pool、异步 copy stream/event、post-init 后同步 processed weights、编译/graph cache hash 参与配置。
+- 但它不能直接作为 SEW-Offload 的核心接口，原因是抽象层级不同：它以“模块/层”为调度单位，不读取当前 MoE routing 的 `topk_ids`、active expert working set、per-expert token count、slot hit/miss 或 expert deadline。
+- 它还假设参数名不变、模块 forward 顺序静态、参数对象可被替换成静态 buffer；而 Ascend grouped MoE 需要在 `topk_ids -> group_list -> npu_grouped_matmul` 之间保持 logical expert 到 physical slot 的一致映射，并保证 weight layout、device、slot count 与 backend 契约匹配。
+- 本地实测也说明简单复用不够：native prefetch expert offload 能降低 resident weight，但在 Ascend MoE `npu_grouped_matmul` 前出现 CPU/NPU weight mixing；UVA 后端在 NPU 上不支持 accelerator view。
+- 设计修正：不能把 SEW-Offload 描述成“所有专家参数都放 CPU，NPU 只保留当前 active experts”。更合理的目标是 tiered residency，即 NPU 显存中保留一部分完整层/热点专家，再用固定 expert slots 作为 CPU expert 的补充 cache。
+- 分层驻留应至少包含两类 NPU expert residency：
+  1. pinned/full-resident experts：常驻 NPU，不参与 slot eviction，适合显存足够时保留若干完整 MoE 层或长期热点 expert。
+  2. cache/slot experts：来自 CPU host store，进入固定 slot bank，按 policy 替换和预取。
+- 因此后续参数所有权转移方案应从“释放全部原始 expert 参数”升级为“按 policy 释放部分 expert/layer 的原始参数”：保留的专家仍由原始 NPU 参数拥有，卸载的专家由 HostExpertStore + ExpertSlotBank 拥有。
+- fixed-slot MVP-D 的 `num_slots` 只是 CPU-backed cache 容量，不应被理解为 NPU 中可驻留 expert 的全部容量；真实系统还需要 `resident_layers/resident_experts` 这类预算/策略。
+
 ## 2026-06-01 MVP-D.4 兼容性反查与 backend-ready 门禁
 
 - 反向检查默认路径后补充回归护栏：`VLLM_ASCEND_MOE_OFFLOAD_ENABLED` 未开启时，`AscendUnquantizedFusedMoEMethod.apply()` 仍把原始 `layer.w13_weight/layer.w2_weight` 传给 backend，`routing.log2phy` 与 `routing.physical_expert_count` 均保持 `None`。
