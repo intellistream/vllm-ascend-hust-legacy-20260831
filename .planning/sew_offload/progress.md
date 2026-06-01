@@ -564,3 +564,21 @@
   - `/root/miniconda3/envs/vllm-hust-dev/bin/python -m py_compile vllm_ascend/moe_offload/host_store.py vllm_ascend/moe_offload/runtime.py vllm_ascend/moe_offload/__init__.py tools/sew_offload/estimate_fixed_slot_memory.py tests/ut/moe_offload/test_host_store.py tests/ut/moe_offload/test_runtime_fixed_slot_guard.py tests/ut/moe_offload/test_estimate_fixed_slot_memory.py`：通过。
   - `git diff --check`：通过。
   - 对未跟踪 SEW 文件运行 `git diff --check --no-index /dev/null ...`：通过。
+
+## 2026-06-01 GitHub research 同步审查
+
+- 按用户要求检查“当前 Git 下这些文件是否需要上传，避免 GitHub 中已有文件重复保留”。
+- 当前本地 `research` 工作区相对 `origin/research` 显示 `[ahead 1, behind 5]`，导致已经在远端的文件在本地旧分支上表现为 untracked 或 deleted-like diff；不能直接按本地 `git status` 判断是否需要新增提交。
+- 已从 `origin/research` 创建干净临时 worktree，并把当前候选文件覆盖进去做内容级合并演练：
+  - `docs/sew-offload/08-ascend-moe-offload-architecture.md`
+  - `docs/sew-offload/09-next-steps-after-mvp-a.md`
+  - `tests/ut/moe_offload/*`
+  - `tools/sew_offload/{collect_moe_trace.py,compare_smoke_outputs.py,estimate_fixed_slot_memory.py,run_fixed_slot_smoke.py,simulate_expert_slots.py}`
+  - `vllm_ascend/moe_offload/*`
+  - 相关 `docs/tests/vllm_ascend/ops` 修改
+- 审查结论：上述 SEW-Offload 文档、工具、测试和 runtime 文件在 `origin/research` 已存在，当前内容与远端一致，不需要重复上传，也不应创建同名副本。
+- 唯一真实差异是 `vllm_ascend/worker/model_runner_v1.py` 中 `_torch_cuda_wrapper()` 的 3 行旧内容：
+  - 本地旧内容会把 `_EventPlaceholder.record/synchronize` 从可接收 `*args, **kwargs` 改回无参数 lambda。
+  - 本地旧注释会覆盖远端 `Keep CUDA-shaped APIs routed to NPU implementations after init.`。
+  - 该差异属于旧工作区对远端修复的回退，不应提交到 `research`。
+- 同步策略：本轮不上传任何代码文件；只把本次审查记录同步到 `.planning/sew_offload/progress.md`，保留规划文件作为项目整体状态来源。
