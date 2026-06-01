@@ -140,6 +140,22 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Enable the Ascend MoE expert offload runtime. Default is disabled.
+    "VLLM_ASCEND_MOE_OFFLOAD_ENABLED": lambda: bool(int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_ENABLED", "0"))),
+    # Trace routed expert working sets without changing execution.
+    "VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY": lambda: bool(int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY", "0"))),
+    # Number of fixed HBM expert slots for later non-trace offload modes.
+    "VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS": lambda: int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS", "0")),
+    # Expert residency policy name for later slot/prefetch modes.
+    "VLLM_ASCEND_MOE_OFFLOAD_POLICY": lambda: os.getenv("VLLM_ASCEND_MOE_OFFLOAD_POLICY", "deadline"),
+    # Maximum grouped execution phases used by later overlap modes.
+    "VLLM_ASCEND_MOE_OFFLOAD_MAX_PHASES": lambda: int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_MAX_PHASES", "2")),
+    # Enable async host-to-HBM expert loading in later non-trace modes.
+    "VLLM_ASCEND_MOE_OFFLOAD_ASYNC_LOAD": lambda: bool(int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_ASYNC_LOAD", "0"))),
+    # Bounded in-memory trace history size for MVP-A trace-only mode.
+    "VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS": lambda: int(
+        os.getenv("VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS", "4096")
+    ),
 }
 
 # end-env-vars-definition
