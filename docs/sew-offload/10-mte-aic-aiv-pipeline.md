@@ -308,9 +308,145 @@ moe_pipeline_crosslayer_overlap_ms    # Stage M 与下一层 T1 的重叠时长
 
 ---
 
-## 9. 一句话总结
+## 10. P0 实测结果与分析（2026-06-02）
 
-**本文把 MoE 执行拆成搬运(T) / routing reorder(R) / resident compute(C0) / staged compute(C1) /
-combine(M) 五段，并把它们映射到 Ascend 的 MTE(搬运)、AIC/Cube(矩阵) 与 AIV/Vector(向量) 三类管线上做流水重叠；
-核心是用 routing reorder 和 hit-first resident compute 的计算窗口，掩盖 miss expert 的 host→HBM 搬运，
-在不改变 MoE 语义的前提下把 `exposed_stall` 压到最小。**
+### 10.1 实验配置
+
+| 项目 | 值 |
+| --- | --- |
+| 硬件 | 单卡 Ascend 910B3 (NPU 4)，64GB HBM |
+| 软件栈 | CANN 8.5.1，vLLM 0.17.2 + vllm-ascend-hust `research` 分支 |
+| 模型 | Qwen3-30B-A3B（128 experts, top-8, d_model=2048, moe_intermediate=768） |
+| 调度 | `max_num_seqs=1`, `max_model_len=512`, `enforce_eager=True`, chunked prefill |
+| Offload 配置 | `num_slots=8`, `fanout_threshold=8`, `resident_layer_ids=1..47`, `release_original_expert_weights`, `layered_runtime`, native prefetch expert offload（group_size=4, num_in_group=1, prefetch_step=1） |
+| Pipeline profiling | `VLLM_ASCEND_MOE_PIPELINE_PROFILING=1`（P0 trace-only） |
+| Prompt | `"Hello"`, 8 output tokens |
+
+### 10.2 整体指标
+
+| 指标 | 值 |
+| --- | --- |
+| 模型加载 | 65.7 s |
+| 上报权重内存 | 42.35 GB（resident: layers 1–47; layer 0 non-resident + release） |
+| Throughput | 1.60 tok/s |
+| TTFT | 1392 ms |
+| TPOT | 516 ms |
+| Token-id correctness | `ok`（与 no-offload baseline strict compare 一致） |
+
+### 10.3 Stage 级耗时明细
+
+**A. 驻留 MoE 层（layer_id ∈ {1..47}，resident，无需 host→HBM）**
+
+共 327 个采样点（每层每 decode step 一条 record）。权重已在 HBM 中，
+`_maybe_apply_moe_offload_plan` 对 resident 层直接返回 `fused_experts_input`，
+Stage T 只包含一次即时决策耗时。
+
+| 阶段 | 平均耗时 (ms) | 管线映射 |
+| --- | --- | --- |
+| Stage T | 0.112（≈ 决策开销） | — |
+| Stage R | 0.240 | AIV routing reorder |
+| Stage C | 0.334 | AIC Cube gate_up/down + AIV SwiGLU |
+| Stage M | 0.244 | AIV combine + PIPE_MTE3 writeback |
+| **R+C+M 合计** | **0.819** | — |
+
+**B. Slot-cache 层（layer_id = 0，non-resident，需 host→HBM 搬运 8 个 expert）**
+
+共 9 条 record（1 次 prefill 触发 + 8 次 decode）。prefill 的 R/C/M 显著偏大
+（token 数多、grouped matmul 尺寸大），以下按稳态 decode（排除 prefill 和首次 decode
+冷启动）统计 7 个采样点。
+
+| 阶段 | 平均耗时 (ms) | 占单层总时间比例 | 管线映射 |
+| --- | --- | --- | --- |
+| **Stage T** | **13.41** | **93.0%** | host→HBM `copy_()`（TransferEngine.load_sync） |
+| Stage R | 0.38 | 2.6% | AIV routing reorder |
+| Stage C | 0.36 | 2.5% | AIC Cube + AIV SwiGLU |
+| Stage M | 0.27 | 1.9% | AIV combine + PIPE_MTE3 |
+| **R+C+M 合计** | **1.01** | **7.0%** | — |
+
+每个 decode step 的逐条数据：
+
+```
+decode #2:  T=12.42  R=0.343  C=0.380  M=0.278  R+C+M=1.001  T/(R+C+M)=12.4x
+decode #3:  T=15.18  R=0.375  C=0.368  M=0.267  R+C+M=1.010  T/(R+C+M)=15.0x
+decode #4:  T=11.30  R=0.368  C=0.369  M=0.238  R+C+M=0.975  T/(R+C+M)=11.6x
+decode #5:  T=10.01  R=0.523  C=0.173  M=0.298  R+C+M=0.994  T/(R+C+M)=10.1x
+decode #6:  T=13.33  R=0.398  C=0.376  M=0.268  R+C+M=1.042  T/(R+C+M)=12.8x
+decode #7:  T=18.20  R=0.382  C=0.371  M=0.249  R+C+M=1.002  T/(R+C+M)=18.2x
+decode #8:  T=13.40  R=0.387  C=0.371  M=0.259  R+C+M=1.018  T/(R+C+M)=13.2x
+─────────
+MEAN:      T=13.41  R=0.397  C=0.344  M=0.265  R+C+M=1.006  T/(R+C+M)=13.3x
+```
+
+### 10.4 关键比值
+
+```text
+T / (R+C+M)    ≈ 13.3x    # 搬运是计算的 13 倍
+T / total      ≈ 93.0%    # 搬运占单层总时间的 93%
+(R+C+M) / T   ≈  7.5%    # 计算窗口最多能掩盖 7.5% 的搬运
+```
+
+单层 slot-cache 耗时 ≈ 14.4 ms，其中约 13.4 ms 花在 host→HBM 搬运 8 个 expert
+（每个 expert 约 3 MB，共约 24 MB，对应约 1.8 GB/s 的有效带宽）。
+单层 resident 耗时 ≈ 0.93 ms。
+
+### 10.5 对算子内流水优化的影响评估
+
+报告第 3–4 节提出的 P1–P4 优化（Stage R 与 T 并行、C0 hit-first、跨层重叠等）
+依赖于一个关键假设：
+
+```text
+overlap_time = R + C0 + prev_tail  ≥  useful_fraction × transfer_time
+```
+
+本次实测表明这个假设在当前配置下**不成立**：
+
+1. **层内重叠潜力极小**：即使把 Stage R（0.38ms）和 Stage C（0.36ms）与 Stage T 完美重叠，
+   也只能藏掉 0.74ms，仅占 13.41ms 搬运的 5.5%。暴露的 `exposed_stall` 仍约 12.7ms。
+
+2. **跨层重叠帮助有限**：Stage M 仅 0.27ms，用它去掩盖下一层的 Stage T（13.4ms）
+   是不现实的——下一层的 Stage T 需要约 50 个本层 Stage M 时长才能被完全遮挡。
+
+3. **C0/C1 切分无意义**：在没有 async transfer 的当前同步模式下，Stage T 必须在
+   Stage C 之前完成，无法拆分 hit/miss。即便改成 async，hit-only C0 只有 resident
+   层的计算量（0.36ms），覆盖窗口依然太小。
+
+4. **瓶颈在搬运带宽，不在流水编排**：单 expert 约 3 MB，8 个 expert 共 24 MB，
+   13.4ms 的搬运意味着有效带宽约 1.8 GB/s——远低于 PCIe 4.0 x16 理论值（~25 GB/s
+   单向）和 Ascend 910B H2D 理论带宽。排查方向：
+   - 当前 `TransferEngine.load_sync` 使用逐 expert 的 `copy_()` 而非批量 DMA
+   - 可能受 CPU→HBM 的 D2H copy engine 数量限制
+   - Native prefetch 路径可能引入了额外的 CPU 侧开销
+
+### 10.6 建议的优先方向
+
+基于以上数据，**算子内 MTE/AIC/AIV 流水重叠（P1–P4）在当前瓶颈结构下收益极低**。
+建议优先级调整为：
+
+| 优先级 | 方向 | 预期收益 |
+| --- | --- | --- |
+| **P0** | 增大 slot budget / 减少 miss expert 数 | 直接减少 Stage T 触发次数和总量 |
+| **P0** | 排查 H2D 有效带宽（批量 DMA vs 逐 expert copy） | 可能把 13.4ms 降到 2–3ms |
+| P1 | 跨层 prefetch：本层还在算时就提前发起下一层 H2D | 用 47 层 resident 的总计算窗（~38ms）覆盖少数 miss 层的搬运 |
+| P2 | async transfer + npu.Event wait（MVP-E） | 不减少搬运时间，但释放主 stream |
+| P3 | 算子内 MTE/AIC/AIV 重叠（仅当 H2D 降至 ~2ms 后才有意义） | 此时 R+C≈0.74ms 能覆盖 37% 的搬运 |
+
+### 10.7 复现命令
+
+```bash
+ASCEND_RT_VISIBLE_DEVICES=4 python tools/sew_offload/run_fixed_slot_smoke.py \
+  --mode fixed_slot_sync \
+  --inline-prompt "Hello" \
+  --inline-max-output-tokens 8 \
+  --num-slots 8 \
+  --resident-layer-ids "1,2,...,47" \
+  --release-original-expert-weights \
+  --layered-runtime \
+  --fanout-threshold 8 \
+  --moe-pipeline-profiling \
+  --gpu-memory-utilization 0.80 \
+  --output-dir artifacts/sew_offload/runs/pipe_profile_fixed_slot_8tok_20260602
+```
+
+P0 实现代码位于 `vllm_ascend/moe_offload/pipeline.py`（`MoePipelineProfiler`），
+hook 点在 `vllm_ascend/ops/fused_moe/moe_comm_method.py` 的 `fused_experts()`。
+环境变量 `VLLM_ASCEND_MOE_PIPELINE_PROFILING=1` 控制开关（默认关闭）。
