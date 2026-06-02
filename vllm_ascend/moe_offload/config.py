@@ -18,6 +18,10 @@
 from dataclasses import dataclass
 
 from vllm_ascend import envs
+from vllm_ascend.moe_offload.tiered_residency import (
+    TieredResidencyPolicy,
+    parse_comma_separated_ints,
+)
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,9 @@ class MoeOffloadConfig:
     max_phases: int = 2
     async_load: bool = False
     trace_max_records: int = 4096
+    # MVP-D.9: tiered residency (default off / empty)
+    resident_layer_ids: frozenset[int] = frozenset()
+    release_original_expert_weights: bool = False
 
     @classmethod
     def from_env(cls) -> "MoeOffloadConfig":
@@ -40,6 +47,17 @@ class MoeOffloadConfig:
             max_phases=envs.VLLM_ASCEND_MOE_OFFLOAD_MAX_PHASES,
             async_load=envs.VLLM_ASCEND_MOE_OFFLOAD_ASYNC_LOAD,
             trace_max_records=envs.VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS,
+            resident_layer_ids=parse_comma_separated_ints(
+                envs.VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS
+            ),
+            release_original_expert_weights=envs.VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS,
+        )
+
+    @property
+    def tiered_residency(self) -> TieredResidencyPolicy:
+        return TieredResidencyPolicy(
+            resident_layer_ids=self.resident_layer_ids,
+            release_original_expert_weights=self.release_original_expert_weights,
         )
 
     @property

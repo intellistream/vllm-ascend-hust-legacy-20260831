@@ -10,7 +10,18 @@
 
 ## 当前阶段
 
-阶段 10/11：MVP-A/B/C 已完成，MVP-D fixed-slot correctness 已跑通 Qwen3-30B-A3B 单卡 prefetch+fixed-slot 1-token smoke；MVP-D.5 已补 no-offload vs fixed-slot 独立进程 correctness 对照工具，并通过真实 1-token 与 2 short prompt × 8 token 的 token-id 严格对照。当前重点是审查 fixed-slot working-set 容量边界、释放/替换原始 expert 参数前的生命周期，以及 MVP-E async transfer 设计。
+阶段 12：**MVP-D.9**（分层驻留 + 参数所有权 + 容量模型）进行中；用户选择 **d9_first**，MVP-E 排队。MVP-D.5–D.8 与真实 NPU fixed-slot correctness smoke 已完成。D.9 已落地：tiered residency env/config、resident 层跳过 slot plan、opt-in `release_original_expert_weights` + ledger 下降、容量模型 per-layer vs global 对比工具与 UT；待办：真实 JSONL trace、release=1 的 NPU smoke/HBM 账本验证。
+
+## 阶段 12：MVP-D.9 任务表
+
+| 子任务 | 状态 | 说明 |
+| --- | --- | --- |
+| 规划三文件同步（差距表、d9_first） | in_progress | task_plan / findings / progress |
+| Tiered residency config（默认关） | complete | `RESIDENT_LAYER_IDS`、`RELEASE_ORIGINAL_EXPERT_WEIGHTS` |
+| 容量模型 + per-layer vs global | complete | `compare_slot_budget_models`、13.5GB budget 参考 |
+| Partial release（opt-in + guard） | complete | `release_original_expert_weights_if_ready`、零元素占位 Parameter |
+| 真实 trace 采集 | pending | `collect_moe_trace.py` on NPU |
+| NPU verify + memory_ledger | pending | release=1 smoke vs no-offload |
 
 ## 阶段清单
 
@@ -75,7 +86,8 @@
 - 已新增原始 expert 参数释放 readiness guard：`plan_original_weight_release(...)` 只读返回 blockers/layers_ready，当前不释放、不替换任何参数；默认需要证明默认路径已保留、所有目标层均已注册，且 host store 自检完整。
 - 已把 `host_store_is_complete` 从人工布尔前置条件升级为 runtime 自检：`HostExpertStore` 会按 expected layers 检查 layer 注册、expert 覆盖、shape/dtype/stride 与 CPU host bundle，不满足则 fail closed。
 - 架构澄清：MVP-D 当前 fixed-slot bank 是 CPU-backed expert cache，不代表最终系统要把所有专家都卸载到 CPU；后续应支持 NPU pinned/full-resident experts 与 CPU-backed cache slots 并存。
-- 下一步：在通过更多默认路径验证后，设计 post-load 后“分层驻留”的参数所有权转移方案，包括保留若干完整层/热点专家在 NPU、只释放 cold/offloaded experts、并让 fixed-slot cache 处理 CPU expert miss；之后再进入 MVP-E async transfer。
+- MVP-D.9（2026-06-01）：`tiered_residency.py`、`expert_weight_release.py`；`MoeOffloadConfig.resident_layer_ids` / `release_original_expert_weights`；resident 层不走 `prepare_fixed_slot_plan`；release 后 `memory_ledger().original_expert_weight_bytes` 归零（UT）；`compare_slot_budget_models` 对比 per-layer slot bank vs global pool。
+- 下一步：NPU 上 `release=1` smoke + `memory_ledger` / 日志权重 GB 对比；真实 trace；再 MVP-E async transfer。
 
 ## 关键约束
 

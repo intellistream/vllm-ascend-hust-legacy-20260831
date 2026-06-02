@@ -117,6 +117,26 @@
 - 新主问题定义：现有 MoE offloading 方法通常把 expert 权重视为动态 cached device objects，主要通过 cache replacement 和 prefetch prediction 优化“哪些 expert 在设备上”；这个抽象在 Ascend NPU 上不完整，因为动态 expert loading 会和 stable weight addresses、fixed execution windows、graph/static-kernel reuse、explicit data movement 发生冲突，最终把 host-to-HBM loading 暴露在关键路径上或迫使系统放弃静态执行规律。
 - 论文中的研究问题应写成陈述式问题定义，而不是“how to”式方案句；更合适的写法是“旧方法如何做、依赖什么假设、这个假设在 Ascend 上为什么失效、导致什么系统后果”。
 
+## 2026-06-01 MVP-D.9 设计对照与反思
+
+| AOE-Serve / 计划项 | 仓库状态 |
+| --- | --- |
+| Tiered residency（NPU 常驻层 + CPU/slot 冷层） | `TieredResidencyPolicy` + `VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS`；resident 层跳过 slot plan，仍可用全量 `w13/w2` |
+| Partial release 原始 expert Parameter | `RELEASE_ORIGINAL_EXPERT_WEIGHTS=1` + `release_original_expert_weights_if_ready`；占位 `empty(0)` Parameter；**仅** non-resident 且 guard ready |
+| 容量模型 | `compare_slot_budget_models`：per-layer `num_layers×num_slots×expert_bytes` vs global `num_slots×expert_bytes`；当前 runtime **实现**为 per-layer bank，global 为设计参考 |
+| 13.5GB offload budget | `benchmark_config.yaml` `target_offloaded_weight_gb: 13.5`；估算工具输出 `*_within_offload_budget` 布尔 |
+| 默认路径 | `release=0`、resident 空集 → 与 D.5 前行为一致（UT 92 passed） |
+
+**设计反思（执行中记录）：**
+
+1. **不能把“全专家都 offload”当目标**：D.9 明确分层；盲目 `num_slots=64` 会使 per-layer slot bank ~45GB（见 D.6 估算），与 HBM 节省目标矛盾。
+2. **Release 必须在 host store 完整且 fixed-slot 已注册后**：否则 grouped MoE 无合法 NPU 权重；fail-closed guard 保留 `allow_retained_original_weights=True` 仅用于 planning API。
+3. **Resident 层不注册 slot bank 更合理**：若 resident 仍 clone host store，会重复占 CPU；当前 resident 层在 `process_weights` 不 register（仅 non-resident 注册），减少无谓 host clone——若未来 resident 也要 trace，需单独路径。
+4. **Global slot pool 未实现**：simulator/估算已对比；真正实现需改 `ExpertSlotBank` 为跨层共享与 eviction，属 D.9 之后或 MVP-E 前的大改；当前不假装 global 已上线。
+5. **真实 HBM 下降仍待 NPU 验证**：release 只 drop Parameter storage；vLLM loader 可能仍保留其它引用；下一步用 `Loading model weights took X GB` + `memory_ledger` + npu-smi 交叉验证。
+
+**待办：** 真实 trace JSONL；`release=1` NPU smoke + strict compare；可选把 SEW env 加入 vLLM allowlist 减日志噪音。
+
 ## 2026-05-29 现有 offloading baseline 实测结论
 
 - artifact：`/root/vllm-ascend-hust/artifacts/sew_offload/existing_offload_20260529T143705Z`

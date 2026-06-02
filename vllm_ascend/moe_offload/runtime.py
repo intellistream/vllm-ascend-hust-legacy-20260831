@@ -27,6 +27,8 @@ from vllm_ascend.moe_offload.host_store import HostExpertStore
 from vllm_ascend.moe_offload.slot_bank import ExpertSlotBank, SlotState
 from vllm_ascend.moe_offload.slot_mapping import ExpertSlotMapping, PreparedSlotWeights
 from vllm_ascend.moe_offload.trace_collector import TraceCollector
+from vllm_ascend.moe_offload.expert_weight_release import release_layer_original_expert_weights
+from vllm_ascend.moe_offload.tiered_residency import TieredResidencyPolicy
 from vllm_ascend.moe_offload.transfer_engine import TransferEngine
 
 
@@ -62,6 +64,7 @@ class MoeOffloadRuntime:
         self._host_store = HostExpertStore()
         self._slot_banks: dict[int, ExpertSlotBank] = {}
         self._original_expert_weight_bytes_by_layer: dict[int, int] = {}
+        self._released_original_weight_layers: set[int] = set()
         self._transfer_engine = TransferEngine()
 
     def trace_routing(
@@ -116,11 +119,24 @@ class MoeOffloadRuntime:
     def is_layer_registered(self, layer_id: int) -> bool:
         return int(layer_id) in self._slot_banks
 
+    def is_resident_layer(self, layer_id: int) -> bool:
+        return self.config.tiered_residency.is_resident_layer(int(layer_id))
+
+    def should_use_fixed_slot_plan_for_layer(self, layer_id: int) -> bool:
+        if not self.should_use_fixed_slots:
+            return False
+        return not self.is_resident_layer(int(layer_id))
+
     def memory_ledger(self) -> MoeOffloadMemoryLedger:
+        original_bytes = sum(
+            bytes_
+            for layer_id, bytes_ in self._original_expert_weight_bytes_by_layer.items()
+            if int(layer_id) not in self._released_original_weight_layers
+        )
         return MoeOffloadMemoryLedger(
             registered_layers=len(self._slot_banks),
             host_experts=len(self._host_store),
-            original_expert_weight_bytes=sum(self._original_expert_weight_bytes_by_layer.values()),
+            original_expert_weight_bytes=original_bytes,
             host_store_bytes=self._host_store.total_bytes,
             slot_bank_bytes=sum(slot_bank.total_bytes for slot_bank in self._slot_banks.values()),
         )
@@ -159,6 +175,55 @@ class MoeOffloadRuntime:
             blockers=tuple(blockers),
         )
 
+    def release_original_expert_weights_if_ready(
+        self,
+        layer: torch.nn.Module,
+        *,
+        default_path_preserved: bool = True,
+    ) -> MoeExpertReleasePlan:
+        """Opt-in partial release for a single non-resident layer after host store is complete."""
+        if not self.config.release_original_expert_weights:
+            return MoeExpertReleasePlan(
+                ready=False,
+                layers_ready=(),
+                blockers=("release_original_expert_weights_disabled",),
+            )
+        if not self.should_use_fixed_slots:
+            return MoeExpertReleasePlan(
+                ready=False,
+                layers_ready=(),
+                blockers=("fixed_slots_disabled",),
+            )
+
+        layer_id = int(getattr(layer, "layer_id", -1))
+        if layer_id < 0:
+            return MoeExpertReleasePlan(
+                ready=False,
+                layers_ready=(),
+                blockers=("invalid_layer_id",),
+            )
+        if self.is_resident_layer(layer_id):
+            return MoeExpertReleasePlan(
+                ready=False,
+                layers_ready=(),
+                blockers=(f"resident_layer:{layer_id}",),
+            )
+        if layer_id in self._released_original_weight_layers:
+            return MoeExpertReleasePlan(ready=True, layers_ready=(layer_id,), blockers=())
+
+        plan = self.plan_original_weight_release(
+            expected_layer_ids=(layer_id,),
+            default_path_preserved=default_path_preserved,
+            allow_retained_original_weights=True,
+        )
+        if not plan.ready:
+            return plan
+
+        release_layer_original_expert_weights(layer)
+        self._released_original_weight_layers.add(layer_id)
+        self._original_expert_weight_bytes_by_layer[layer_id] = 0
+        return MoeExpertReleasePlan(ready=True, layers_ready=(layer_id,), blockers=())
+
     def prepare_fixed_slot_plan(
         self,
         *,
@@ -171,6 +236,10 @@ class MoeOffloadRuntime:
             raise RuntimeError("fixed-slot plan requested while moe offload fixed slots are disabled")
 
         layer_id = int(layer_id)
+        if self.is_resident_layer(layer_id):
+            raise RuntimeError(
+                f"fixed-slot plan must not run on resident layer {layer_id}; use original NPU expert weights"
+            )
         unique_active_experts = _dedupe_preserve_order(active_experts)
         _validate_active_expert_ids(
             layer_id=layer_id,

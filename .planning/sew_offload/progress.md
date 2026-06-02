@@ -565,6 +565,43 @@
   - `git diff --check`：通过。
   - 对未跟踪 SEW 文件运行 `git diff --check --no-index /dev/null ...`：通过。
 
+## 2026-06-01 MVP-D.9 分层驻留与 partial release（代码）
+
+- 按 `sew_offload_差距与_mvp-d.9` 计划执行 **d9_first**；同步更新 `task_plan.md`（阶段 12）、`findings.md`（差距表与反思）。
+- 新增 `vllm_ascend/moe_offload/tiered_residency.py`、`expert_weight_release.py`。
+- `config.py` / `envs.py`：`VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS`、`VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS`（默认关）。
+- `runtime.py`：`is_resident_layer`、`should_use_fixed_slot_plan_for_layer`、`release_original_expert_weights_if_ready`；ledger 排除已 release 层字节。
+- `fused_moe.py`：仅 non-resident 层 register / prepare_fixed_slot；post-load 可选 release。
+- `estimate_fixed_slot_memory.py`：`compare_slot_budget_models`（per-layer vs global + 13.5GB budget 布尔）。
+- 新增 UT：`tests/ut/moe_offload/test_tiered_residency_d9.py`。
+- 验证：`pytest -q tests/ut/moe_offload/test_tiered_residency_d9.py tests/ut/moe_offload/test_runtime_fixed_slot_guard.py tests/ut/moe_offload/test_estimate_fixed_slot_memory.py` → 17 passed；`pytest -q tests/ut/moe_offload tests/ut/worker/test_model_runner_v1.py` → 92 passed, 1 skipped。
+- **自我反思**：resident 层不 register 避免重复 host clone；global slot pool 仅估算未实现；release 后仍需 NPU 证明 vLLM 驻留权重 GB 下降且 token-id 不变。
+- **未完成（计划 todo）**：真实 `collect_moe_trace` JSONL；`release=1` NPU smoke + ledger/HBM 对比。
+
+## 2026-06-01 MVP-D.9 实现与验证（运行结果）
+
+### 单元 / 集成测试（已跑）
+
+- `pytest tests/ut/moe_offload tests/ut/worker/test_model_runner_v1.py tests/ut/ops/test_moe_runtime_args.py tests/ut/ops/test_token_dispatcher.py::TestTokenDispatcherWithAllGather`：**102 passed**, 8 skipped。
+- `pytest tests/ut/moe_offload/test_tiered_residency_d9.py -v`：**5 passed**（resident 层、release ledger、release 默认关、容量模型）。
+- `py_compile` + `estimate_fixed_slot_memory.py --num-slots 8`：通过。
+
+### 真实 NPU（NPU 4，`ASCEND_RT_VISIBLE_DEVICES=4`）
+
+| 用例 | 结果 | 证据 |
+| --- | --- | --- |
+| `--mode no_offload`（D.9 代码树，清理 SEW env） | **ok** | `artifacts/sew_offload/runs/d9_verify_20260601/no_offload/summary.json`，`load_seconds≈39.6`，`output_token_ids=[353]` |
+| `--mode fixed_slot_sync` release=0（本次会话） | **未完成** | 权重加载后日志停在 `Loading weights took 136s`；EngineCore **高 CPU 长时间无新日志**（疑似 `process_weights` 中 48 层 host clone + slot bank 初始化）；已 kill，避免占满 NPU |
+| 历史 fixed-slot vs **本次** no_offload strict compare | **ok** | `compare_hist.json`：`matched=1`，token id 一致（说明默认 no-offload 路径仍与 D.5 fixed-slot 对照一致） |
+| `release=1` NPU smoke | **未跑** | 需先解决/度量 post-load 耗时或缩小层数后再测 HBM |
+
+### 反思（验证驱动）
+
+1. **D.9 未改 release=0 的推理语义**：UT + 本次 no_offload token 与历史 fixed-slot 对照一致。
+2. **不能声称 release=1 已在 NPU 验证**：partial release 仅 UT 覆盖。
+3. **fixed-slot 全模型 post-load 成本仍是瓶颈**：与 D 阶段相同，D.9 的 register（host store）在 48 层上可能极慢；下一步应测「resident 层跳过 register」是否缩短加载，或 lazy register 单层。
+4. **timeout 600s 可能仍不够**：若需完整 fixed-slot smoke，建议单独跑并记录 `process_weights` 分段耗时。
+
 ## 2026-06-01 GitHub research 同步审查
 
 - 按用户要求检查“当前 Git 下这些文件是否需要上传，避免 GitHub 中已有文件重复保留”。

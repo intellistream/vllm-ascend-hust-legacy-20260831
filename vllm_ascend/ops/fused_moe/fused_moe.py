@@ -134,11 +134,14 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
         moe_offload_runtime = get_moe_offload_runtime()
-        if moe_offload_runtime.should_use_fixed_slots:
+        layer_id = int(getattr(layer, "layer_id", -1))
+        if moe_offload_runtime.should_use_fixed_slot_plan_for_layer(layer_id):
             moe_offload_runtime.register_layer_for_fixed_slots(
                 layer,
                 slot_device=_fixed_slot_device_for_processed_weight(layer.w13_weight),
             )
+            if moe_offload_runtime.config.release_original_expert_weights:
+                moe_offload_runtime.release_original_expert_weights_if_ready(layer)
 
     def apply(
         self,
@@ -255,7 +258,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_scale = None
         physical_expert_count = None
 
-        if moe_offload_runtime.should_use_fixed_slots:
+        layer_id = int(getattr(layer, "layer_id", -1))
+        if moe_offload_runtime.should_use_fixed_slot_plan_for_layer(layer_id):
             if _EXTRA_CTX.moe_comm_type != MoECommType.ALLGATHER:
                 raise NotImplementedError("MoE offload fixed slots currently support AllGather only")
             if expert_map is not None:
@@ -266,12 +270,13 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 raise NotImplementedError("MoE offload fixed slots do not support expert bias yet")
 
             active_experts = tuple(int(expert_id) for expert_id in torch.unique(topk_ids.detach().cpu()).tolist())
-            layer_id = getattr(layer, "layer_id", -1)
             if not moe_offload_runtime.is_layer_registered(layer_id):
                 moe_offload_runtime.register_layer_for_fixed_slots(
                     layer,
                     slot_device=_fixed_slot_device_for_processed_weight(layer.w13_weight),
                 )
+                if moe_offload_runtime.config.release_original_expert_weights:
+                    moe_offload_runtime.release_original_expert_weights_if_ready(layer)
             prepared_weights = moe_offload_runtime.prepare_fixed_slot_plan(
                 layer_id=layer_id,
                 active_experts=active_experts,

@@ -156,6 +156,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS": lambda: int(
         os.getenv("VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS", "4096")
     ),
+    # MVP-D.9: comma-separated MoE layer ids that keep full NPU expert weights (no slot path).
+    "VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS": lambda: os.getenv(
+        "VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS", ""
+    ),
+    # MVP-D.9: after release guard is ready, drop original expert Parameter storage on non-resident layers.
+    "VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS", "0"))
+    ),
 }
 
 # end-env-vars-definition
