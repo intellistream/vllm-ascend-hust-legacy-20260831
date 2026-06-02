@@ -156,6 +156,8 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS": lambda: int(
         os.getenv("VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS", "4096")
     ),
+    # Optional JSONL path for cross-process trace-only artifacts.
+    "VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH": lambda: os.getenv("VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH", ""),
     # MVP-D.9: comma-separated MoE layer ids that keep full NPU expert weights (no slot path).
     "VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS": lambda: os.getenv(
         "VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS", ""
@@ -164,6 +166,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS": lambda: bool(
         int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS", "0"))
     ),
+    # MVP-D.10: opt-in dynamic-count layered runtime path selector.
+    "VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME", "0"))
+    ),
+    # MVP-D.10: active expert fan-out above this threshold uses full-weight path.
+    "VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD": lambda: int(
+        os.getenv("VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD", "0")
+    ),
+    # MVP-D.9 verification: optional JSONL path for cross-process profiling artifacts.
+    "VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH": lambda: os.getenv("VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH", ""),
 }
 
 # end-env-vars-definition

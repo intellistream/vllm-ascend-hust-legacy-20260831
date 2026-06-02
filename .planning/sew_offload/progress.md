@@ -627,3 +627,228 @@
 - 结论：它可以借鉴 CPU storage、静态 buffer pool、copy stream/event、post-init sync 等机制，但不能直接作为 SEW-Offload 核心接口，因为它按 layer/module forward 顺序调度，不理解 MoE routing、active expert working set、logical-to-physical slot remap、per-expert token count 和 Ascend grouped MoE layout 契约。
 - 反向设计审查发现：若把 fixed-slot MVP 理解成“所有专家都卸载到 CPU”，会走向另一个极端。最终设计应是分层驻留：NPU 中可保留若干完整层或热点专家，同时维护 CPU-backed fixed-slot cache 处理剩余专家 miss。
 - 已更新计划：后续参数所有权转移从“释放全部原始 expert 参数”修正为“partial release + pinned/full-resident experts + CPU-backed cache slots”的分层驻留方案。
+
+## 2026-06-02 D.9 复盘与固定 token capacity 反思
+
+- 查看最近提交：`ac6e3922 feat(moe-offload): MVP D.9 implement tiered residency and partial release for expert weights`，当前 `research` 与 `origin/research` 对齐，工作区在复盘前干净。
+- D.9 做了四件事：tiered residency env/config、resident 层跳过 fixed-slot path、opt-in partial release 原始 expert 参数、per-layer vs global slot capacity 估算。
+- 进度判断：UT 与默认路径验证已完成；release=1 的真实 NPU smoke、HBM/ledger 对照、真实 trace JSONL 仍待办。
+- 暴露问题：全模型 fixed-slot post-load/register 仍重；per-layer slot bank 成本随层数线性放大；release 只替换 Parameter storage，需 NPU 证明 vLLM 没有其它引用保留 HBM。
+- 复核用户关于常规 MoE 的分析后确认：当前非 offload AllGather 路径是 dropless dynamic count，`npu_moe_init_routing` 返回每个 expert 的实际 token count，`group_list_type=1` 传给 `npu_grouped_matmul`。
+- 设计修正：SEW-Offload 主线应固定 expert weight slot 和权重地址，而不是固定每个 expert 的 token 容量。`expert_capacity/drop_pad_mode` 只保留为后续可选实验分支，不能作为默认路径，也不能引入 drop token。
+
+## 2026-06-02 按新顺序执行：打点 + 小范围 release=1 smoke
+
+- 先更新 `task_plan.md`：把下一步顺序明确为“分段耗时/ledger 打点 -> 小范围 release=1 NPU smoke -> no-offload 对照 -> trace/sweep -> 决定 per-layer/global pool -> MVP-E”。
+- TDD 新增 runtime profiling：
+  - RED：`test_runtime_profiles_register_and_release_with_ledger_snapshots` 初始失败于缺少 `profiling_summary()`。
+  - GREEN：新增 `MoeOffloadProfileEvent`、`MoeOffloadMemoryLedger.to_jsonable()`、register/release 事件记录。
+  - 追加跨进程 RED/GREEN：`VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH` 写 JSONL，解决 EngineCore 子进程 runtime 无法被父进程 summary 直接读取的问题。
+- 更新 `tools/sew_offload/run_fixed_slot_smoke.py`：
+  - 支持 `--resident-layer-ids` 和 `--release-original-expert-weights`。
+  - 清理/设置 D.9 env，避免 no-offload baseline 被旧 env 污染。
+  - summary 写入 `moe_offload_profile_jsonl_events`。
+- 本轮验证：
+  - `/root/miniconda3/envs/vllm-hust-dev/bin/python -m pytest -q tests/ut/moe_offload/test_runtime_fixed_slot_guard.py tests/ut/moe_offload/test_fixed_slot_smoke.py tests/ut/moe_offload/test_tiered_residency_d9.py tests/ut/moe_offload/test_config.py`：`28 passed, 4 warnings in 0.37s`。
+  - `/root/miniconda3/envs/vllm-hust-dev/bin/python -m py_compile vllm_ascend/envs.py vllm_ascend/moe_offload/runtime.py tools/sew_offload/run_fixed_slot_smoke.py tests/ut/moe_offload/test_runtime_fixed_slot_guard.py tests/ut/moe_offload/test_fixed_slot_smoke.py`：通过。
+  - `git diff --check`：通过。
+- 真实 NPU smoke：
+  - candidate：`artifacts/sew_offload/runs/d9_release1_small_profile_20260602/summary.json`，NPU 6，layer 0 non-resident，layers 1-47 resident，release=1，状态 `ok`，1 output token。
+  - profile JSONL：`register_layer_for_fixed_slots` layer 0 约 `2.034s`；release 前 original expert bytes `1207959552`，release 后 original expert bytes `0`；slot bank bytes `75497472`。
+  - baseline：`artifacts/sew_offload/runs/d9_no_offload_profile_20260602/summary.json`，no-offload 状态 `ok`，1 output token，reported weight `56.9001 GB`。
+  - candidate reported weight `42.3454 GB`；该数字主要受 native prefetch offloader 影响，不能单独归因于 SEW layer 0 release。
+  - strict compare：`artifacts/sew_offload/runs/d9_release1_small_profile_20260602/correctness_compare.json`，`status=ok`、`matched=1`。
+- 自我反思：
+  - 小范围 release=1 机制正确，但不是性能结论。
+  - 单层 register 约 2s，说明全 48 层 per-layer register/host clone 会非常重；下一步应先 trace/sweep，别贸然扩大 release 层数。
+  - 真实 artifact 必须看 `moe_offload_profile_jsonl_events`，父进程 `moe_offload_profile` 为空是 V1 多进程架构导致的预期现象。
+
+## 2026-06-02 继续执行：真实 trace + slot/residency sweep
+
+- 按计划继续推进 trace/sweep 阶段，并边执行边反查设计正确性。
+- TDD 补跨进程 trace JSONL：
+  - RED：`test_runtime_appends_trace_jsonl_when_trace_path_is_set` 失败于 trace 文件不存在。
+  - GREEN：新增 `VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH`，`trace_routing()` 在 trace-only 且显式设置路径时追加 JSONL。
+  - 工具层 RED/GREEN：`collect_moe_trace.py` 设置 `TRACE_PATH`，优先统计真实 JSONL 行数，避免父进程空 collector 覆盖子进程 trace。
+- 补 smoke env 污染护栏：
+  - RED：`run_fixed_slot_smoke.py` 的 no-offload 清理未包含 `VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH`。
+  - GREEN：把 `TRACE_PATH` 纳入 `SEW_OFFLOAD_ENV_VARS`，trace_only mode 写 `moe_offload_trace.jsonl`。
+- 真实 NPU trace：
+  - 命令使用 NPU 6、Qwen3-30B-A3B、1 条 synthetic `short_chat`、trace-only。
+  - artifact：`artifacts/sew_offload/traces/d9_trace_short_20260602/trace.jsonl`
+  - 结果：`TRACE_SUMMARY status=ok`、`num_trace_records=6192`，48 层，每层 129 records。
+- 初步统计：
+  - `active_experts_min=8`、`p50=8`、`p90=8`、`max=128`。
+  - prefill 阶段可让单层 active expert 并集接近/达到 128；decode 大量记录是 top-8。
+- slot/global sweep：
+  - 输出：`artifacts/sew_offload/traces/d9_trace_short_20260602/sweep_summary.json`
+  - per-layer fixed-slot：`num_slots=8/16/32/64/96` 下所有 48 层都至少一次超过 budget；`num_slots=128` 才不会因 active count 超限。
+  - global LRU：slots=8/32/128 hit=0；slots=512 hit=21115/miss=37267；slots=1024 hit=33294/miss=25088。
+  - sticky-layer LRU 与普通 LRU 在 512/1024 上近似，没有解决核心问题。
+- 本轮验证：
+  - `/root/miniconda3/envs/vllm-hust-dev/bin/python -m pytest -q tests/ut/moe_offload/test_trace_export.py tests/ut/moe_offload/test_collect_moe_trace.py tests/ut/moe_offload/test_runtime_trace_only.py tests/ut/moe_offload/test_config.py tests/ut/moe_offload/test_fixed_slot_smoke.py tests/ut/moe_offload/test_runtime_fixed_slot_guard.py`：`34 passed, 4 warnings in 0.40s`。
+  - `py_compile` 覆盖 `envs.py`、runtime、trace collector、collect/run smoke 工具与相关测试：通过。
+  - `git diff --check`：通过。
+- 自我反思：
+  - trace 结果反证了“直接扩大 per-layer num_slots”路线：prefill 会迫使 `num_slots=128`，而 per-layer slot bank 成本随层数线性增长。
+  - trace 也反证了“简单 global LRU 就够”的路线：小/中 slot 数几乎没有 reuse，需要 layer/window-aware 策略。
+  - 下一步应先做 prefill/resident-aware 设计，而不是直接进入 MVP-E async transfer。
+
+## 2026-06-02 分层策略分析与离线验证
+
+- 按用户要求先分析设计分层策略，并进行验证；本轮没有改在线 MoE runtime，只新增离线 analyzer 和 CLI。
+- TDD：
+  - RED：`test_layered_strategy.py` 初始失败于缺少 `vllm_ascend.moe_offload.layered_strategy`。
+  - GREEN：新增 `LayeredStrategyAnalyzer`，把高 fan-out 记录路由到 `full_weight_path`，低 fan-out 记录路由到 `slot_cache_path`。
+  - 设计反查后追加 RED/GREEN：新增 `cache_scope=global|per_layer`。global 小池仍无 hit；per-layer decode slots 能保留层内复用。
+- 新增文件：
+  - `vllm_ascend/moe_offload/layered_strategy.py`
+  - `tools/sew_offload/analyze_layered_strategy.py`
+  - `tests/ut/moe_offload/test_layered_strategy.py`
+- 真实 trace 验证：
+  - 输入：`artifacts/sew_offload/traces/d9_trace_short_20260602/trace.jsonl`
+  - 输出汇总：`artifacts/sew_offload/traces/d9_trace_short_20260602/layered_strategy_sweep_summary.json`
+  - global scope：slots=8/16/32/64 hit rate 均为 0，说明简单全局小池不是可行主线。
+  - per-layer scope：
+    - slots=8：hit rate 约 31.4%，H2D 约 457.8GiB。
+    - slots=16：hit rate 约 59.7%，H2D 约 268.7GiB。
+    - slots=32：hit rate 约 78.9%，H2D 约 141.0GiB。
+    - slots=64：hit rate 约 93.9%，H2D 约 40.7GiB。
+  - 所有配置均有 `full_weight_records=95`，涉及 48 层，说明 prefill/high fan-out 仍需 full-weight/resident 处理。
+- 验证：
+  - `/root/miniconda3/envs/vllm-hust-dev/bin/python -m pytest -q tests/ut/moe_offload/test_layered_strategy.py tests/ut/moe_offload/test_slot_simulator.py tests/ut/moe_offload/test_collect_moe_trace.py`：`10 passed, 4 warnings in 16.93s`。
+  - `/root/miniconda3/envs/vllm-hust-dev/bin/python -m py_compile vllm_ascend/moe_offload/layered_strategy.py tools/sew_offload/analyze_layered_strategy.py tests/ut/moe_offload/test_layered_strategy.py`：通过。
+  - `git diff --check`：通过。
+- 自我反思：
+  - 分层策略不能简化为“prefill 全常驻，decode 全 offload”；真实实现还要算 HBM：per-layer slots=64 效果好但 HBM 约 42GiB，slots=32 更保守。
+  - 当前离线验证支持下一步 runtime 原型：高 fan-out 使用原始/常驻权重，低 fan-out 使用 fixed-slot cache；默认仍关闭，不改 router/top-k/token count。
+
+## 2026-06-02 源码复核 Static Expert Window 假设
+
+- 按用户要求重新从代码而不是设计假设出发，复核 `vllm_ascend/ops/fused_moe` 与 `csrc`。
+- 读到的主链路：
+  - `fused_moe.py`：`select_experts(...) -> moe_comm_method.fused_experts(...)`，当前 fixed-slot hook 在进入 fused experts 前替换权重和设置 `log2phy/physical_expert_count`。
+  - `moe_comm_method.py`：默认 staged boundary 已经存在，顺序是 `token_dispatch -> _apply_mlp -> token_combine`。
+  - `token_dispatcher.py` AllGather：`npu_moe_init_routing(... expert_tokens_num_type=1, expert_tokens_num_flag=True ...)`，返回 `expert_tokens`，设置 `group_list_type=1`。
+  - `moe_mlp.py`：`npu_grouped_matmul(... group_list=group_list, group_list_type=group_list_type)`，直接消费动态 count。
+  - `csrc/torch_binding.cpp` / `moe_init_routing_custom_torch_adpt.h`：默认 `drop_pad_mode=0`，只有显式 `drop_pad_mode=1` 才走 `[expert_num, expert_capacity, h]`。
+- 结论：非 offload 当前没有默认固定每 expert token capacity；`Static Expert Window` 如果继续使用，必须重新解释为 expert weight residency/window，不能再指 token capacity。
+- 切入点修正：
+  - 短期保持 `apply()` 前置 hook 只做权重准备、slot remap 和 fail-closed correctness。
+  - 下一步真正要做的 runtime 原型应进入 `MoECommMethod.fused_experts()` 的 dispatch/MLP 边界，在 dispatch 输出 dynamic group_list 后做 resident/staged/miss expert phase split。
+  - phase split 必须生成完整 permuted output buffer 后复用现有 combine，避免改 router/top-k/token count 语义。
+- 自我反思：
+  - 之前把 “window” 说成 token capacity 容易误导，源码证明这不是当前系统主线。
+  - Python phase split 适合先验证语义，但如果只停留在 Python 多次 grouped matmul，会增加 kernel launch 和小 batch 开销；真正的 Ascend 特性利用应以 fused dispatch/GMM/combine 或 staging-aware custom op 为长期目标。
+
+## 2026-06-02 下一步规划
+
+- 按用户要求规划下一步，并同步 `.planning/sew_offload/task_plan.md`、`findings.md`、`progress.md`。
+- 阶段推进：
+  - D.9 收口：分层驻留、partial release、真实 trace、离线策略和源码复核已经给出方向。
+  - D.10 新目标：实现默认关闭的 dynamic-count layered runtime path selector。
+  - D.11 后续：进入 dispatch 后 phase split 语义原型。
+  - MVP-E 后移：等 D.10/D.11 的语义边界闭环后，再做 async transfer/overlap metrics。
+- D.10 的核心执行顺序：
+  1. 定义 runtime decision contract：`full_weight_path`、`slot_cache_path`、`fail_closed`。
+  2. 增加 env/config：分层 runtime 开关、fanout threshold、decision trace/profile。
+  3. 加 full-weight readiness guard：高 fan-out 只能在 full expert 权重仍可用时走原始/常驻路径。
+  4. 接低 fan-out slot-cache path：复用现有 fixed-slot sync，不改 dynamic count。
+  5. 加 observability：记录 layer、active expert count、path、reason、release/resident 状态。
+  6. 跑 UT 与小范围 NPU smoke，对比 no-offload token id。
+- 自我反思：
+  - 这个顺序刻意不直接做 async，因为还没有在线 path selector 时，async 只会把搬运和语义问题混在一起。
+  - D.10 也不做 phase split，避免一次把 path 选择、buffer 回填、combine 等价性和 transfer overlap 全搅在一起。
+  - 如果 D.10 发现 high fan-out full-weight 与 release 策略冲突，优先收紧 release guard，而不是放宽 slot budget 或引入 token drop。
+
+## 2026-06-02 用户提供已成功 Ascend 预取原型
+
+- 用户补充曾经成功实施过 Ascend expert cache plugin：
+  - patch Worker/NPUWorker `load_model`；
+  - load 后扫描 `FusedMoE` 的 `w13_weight/w2_weight`；
+  - expert 权重复制到 CPU DRAM；
+  - 可选把原 NPU expert tensor 替换为空 tensor；
+  - 每层分配 NPU `pool_w13/pool_w2`；
+  - patch `MoECommMethod.fused_experts`，运行时根据 `topk_ids` 做 cache hit/miss、CPU->NPU load、LRU/priority eviction、logical-to-slot remap，再调用原 fused experts。
+- 本轮本机搜索：
+  - 未在 `/root` 找到 `adapters/vllm_moeinf_official_plugin.py` 或 `adapters/ascend_expert_cache.py`。
+  - 已检查当前内置模块，发现 `HostExpertStore`、`ExpertSlotBank`、`prepare_fixed_slot_plan(...)` 与用户 plugin 机制高度对应。
+- 规划调整：
+  - D.10 优先级调整为“把用户已成功 plugin 路线内生化到 `vllm-ascend-hust`”，尤其是把真正执行 hook 放到 `MoECommMethod.fused_experts` 边界。
+  - phase split 和 async transfer 继续后移；先复刻已验证的 cache/remap 路线，确保默认关闭、可测试、可观测、fail closed。
+
+## 2026-06-02 MVP-D.10 dynamic-count layered runtime MVP
+
+- 按 TDD 完成在线 path selector MVP：
+  - RED：新增配置、runtime decision、fused MoE hook 测试，初始失败于缺少 `MoeOffloadDecisionPath` / `decide_layered_path`。
+  - GREEN：新增 `MoeOffloadDecisionPath`、`MoeOffloadPathDecision`、`MoeOffloadRuntime.decide_layered_path(...)`。
+  - GREEN：新增 env/config `VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME`（默认关）与 `VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD`（默认 0，回退 `num_slots`）。
+  - GREEN：在 `AscendUnquantizedFusedMoEMethod.apply()` 构造 fused input 前接入 decision：low fan-out 走现有 fixed-slot sync；high fan-out 在原始 full expert 权重可用时走 full-weight；high fan-out 且 full weights 已 release 时 fail closed。
+  - GREEN：`run_fixed_slot_smoke.py` 输出 TTFT/TPOT，并把 profile JSONL 的 `layered_path_decision` 写入 summary。
+- 真实 NPU smoke（NPU 6，Qwen3-30B-A3B，1 条 synthetic short_chat，layer 0 non-resident + layers 1..47 resident，num_slots=8，fanout_threshold=8，native prefetch expert offload 组合）：
+  - 1-token candidate：`artifacts/sew_offload/runs/d10_layered_runtime_1tok_20260602/summary.json`，status ok，reported weight `43.4704 GB`，throughput `1.327 tok/s`，TTFT `751.58 ms`，TPOT `0 ms`（1 token 无间隔）。
+  - 1-token strict compare：`artifacts/sew_offload/runs/d10_layered_runtime_1tok_20260602/correctness_compare.json`，status ok，matched=1。
+  - 8-token candidate：`artifacts/sew_offload/runs/d10_layered_runtime_8tok_20260602/summary.json`，status ok，throughput `1.675 tok/s`，TTFT `868.72 ms`，TPOT `558.14 ms`，load `64.83s`。
+  - 8-token no-offload baseline：`artifacts/sew_offload/runs/d10_no_offload_8tok_20260602/summary.json`，status ok，throughput `6.337 tok/s`，TTFT `445.15 ms`，TPOT `116.71 ms`，load `32.30s`，reported weight `56.9001 GB`。
+  - 8-token strict compare：`artifacts/sew_offload/runs/d10_layered_runtime_8tok_20260602/correctness_compare.json`，status ok，matched=1。
+  - candidate decision profile：1 次 `full_weight_path`（prefill high fan-out）+ 8 次 `slot_cache_path`（decode low fan-out）；`register_layer_for_fixed_slots` layer 0 约 `1.86s`。
+- 验证：
+  - `/root/miniconda3/envs/vllm-hust-dev/bin/python -m pytest -q tests/ut/moe_offload/test_config.py tests/ut/moe_offload/test_runtime_fixed_slot_guard.py tests/ut/moe_offload/test_fixed_slot_apply.py tests/ut/moe_offload/test_fixed_slot_smoke.py tests/ut/moe_offload/test_layered_strategy.py tests/ut/moe_offload/test_trace_export.py tests/ut/moe_offload/test_collect_moe_trace.py`：`52 passed, 4 warnings in 8.89s`。
+  - `py_compile` 覆盖 D.10 runtime、fused MoE 和工具：通过。
+  - `git diff --check`：通过。
+- 自我反思：
+  - D.10 MVP 已跑通 correctness 和指标输出，但当前仍是同步 slot cache + native prefetch 组合，性能显著慢于 no-offload；这不能写成性能收益，只能写成 offloading 通路与 observability 闭环。
+  - 先保留 high fan-out full-weight path 是正确的：真实 prefill active expert count 约 81，若强塞进 8 slots 会改变语义或 fail；full-weight readiness guard 防止 release 后静默错误。
+  - 当前 hook 仍在 `apply()` 中构造 fused input 前，尚未完全内生到 `MoECommMethod.fused_experts` 的 dispatch/MLP 边界；下一步应继续下沉 hook，再进入 D.11 phase split。
+
+## 2026-06-02 D.10 fused_experts 边界下沉执行
+
+- 按用户“继续执行下一步操作”的要求，已把 D.10 path selector 从 `AscendUnquantizedFusedMoEMethod.apply()` 前置准备进一步下沉到 `MoECommMethod.fused_experts()` 边界。
+- 代码路径调整：
+  - `MoEOffloadParams` 进入 fused MoE stage contract，`build_fused_experts_input(...)` 可携带 offload metadata。
+  - `AscendUnquantizedFusedMoEMethod.apply()` 不再直接准备 slot 权重；它只负责在需要时注册 layer，并把 offload metadata 传入 fused input。
+  - `MoECommMethod.fused_experts()` 在 token dispatch 前调用 `_maybe_apply_moe_offload_plan(...)`：从 `topk_ids` 得到 active experts，调用 runtime decision；slot path 准备 fixed-slot plan 并替换 `w1/w2/log2phy/physical_expert_count`；full path 保留原权重；fail-closed 在 dispatch 前抛错。
+- 新增/更新测试：
+  - `tests/ut/ops/test_moe_comm_method.py` 覆盖 fused boundary slot path、full path、fail-closed。
+  - `tests/ut/moe_offload/test_fixed_slot_apply.py` 覆盖 `apply()` 只传 metadata、不提前 remap。
+- fresh 验证：
+  - `/root/miniconda3/envs/vllm-hust-dev/bin/python -m pytest -q tests/ut/ops/test_moe_runtime_args.py tests/ut/ops/test_moe_comm_method.py tests/ut/moe_offload/test_config.py tests/ut/moe_offload/test_runtime_fixed_slot_guard.py tests/ut/moe_offload/test_fixed_slot_apply.py tests/ut/moe_offload/test_fixed_slot_smoke.py tests/ut/moe_offload/test_layered_strategy.py tests/ut/moe_offload/test_trace_export.py tests/ut/moe_offload/test_collect_moe_trace.py`：`67 passed, 4 warnings, 27 subtests passed in 8.93s`。
+  - `py_compile` 覆盖 fused MoE contracts/runtime/offload/tools：通过。
+  - `git diff --check`：通过。
+- post-downsink 真实 NPU smoke 状态：
+  - 第一次：`artifacts/sew_offload/runs/d10_fused_boundary_layered_1tok_20260602/summary.json`，vLLM startup memory gate 失败，free `45.94/60.96 GiB`，required `54.86 GiB` at util `0.9`。
+  - 第二次：`artifacts/sew_offload/runs/d10_fused_boundary_layered_1tok_retry_20260602/summary.json`，util `0.7` 仍失败，free `17.41/60.96 GiB`，required `42.67 GiB`。
+  - 第三次：`artifacts/sew_offload/runs/d10_fused_boundary_layered_1tok_retry2_20260602/summary.json`，util `0.7` 仍失败，free `17.28/60.96 GiB`，required `42.67 GiB`。
+  - `npu-smi info` 随后显示 NPU 6 上 PID `3272964` 占用约 `44067 MB`，但 `ps -p 3272964` 无对应 Linux 进程；等待 15s 后账本仍未回收。未擅自 kill/reset 未知设备上下文。
+  - 之后 `3272964` 账本消失，但 NPU 6 又显示 PID `3354289` 占用约 `15055 MB` 且 AICore 活跃；`ps -p 3354289` 同样无对应 Linux 进程。当前仍不视为干净 smoke 资源窗口。
+- 当前可报告的真实推理证据仍是下沉前 D.10 path selector smoke：
+  - 1-token candidate 与 no-offload strict compare 均 `status=ok`。
+  - 8-token candidate 与 no-offload strict compare 均 `status=ok`。
+  - 8-token candidate throughput `1.675 tok/s`、TTFT `868.72 ms`、TPOT `558.14 ms`；no-offload baseline throughput `6.337 tok/s`、TTFT `445.15 ms`、TPOT `116.71 ms`。
+- 自我反思：
+  - 下沉设计是正确方向：active experts 的来源更靠近真实 fused boundary，后续 D.11 能自然进入 `token_dispatch_output -> _apply_mlp` 的 phase split。
+  - 但不能把 UT 通过等同于真实 Ascend E2E 通过；post-downsink smoke 必须等 NPU 资源恢复后补跑。
+  - 当前失败发生在 model load 前的 memory gate，不是 slot remap、dynamic count、grouped matmul 或 decision contract 的 runtime failure。
+  - 继续扩大功能前应先取得 post-downsink 1-token strict compare；否则 D.11 phase split 会把资源问题和语义问题混在一起。
+
+## 2026-06-02 post-downsink smoke 补跑尝试与 D.11 规划
+
+- 按用户要求尝试补跑 `post-downsink d10_fused_boundary_layered_1tok` smoke，并准备 strict compare。
+- baseline artifact 已确认：
+  - `artifacts/sew_offload/runs/d10_no_offload_1tok_20260602/summary.json` status `ok`。
+  - baseline `outputs.jsonl` token id 为 `[1096]`，可作为 strict compare 基线。
+- NPU 6 资源复查：
+  - 首次 `npu-smi info`：NPU 6 HBM `47640/65536 MB`，AICore `49%`，PID `3438992` 占用约 `44073 MB`。
+  - `ps -p 3438992 -o ...` 无对应 Linux 进程。
+  - 等待 30s 后再次 `npu-smi info`：NPU 6 HBM `47786/65536 MB`，AICore `51%`，同 PID `3438992` 仍占用约 `44073 MB`。
+  - 当前 free HBM 约 17GiB，低于此前 util `0.7` 启动门禁所需约 `42.67GiB`；也不足以可靠加载 Qwen3-30B-A3B offload candidate。
+- 本次未启动新的 smoke 命令，原因：
+  - 资源状态明确不满足 vLLM startup memory gate，重复运行只会制造新的 failed artifact。
+  - 占用 PID 不在 Linux 进程表中，且 AICore 活跃；未获得用户授权前不做 NPU reset 或 kill。
+- D.11 规划已写入 `task_plan.md` 阶段 14：
+  - 目标是 dispatch 后 phase split 语义原型，不做 async transfer。
+  - 先定义 phase plan 与 expert slice contract，再做 group_list slicing、phase planner、partial MLP、full-buffer 回填、equivalence UT、窄路径集成和 observability。
+  - D.11 的 NPU smoke 仍以前置 D.10 post-downsink 1-token strict compare 为建议门禁。
+- 自我反思：
+  - 当前不能把“未补跑”解释为工程失败；这是硬件资源不可控导致的验证阻塞。
+  - 继续规划 D.11 是有价值的，但实现前最好先取得 D.10 下沉后的 1-token strict compare，避免未来出现错误时无法判断来自下沉 remap 还是 phase split。

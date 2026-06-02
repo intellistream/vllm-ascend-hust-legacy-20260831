@@ -10,18 +10,57 @@
 
 ## 当前阶段
 
-阶段 12：**MVP-D.9**（分层驻留 + 参数所有权 + 容量模型）进行中；用户选择 **d9_first**，MVP-E 排队。MVP-D.5–D.8 与真实 NPU fixed-slot correctness smoke 已完成。D.9 已落地：tiered residency env/config、resident 层跳过 slot plan、opt-in `release_original_expert_weights` + ledger 下降、容量模型 per-layer vs global 对比工具与 UT；待办：真实 JSONL trace、release=1 的 NPU smoke/HBM 账本验证。
+阶段 13：**MVP-D.10**（dynamic-count layered runtime 原型）收口中；MVP-D.9 的分段打点、小范围 release=1 NPU smoke、no-offload 对照、真实 trace JSONL、resident/slot/global sweep、prefill/resident-aware 离线策略验证与 Static Expert Window 源码复核均已完成。D.10 已完成默认关闭的在线 path selector，并完成 `MoECommMethod.fused_experts` 边界内生化代码与 UT；旧 hook 位置的 1-token/8-token 真实 NPU smoke 已通过并输出 throughput/TTFT/TPOT。post-downsink 真实 NPU smoke 当前被 NPU 6 残留 HBM 上下文/启动内存门禁阻塞，待设备资源释放后补跑。阶段 14：**MVP-D.11**（dispatch 后 phase split 语义原型）已完成任务规划；进入实现前仍建议先补齐 D.10 post-downsink 1-token strict compare，避免把硬件资源问题和 phase split 语义问题混在一起。
 
 ## 阶段 12：MVP-D.9 任务表
 
 | 子任务 | 状态 | 说明 |
 | --- | --- | --- |
-| 规划三文件同步（差距表、d9_first） | in_progress | task_plan / findings / progress |
+| 规划三文件同步（差距表、d9_first） | complete | task_plan / findings / progress |
 | Tiered residency config（默认关） | complete | `RESIDENT_LAYER_IDS`、`RELEASE_ORIGINAL_EXPERT_WEIGHTS` |
 | 容量模型 + per-layer vs global | complete | `compare_slot_budget_models`、13.5GB budget 参考 |
 | Partial release（opt-in + guard） | complete | `release_original_expert_weights_if_ready`、零元素占位 Parameter |
-| 真实 trace 采集 | pending | `collect_moe_trace.py` on NPU |
-| NPU verify + memory_ledger | pending | release=1 smoke vs no-offload |
+| 动态 count 路径复核 | complete | 确认常规 MoE 是 dropless dynamic count；固定 token capacity 不再作为默认主线 |
+| D.9 分段耗时 + ledger 打点 | complete | runtime profiling + cross-process JSONL artifact |
+| 小范围 release=1 NPU smoke | complete | 1 个 non-resident 层 release=1 通过 |
+| no-offload vs release=1 对照 | complete | token id 一致；reported weight 56.9001GB vs 42.3454GB |
+| 真实 trace 采集 | complete | `artifacts/sew_offload/traces/d9_trace_short_20260602/trace.jsonl`，6192 records |
+| resident/slot/global pool sweep | complete | `sweep_summary.json`：per-layer 小 slots 在 prefill fail-closed；naive global LRU 不足 |
+| prefill/resident-aware 策略设计 | complete | 离线 analyzer +真实 trace sweep；global 小池反例，per-layer decode slots 有效 |
+| prefill/resident-aware runtime 原型 | superseded | 升级为阶段 13 MVP-D.10 dynamic-count layered runtime |
+
+## 阶段 13：MVP-D.10 任务表
+
+| 子任务 | 状态 | 说明 |
+| --- | --- | --- |
+| 下一步规划同步 | complete | 把 dynamic-count staged 主线写入三份 `.planning` 文件 |
+| 已验证 plugin 路线映射 | complete | 用户提供过往成功方案：load_model 后 CPU expert store + per-layer NPU pool + patch `MoECommMethod.fused_experts` remap |
+| Runtime decision contract | complete | `MoeOffloadDecisionPath` / `MoeOffloadPathDecision`：`full_weight_path`、`slot_cache_path`、`fail_closed` |
+| fused_experts 边界内生化 | complete | `AscendUnquantizedFusedMoEMethod.apply()` 只传 offload metadata；`MoECommMethod.fused_experts` 内按 `topk_ids` 决策 full/slot/fail，并在 token dispatch 前准备 slot plan |
+| Env/config 默认关闭 | complete | `VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME=0` 默认关；`FANOUT_THRESHOLD` 默认 0（回退 `num_slots`） |
+| Full-weight readiness guard | complete | high fan-out 且原始 full expert 权重已 release 时 fail closed |
+| Slot-cache path 接入 | complete | low fan-out 复用现有 fixed-slot sync + `log2phy/physical_expert_count`，不改 token count |
+| Decision observability | complete | profile JSONL 记录 active count、path、full/slot readiness、reason 和 ledger |
+| UT 回归 | complete | 默认路径、low fanout slot path、high fanout full path、released fail-closed、smoke env/metrics |
+| 小范围 NPU smoke | complete | NPU 6：1-token 与 1 prompt × 8-token no-offload strict token-id 对照通过；输出 throughput/TTFT/TPOT |
+| post-downsink NPU smoke | blocked | 下沉后 3 次真实 smoke 均在 vLLM startup memory gate 前失败；2026-06-02 再查 NPU 6 仍约 47.8GB HBM 占用、AICore 活跃、PID 不在 Linux 进程表，未擅自 reset/kill |
+| D.10 复盘门禁 | in_progress | 当前同步 slot path 性能显著慢于 no-offload；下沉 UT 已过，待 post-downsink smoke 资源窗口后再考虑 D.11 phase split |
+
+## 阶段 14：MVP-D.11 任务表
+
+| 子任务 | 状态 | 说明 |
+| --- | --- | --- |
+| D.11 范围冻结 | complete | 只做 dispatch 后 phase split 语义原型；不做 async transfer、不做性能优化、不改 router/top-k/token count |
+| Phase split contract | pending | 定义 `MoEPhasePlan` / `MoEPhase` / 回填 contract，输入为 dispatch 后 `group_list` 与 active experts，输出为完整 permuted MLP output |
+| Dispatch-output expert slicing | pending | 在 dynamic count `group_list` 上计算每个 expert 的 token slice；支持 group_list_type=1 的 AllGather 窄路径，复杂通信先 fail closed |
+| Phase planner | pending | 把 active experts 切成 resident/slot-ready/miss 或 hit/miss phases；D.11 先用同步 ready 判定，不启动 async load |
+| Partial MLP execution seam | pending | 允许 `_apply_mlp` 对单个 phase 的 contiguous expert/token slice 运行，并返回可回填的 phase output |
+| Full-buffer scatter/gather | pending | 把各 phase 输出回填到完整 `sorted_hidden_states` 对应顺序，最后复用原 `token_combine` |
+| Equivalence UT | pending | 小张量 mock 验证 single phase 与多 phase 输出逐元素一致；覆盖空 phase、乱序 phase、重复/缺失 slice fail closed |
+| Boundary integration guard | pending | 在 `MoECommMethod.fused_experts()` 中默认关闭；仅 env opt-in 且 AllGather/unquantized/no bias/no EP 窄路径启用 |
+| Observability | pending | profile JSONL 记录 phase 数、每 phase experts/token count、回填耗时、fail reason |
+| NPU semantic smoke | pending | 资源可用后先跑 1-token strict compare，再跑 8-token；D.11 不要求性能提升，只要求 token-id correctness |
+| D.11 复盘门禁 | pending | 若 Python 多 phase 开销过高，记录为语义脚手架；MVP-E async 前必须保留 single-phase fallback |
 
 ## 阶段清单
 
@@ -40,6 +79,8 @@
 | 9. Native offload benchmark pilot | complete | `tools/sew_offload/run_minimal_offload_benchmark.py`、native prefetch expert/all-param 失败证据、no-offload 三指标 sanity |
 | 10. SEW runtime MVP | in_progress | MVP-A/B/C 完成；MVP-D fixed-slot sync correctness 最小闭环已通过真实 NPU smoke |
 | 11. MoE Offload 支持核实与总体架构 | complete | `docs/sew-offload/08-ascend-moe-offload-architecture.md`：不支持证据链、系统架构、控制/数据面图、路线图 |
+| 12. Dynamic-count layered runtime | in_progress | MVP-D.10 path selector 已跑通真实 NPU smoke；fused_experts 下沉代码/UT 已完成，post-downsink smoke 被 NPU 资源门禁阻塞 |
+| 13. Dispatch 后 phase split | planned | MVP-D.11 任务已拆解；实现前优先补 D.10 post-downsink 1-token strict compare |
 
 ## 当前 MVP-A 状态
 
@@ -87,7 +128,11 @@
 - 已把 `host_store_is_complete` 从人工布尔前置条件升级为 runtime 自检：`HostExpertStore` 会按 expected layers 检查 layer 注册、expert 覆盖、shape/dtype/stride 与 CPU host bundle，不满足则 fail closed。
 - 架构澄清：MVP-D 当前 fixed-slot bank 是 CPU-backed expert cache，不代表最终系统要把所有专家都卸载到 CPU；后续应支持 NPU pinned/full-resident experts 与 CPU-backed cache slots 并存。
 - MVP-D.9（2026-06-01）：`tiered_residency.py`、`expert_weight_release.py`；`MoeOffloadConfig.resident_layer_ids` / `release_original_expert_weights`；resident 层不走 `prepare_fixed_slot_plan`；release 后 `memory_ledger().original_expert_weight_bytes` 归零（UT）；`compare_slot_budget_models` 对比 per-layer slot bank vs global pool。
-- 下一步：NPU 上 `release=1` smoke + `memory_ledger` / 日志权重 GB 对比；真实 trace；再 MVP-E async transfer。
+- 2026-06-02 设计修正：固定的是 expert weight slot / 稳定权重地址，不固定每个 expert 的 token 容量；默认继续沿用现有 dropless dynamic count/group_list 模式，`expert_capacity/drop_pad_mode` 只作为可选实验分支。
+- 2026-06-02 D.9 小范围 release=1 smoke：NPU 6，1 个 non-resident layer（layer 0）+ 47 个 resident layers，release=1 成功；profile JSONL 显示 register layer 0 用时约 2.03s，release 约 0.0004s，ledger 中 original expert bytes 从约 1.208GB 降到 0；no-offload vs candidate 1-token 严格 token-id 对照通过。
+- 2026-06-02 D.10 dynamic-count layered runtime：默认关闭的 path selector 已在旧 hook 位置通过真实 NPU 1-token/8-token smoke 和 strict token-id compare；8-token candidate throughput `1.675 tok/s`、TTFT `868.72 ms`、TPOT `558.14 ms`，no-offload baseline throughput `6.337 tok/s`、TTFT `445.15 ms`、TPOT `116.71 ms`。
+- 2026-06-02 D.10 fused boundary 下沉：`apply()` 不再直接做 slot 权重准备，而是把 offload metadata 传入 fused input；`MoECommMethod.fused_experts()` 在 dispatch 前根据 `topk_ids` 做 path decision、slot plan 和 fail-closed。UT/compile/diff 已通过；post-downsink 真实 smoke 被 NPU 6 残留 HBM 上下文阻塞。
+- 下一步顺序更新：先等待/清理 NPU 6 资源并补跑 post-downsink smoke；通过后再做 MVP-D.11 dispatch 后 phase split 语义原型；然后才进入 MVP-E async transfer 与 overlap metrics；最后考虑 D.12 staging-aware fused/custom op 或 window-aware global pool。
 
 ## 关键约束
 
@@ -103,20 +148,20 @@
 
 | 项目 | 初始判断 |
 | --- | --- |
-| 系统名 | SEW-Offload: Static Expert-Window Scheduling for Prefetch-Hidden MoE Offloading on Ascend NPUs |
+| 系统名 | SEW-Offload: Staged Expert-Weight Offloading for Dynamic-Count MoE on Ascend NPUs |
 | 主要代码位置 | 新包 `vllm_ascend/moe_offload/` |
 | 最小集成点 | `vllm_ascend/ops/fused_moe/fused_moe.py` 中 expert 执行边界 |
 | 配置入口 | `vllm_ascend/envs.py` + 独立 config dataclass |
 | 第一阶段 | 只做 routing/expert 工作集观测，不改变执行 |
-| 第二阶段 | whole-expert host store + fixed slot + synchronous load |
-| 第三阶段 | fixed expert-slot residency window + cache/prefetch + graph replay |
+| 第二阶段 | whole-expert host store + fixed weight slot + synchronous load |
+| 第三阶段 | dynamic-count staged expert compute + weight residency/cache/prefetch |
 
 ## 三线交付规划
 
 ### A. 论文线
 
 - 目标：以 CCF-A 系统/体系结构会议论文口径组织，先完成英文 LaTeX skeleton 与中文研究备忘。
-- 核心叙事：GPU MoE offloading 默认以动态 expert cache/prefetch 为中心；Ascend 类 NPU 已经有 per-expert count/grouped MoE 后端，但这个后端假设 expert 权重常驻。HBM 受限时，新的控制面不是重新发明 count 化 dispatch，而是把 expert 权重驻留重构为固定地址的 expert-slot window，并通过 deadline-aware prefetch/orchestration 与 hit-first phased execution 隐藏 host-to-HBM 预取开销。
+- 核心叙事：GPU MoE offloading 默认以动态 expert cache/prefetch 为中心；Ascend 类 NPU 已经有 per-expert count/grouped MoE 后端，但这个后端假设 expert 权重常驻。HBM 受限时，新的控制面不是重新发明 count 化 dispatch，也不是固定每个 expert 的 token 容量，而是把 expert 权重驻留重构为固定地址的 weight slot，并在 dispatch 之后按动态 group_list 做 resident/staged/miss 分阶段执行，通过 Ascend 数据搬运与计算流水隐藏 host-to-HBM 预取开销。
 - 论文非目标：不训练 router、不改 top-k、不做 expert drop、不把精度风险伪装成系统优化。
 - 目标文件：`paper/outline.md`、`paper/related_work_matrix.md`、`paper/sew_offload.tex`、`paper/sew_offload.bib`、`paper/experiment_plan.md`。
 
@@ -129,7 +174,7 @@
 
 - 目标：在 `vllm-ascend-hust` 内以默认关闭、单包高内聚、少量边界 hook 的方式推进；不重复实现现有 per-expert count dispatch。
 - 首选包：`vllm_ascend/moe_offload/`。
-- 首选 hook：`AscendUnquantizedFusedMoEMethod.apply()` 之后、`moe_comm_method.fused_experts()` 之前的 expert execution boundary；MVP-0 可复用 routed experts capturer 思路。
+- 首选 hook：短期仍在 `AscendUnquantizedFusedMoEMethod.apply()` 到 `moe_comm_method.fused_experts()` 的 expert execution boundary 做权重所有权和 slot remap；真正的 staged compute 切入点应下沉到 `MoECommMethod.fused_experts()` 内部的 `token_dispatch_output -> build_mlp_compute_input -> _apply_mlp` 边界。
 - 严控边界：暂不改 `model_runner` 主路径、暂不改 scheduler、暂不大改 Ascend C kernels。
 - 目标文档：`docs/sew-offload/00-charter.md`、`01-system-design.md`、`02-implementation-plan.md`、`03-experiment-plan.md`、`04-reproduction.md`。
 
@@ -157,6 +202,8 @@
 - 单卡 HBM 不足的实验模拟方式：真实限制 cache budget、保留 KV cache 压力、或人工减少 expert resident slots。
 - 分层驻留策略如何配置：按层保留完整 experts、按全局热点 expert 保留、还是二者组合；需要 trace/simulator 给出保留预算与命中/搬运收益曲线。
 - 参数所有权转移应支持 partial release：未卸载专家继续由 NPU 原始参数/常驻 bank 拥有，卸载专家由 HostExpertStore + ExpertSlotBank 拥有，避免错误地把“释放全部 expert 参数”当作唯一优化目标。
+- activation/token capacity 默认不固定：当前常规 MoE 已使用 `expert_tokens_num_type=1` + `group_list_type=1` 的动态 count 路径；SEW-Offload 默认只做 expert weight residency/remap，不引入 drop/pad 改变 token 语义。
+- 2026-06-02 源码复核修正：`Static Expert Window` 不应再解释为固定每专家 token 容量；项目主线改为 `Dynamic-Count Staged Expert-Weight Offloading`，即保留现有 dynamic count dispatch/grouped matmul 语义，在 dispatch 后围绕专家权重驻留、搬运和分阶段 MLP 计算做系统设计。
 
 ## 当前实测任务：现有 offloading baseline
 

@@ -37,6 +37,12 @@ def _enable_fixed_slots(monkeypatch, *, num_slots: int = 2):
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS", str(num_slots))
 
 
+def _enable_layered_runtime(monkeypatch, *, num_slots: int = 2, fanout_threshold: int = 2):
+    _enable_fixed_slots(monkeypatch, num_slots=num_slots)
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME", "1")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD", str(fanout_threshold))
+
+
 def _method(*, has_bias: bool = False):
     moe_config = MagicMock()
     moe_config.has_bias = has_bias
@@ -86,6 +92,31 @@ def _apply_with_fixed_slots(method, layer, mock_comm_method, *, moe_comm_type=Mo
         )
 
 
+def _apply_with_selected_ids(method, layer, mock_comm_method, selected_ids, *, moe_comm_type=MoECommType.ALLGATHER, **kwargs):
+    hidden_states = torch.randn(2, 8)
+    router_logits = torch.randn(2, 3)
+    selected_weights = torch.ones_like(selected_ids, dtype=torch.float32)
+
+    with (
+        patch("vllm_ascend.ops.fused_moe.fused_moe.get_moe_num_logical_experts", return_value=3),
+        patch("vllm_ascend.ops.fused_moe.fused_moe.select_experts", return_value=(selected_weights, selected_ids)),
+        patch("vllm_ascend.ops.fused_moe.fused_moe._EXTRA_CTX") as extra_ctx,
+    ):
+        extra_ctx.moe_comm_method = mock_comm_method
+        extra_ctx.moe_comm_type = moe_comm_type
+
+        return method.apply(
+            layer=layer,
+            x=hidden_states,
+            use_grouped_topk=False,
+            top_k=selected_ids.size(1),
+            router_logits=router_logits,
+            renormalize=True,
+            num_experts=3,
+            **kwargs,
+        )
+
+
 def test_fixed_slot_apply_passes_slot_weights_log2phy_and_physical_count(monkeypatch):
     _enable_fixed_slots(monkeypatch)
     method = _method()
@@ -99,15 +130,92 @@ def test_fixed_slot_apply_passes_slot_weights_log2phy_and_physical_count(monkeyp
     fused_input = mock_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
 
     assert result is backend_result
-    assert fused_input.weights.w1.shape == (2, 2, 4)
-    assert fused_input.weights.w2.shape == (2, 4, 2)
-    assert torch.equal(fused_input.weights.w1[0], layer.w13_weight[1])
-    assert torch.equal(fused_input.weights.w2[0], layer.w2_weight[1])
-    assert torch.equal(fused_input.weights.w1[1], layer.w13_weight[2])
-    assert torch.equal(fused_input.weights.w2[1], layer.w2_weight[2])
-    assert fused_input.routing.log2phy.tolist() == [-1, 0, 1]
-    assert fused_input.routing.physical_expert_count == 2
+    assert fused_input.weights.w1 is layer.w13_weight
+    assert fused_input.weights.w2 is layer.w2_weight
+    assert fused_input.routing.log2phy is None
+    assert fused_input.routing.physical_expert_count is None
+    assert fused_input.offload.enabled is True
+    assert fused_input.offload.layer_id == layer.layer_id
+    assert fused_input.offload.num_logical_experts == 3
 
+    reset_moe_offload_runtime()
+
+
+def test_layered_runtime_low_fanout_uses_slot_cache_path(monkeypatch):
+    _enable_layered_runtime(monkeypatch, num_slots=2, fanout_threshold=2)
+    method = _method()
+    layer = _layer()
+    get_moe_offload_runtime().register_layer_for_fixed_slots(layer, slot_device=torch.device("cpu"))
+    backend_result = torch.randn(2, 8)
+    mock_comm_method = MagicMock()
+    mock_comm_method.fused_experts.return_value = backend_result
+
+    result = _apply_with_selected_ids(
+        method,
+        layer,
+        mock_comm_method,
+        torch.tensor([[1, 2], [2, 1]], dtype=torch.int32),
+    )
+    fused_input = mock_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+
+    assert result is backend_result
+    assert fused_input.weights.w1 is layer.w13_weight
+    assert fused_input.routing.log2phy is None
+    assert fused_input.offload.enabled is True
+    assert fused_input.offload.layer_id == layer.layer_id
+    assert fused_input.offload.num_logical_experts == 3
+    reset_moe_offload_runtime()
+
+
+def test_layered_runtime_high_fanout_uses_full_weight_path(monkeypatch):
+    _enable_layered_runtime(monkeypatch, num_slots=2, fanout_threshold=2)
+    method = _method()
+    layer = _layer()
+    get_moe_offload_runtime().register_layer_for_fixed_slots(layer, slot_device=torch.device("cpu"))
+    backend_result = torch.randn(2, 8)
+    mock_comm_method = MagicMock()
+    mock_comm_method.fused_experts.return_value = backend_result
+
+    result = _apply_with_selected_ids(
+        method,
+        layer,
+        mock_comm_method,
+        torch.tensor([[0, 1], [2, 1]], dtype=torch.int32),
+    )
+    fused_input = mock_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+
+    assert result is backend_result
+    assert fused_input.weights.w1 is layer.w13_weight
+    assert fused_input.weights.w2 is layer.w2_weight
+    assert fused_input.routing.log2phy is None
+    assert fused_input.routing.physical_expert_count is None
+    assert fused_input.offload.enabled is True
+    reset_moe_offload_runtime()
+
+
+def test_layered_runtime_apply_defers_fail_closed_to_fused_experts_boundary(monkeypatch):
+    _enable_layered_runtime(monkeypatch, num_slots=2, fanout_threshold=2)
+    method = _method()
+    layer = _layer()
+    runtime = get_moe_offload_runtime()
+    runtime.register_layer_for_fixed_slots(layer, slot_device=torch.device("cpu"))
+    runtime._released_original_weight_layers.add(layer.layer_id)
+    mock_comm_method = MagicMock()
+
+    backend_result = torch.randn(2, 8)
+    mock_comm_method.fused_experts.return_value = backend_result
+
+    result = _apply_with_selected_ids(
+        method,
+        layer,
+        mock_comm_method,
+        torch.tensor([[0, 1], [2, 1]], dtype=torch.int32),
+    )
+    fused_input = mock_comm_method.fused_experts.call_args.kwargs["fused_experts_input"]
+
+    assert result is backend_result
+    assert fused_input.offload.enabled is True
+    assert mock_comm_method.fused_experts.call_count == 1
     reset_moe_offload_runtime()
 
 
@@ -197,7 +305,8 @@ def test_fixed_slot_apply_constrains_profile_force_load_balance_to_slot_budget(m
 
     assert result is backend_result
     assert sorted(set(fused_input.topk_ids.flatten().tolist())) == [0, 1]
-    assert fused_input.routing.log2phy.tolist() == [0, 1, -1]
+    assert fused_input.routing.log2phy is None
+    assert fused_input.offload.enabled is True
     reset_moe_offload_runtime()
 
 

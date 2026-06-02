@@ -257,6 +257,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2 = layer.w2_weight
             w2_scale = None
         physical_expert_count = None
+        offload_enabled = False
+        offload_expected_device_type = x.device.type
 
         layer_id = int(getattr(layer, "layer_id", -1))
         if moe_offload_runtime.should_use_fixed_slot_plan_for_layer(layer_id):
@@ -269,7 +271,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             if self.moe.has_bias:
                 raise NotImplementedError("MoE offload fixed slots do not support expert bias yet")
 
-            active_experts = tuple(int(expert_id) for expert_id in torch.unique(topk_ids.detach().cpu()).tolist())
             if not moe_offload_runtime.is_layer_registered(layer_id):
                 moe_offload_runtime.register_layer_for_fixed_slots(
                     layer,
@@ -277,17 +278,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 )
                 if moe_offload_runtime.config.release_original_expert_weights:
                     moe_offload_runtime.release_original_expert_weights_if_ready(layer)
-            prepared_weights = moe_offload_runtime.prepare_fixed_slot_plan(
-                layer_id=layer_id,
-                active_experts=active_experts,
-                num_logical_experts=num_logical_experts,
-                device=topk_ids.device,
-            )
-            prepared_weights.validate_backend_ready(expected_device_type=x.device.type)
-            w1 = prepared_weights.w1
-            w2 = prepared_weights.w2
-            log2phy = prepared_weights.log2phy
-            physical_expert_count = prepared_weights.physical_expert_count
+            offload_enabled = True
 
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
@@ -310,6 +301,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 activation=activation,
                 w1_scale=w1_scale,
                 w2_scale=w2_scale,
+                offload_enabled=offload_enabled,
+                offload_layer_id=layer_id,
+                offload_num_logical_experts=num_logical_experts,
+                offload_expected_device_type=offload_expected_device_type,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:

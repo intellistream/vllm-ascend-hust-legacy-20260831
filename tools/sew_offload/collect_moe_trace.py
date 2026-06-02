@@ -125,6 +125,10 @@ def load_manifest(
 def collect_trace(args: argparse.Namespace, config: dict[str, Any], requests: list[dict[str, Any]]) -> int:
     os.environ["VLLM_ASCEND_MOE_OFFLOAD_ENABLED"] = "1"
     os.environ["VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY"] = "1"
+    os.environ["VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH"] = str(args.output)
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("", encoding="utf-8")
     reset_moe_offload_runtime()
 
     model_path = args.model or config["model"]["path"]
@@ -153,7 +157,17 @@ def collect_trace(args: argparse.Namespace, config: dict[str, Any], requests: li
         for req in requests
     ]
     llm.generate([req["prompt"] for req in requests], sampling_params, use_tqdm=False)
-    return get_moe_offload_runtime().export_trace(args.output)
+    jsonl_records = _count_jsonl_records(output_path)
+    if jsonl_records > 0:
+        return jsonl_records
+    return get_moe_offload_runtime().export_trace(output_path)
+
+
+def _count_jsonl_records(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with path.open(encoding="utf-8") as f:
+        return sum(1 for line in f if line.strip())
 
 
 def main() -> None:

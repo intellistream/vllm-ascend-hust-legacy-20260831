@@ -36,6 +36,9 @@ class MoeOffloadConfig:
     # MVP-D.9: tiered residency (default off / empty)
     resident_layer_ids: frozenset[int] = frozenset()
     release_original_expert_weights: bool = False
+    # MVP-D.10: dynamic-count layered runtime path selector (default off).
+    layered_runtime: bool = False
+    fanout_threshold: int = 0
 
     @classmethod
     def from_env(cls) -> "MoeOffloadConfig":
@@ -51,6 +54,8 @@ class MoeOffloadConfig:
                 envs.VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS
             ),
             release_original_expert_weights=envs.VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS,
+            layered_runtime=envs.VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME,
+            fanout_threshold=envs.VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD,
         )
 
     @property
@@ -63,3 +68,9 @@ class MoeOffloadConfig:
     @property
     def should_trace(self) -> bool:
         return self.enabled and self.trace_only
+
+    @property
+    def effective_fanout_threshold(self) -> int:
+        if self.fanout_threshold > 0:
+            return self.fanout_threshold
+        return self.num_slots

@@ -16,13 +16,14 @@
 #
 
 from types import SimpleNamespace
+import json
 
 import pytest
 import torch
 
 from vllm_ascend.moe_offload import PreparedSlotWeights
 from vllm_ascend.moe_offload.config import MoeOffloadConfig
-from vllm_ascend.moe_offload.runtime import MoeOffloadRuntime
+from vllm_ascend.moe_offload.runtime import MoeOffloadDecisionPath, MoeOffloadRuntime
 
 
 def _mock_layer(layer_id: int = 0, num_experts: int = 3) -> SimpleNamespace:
@@ -112,6 +113,106 @@ def test_runtime_reports_fixed_slot_memory_ledger_without_releasing_original_wei
     assert ledger.host_store_bytes == original_bytes
     assert ledger.slot_bank_bytes == slot_bytes
     assert ledger.original_expert_weights_retained
+
+
+def test_runtime_profiles_register_and_release_with_ledger_snapshots():
+    runtime = MoeOffloadRuntime(
+        MoeOffloadConfig(
+            enabled=True,
+            trace_only=False,
+            num_slots=2,
+            release_original_expert_weights=True,
+        )
+    )
+    layer = _mock_layer(layer_id=7, num_experts=3)
+
+    runtime.register_layer_for_fixed_slots(layer, slot_device=torch.device("cpu"))
+    runtime.release_original_expert_weights_if_ready(layer)
+
+    summary = runtime.profiling_summary()
+    assert [event["name"] for event in summary["events"]] == [
+        "register_layer_for_fixed_slots",
+        "release_original_expert_weights",
+    ]
+    assert summary["events"][0]["layer_id"] == 7
+    assert summary["events"][0]["seconds"] >= 0
+    assert summary["events"][0]["memory_ledger"]["registered_layers"] == 1
+    assert summary["events"][1]["memory_ledger"]["original_expert_weight_bytes"] == 0
+    assert summary["total_seconds_by_event"]["register_layer_for_fixed_slots"] >= 0
+    assert summary["memory_ledger"]["original_expert_weight_bytes"] == 0
+
+
+def test_runtime_writes_profile_events_to_jsonl_when_profile_path_is_set(tmp_path, monkeypatch):
+    profile_path = tmp_path / "moe_profile.jsonl"
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH", str(profile_path))
+    runtime = MoeOffloadRuntime(MoeOffloadConfig(enabled=True, trace_only=False, num_slots=2))
+
+    runtime.register_layer_for_fixed_slots(_mock_layer(layer_id=3), slot_device=torch.device("cpu"))
+
+    records = [json.loads(line) for line in profile_path.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 1
+    assert records[0]["name"] == "register_layer_for_fixed_slots"
+    assert records[0]["layer_id"] == 3
+    assert records[0]["memory_ledger"]["registered_layers"] == 1
+
+
+def test_runtime_layered_decision_routes_low_fanout_to_slot_cache_path():
+    runtime = MoeOffloadRuntime(
+        MoeOffloadConfig(
+            enabled=True,
+            trace_only=False,
+            num_slots=2,
+            layered_runtime=True,
+            fanout_threshold=2,
+        )
+    )
+    runtime.register_layer_for_fixed_slots(_mock_layer(layer_id=0, num_experts=3), slot_device=torch.device("cpu"))
+
+    decision = runtime.decide_layered_path(layer_id=0, active_experts=(1, 2))
+
+    assert decision.path is MoeOffloadDecisionPath.SLOT_CACHE_PATH
+    assert decision.active_expert_count == 2
+    assert decision.reason == "low_fanout_slot_cache_ready"
+
+
+def test_runtime_layered_decision_routes_high_fanout_to_full_weight_when_available():
+    runtime = MoeOffloadRuntime(
+        MoeOffloadConfig(
+            enabled=True,
+            trace_only=False,
+            num_slots=2,
+            layered_runtime=True,
+            fanout_threshold=2,
+        )
+    )
+
+    decision = runtime.decide_layered_path(layer_id=4, active_experts=(0, 1, 2))
+
+    assert decision.path is MoeOffloadDecisionPath.FULL_WEIGHT_PATH
+    assert decision.active_expert_count == 3
+    assert decision.reason == "high_fanout_full_weights_available"
+
+
+def test_runtime_layered_decision_fails_closed_when_full_weights_were_released():
+    runtime = MoeOffloadRuntime(
+        MoeOffloadConfig(
+            enabled=True,
+            trace_only=False,
+            num_slots=2,
+            layered_runtime=True,
+            fanout_threshold=2,
+            release_original_expert_weights=True,
+        )
+    )
+    layer = _mock_layer(layer_id=5, num_experts=3)
+    runtime.register_layer_for_fixed_slots(layer, slot_device=torch.device("cpu"))
+    runtime.release_original_expert_weights_if_ready(layer)
+
+    decision = runtime.decide_layered_path(layer_id=5, active_experts=(0, 1, 2))
+
+    assert decision.path is MoeOffloadDecisionPath.FAIL_CLOSED
+    assert decision.active_expert_count == 3
+    assert decision.reason == "high_fanout_full_weights_unavailable"
 
 
 def test_runtime_release_readiness_rejects_current_correctness_prototype():

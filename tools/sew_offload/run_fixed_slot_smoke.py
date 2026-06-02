@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import statistics
 import time
 import traceback
 from pathlib import Path
@@ -24,7 +25,7 @@ from tools.sew_offload.collect_moe_trace import (
     load_manifest,
     prepare_synthetic_smoke_manifest,
 )
-from vllm_ascend.moe_offload.runtime import reset_moe_offload_runtime
+from vllm_ascend.moe_offload.runtime import get_moe_offload_runtime, reset_moe_offload_runtime
 
 
 DEFAULT_CONFIG = "docs/sew-offload/benchmark_config.yaml"
@@ -36,6 +37,12 @@ SEW_OFFLOAD_ENV_VARS = (
     "VLLM_ASCEND_MOE_OFFLOAD_ASYNC_LOAD",
     "VLLM_ASCEND_MOE_OFFLOAD_MAX_PHASES",
     "VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS",
+    "VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH",
+    "VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS",
+    "VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS",
+    "VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME",
+    "VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD",
+    "VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH",
 )
 
 
@@ -68,6 +75,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ignore-eos", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--num-slots", type=int, default=16)
+    parser.add_argument("--resident-layer-ids", default="")
+    parser.add_argument("--release-original-expert-weights", action="store_true")
+    parser.add_argument("--layered-runtime", action="store_true")
+    parser.add_argument("--fanout-threshold", type=int, default=0)
     parser.add_argument("--offload-backend", default="prefetch")
     parser.add_argument("--offload-group-size", type=int, default=4)
     parser.add_argument("--offload-num-in-group", type=int, default=1)
@@ -135,7 +146,16 @@ def override_request_max_output_tokens(
     ]
 
 
-def configure_sew_offload_env(mode: str, *, num_slots: int) -> None:
+def configure_sew_offload_env(
+    mode: str,
+    *,
+    num_slots: int,
+    resident_layer_ids: str = "",
+    release_original_expert_weights: bool = False,
+    layered_runtime: bool = False,
+    fanout_threshold: int = 0,
+    trace_path: str = "moe_offload_trace.jsonl",
+) -> None:
     if mode == "no_offload":
         for env_name in SEW_OFFLOAD_ENV_VARS:
             os.environ.pop(env_name, None)
@@ -144,6 +164,7 @@ def configure_sew_offload_env(mode: str, *, num_slots: int) -> None:
         os.environ["VLLM_ASCEND_MOE_OFFLOAD_ENABLED"] = "1"
         os.environ["VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY"] = "1"
         os.environ["VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS"] = "0"
+        os.environ["VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH"] = trace_path
     elif mode == "fixed_slot_sync":
         os.environ["VLLM_ASCEND_MOE_OFFLOAD_ENABLED"] = "1"
         os.environ["VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY"] = "0"
@@ -152,6 +173,13 @@ def configure_sew_offload_env(mode: str, *, num_slots: int) -> None:
         raise ValueError(f"unsupported smoke mode: {mode}")
     os.environ["VLLM_ASCEND_MOE_OFFLOAD_ASYNC_LOAD"] = "0"
     os.environ["VLLM_ASCEND_MOE_OFFLOAD_MAX_PHASES"] = "1"
+    os.environ["VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS"] = resident_layer_ids
+    os.environ["VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS"] = (
+        "1" if release_original_expert_weights else "0"
+    )
+    os.environ["VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME"] = "1" if layered_runtime else "0"
+    os.environ["VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD"] = str(int(fanout_threshold))
+    os.environ.setdefault("VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH", "moe_offload_profile.jsonl")
 
 
 def _csv_set(value: str) -> set[str]:
@@ -184,17 +212,67 @@ def _write_outputs_jsonl(output_dir: Path, outputs: list[Any]) -> None:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _read_profile_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                events.append(json.loads(line))
+    return events
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    k = (len(ordered) - 1) * percentile / 100
+    lo = int(k)
+    hi = min(lo + 1, len(ordered) - 1)
+    if lo == hi:
+        return ordered[lo]
+    weight = k - lo
+    return ordered[lo] * (1 - weight) + ordered[hi] * weight
+
+
+def _summarize(values: list[float]) -> dict[str, float]:
+    if not values:
+        return {"mean": 0.0, "median": 0.0, "p90": 0.0}
+    return {
+        "mean": statistics.fmean(values),
+        "median": statistics.median(values),
+        "p90": _percentile(values, 90),
+    }
+
+
 def _metrics_from_outputs(outputs: list[Any], duration_s: float) -> dict[str, Any]:
     total_output_tokens = 0
+    ttfts_ms: list[float] = []
+    tpots_ms: list[float] = []
     per_request: list[dict[str, Any]] = []
     for output in outputs:
         completion = output.outputs[0]
         num_tokens = len(completion.token_ids)
         total_output_tokens += num_tokens
+        request_metrics = getattr(output, "metrics", None)
+        ttft_ms = 0.0
+        tpot_ms = 0.0
+        if request_metrics is not None:
+            ttft_ms = float(getattr(request_metrics, "first_token_latency", 0.0)) * 1000
+            first_token_ts = getattr(request_metrics, "first_token_ts", None)
+            last_token_ts = getattr(request_metrics, "last_token_ts", None)
+            if num_tokens > 1 and first_token_ts and last_token_ts:
+                tpot_ms = float(last_token_ts - first_token_ts) / (num_tokens - 1) * 1000
+        ttfts_ms.append(ttft_ms)
+        if num_tokens > 1:
+            tpots_ms.append(tpot_ms)
         per_request.append(
             {
                 "request_id": output.request_id,
                 "output_tokens": num_tokens,
+                "ttft_ms": ttft_ms,
+                "tpot_ms": tpot_ms,
             }
         )
     return {
@@ -202,6 +280,8 @@ def _metrics_from_outputs(outputs: list[Any], duration_s: float) -> dict[str, An
         "completed": len(outputs),
         "total_output_tokens": total_output_tokens,
         "output_throughput_tok_s": total_output_tokens / duration_s if duration_s else 0.0,
+        "ttft_ms": _summarize(ttfts_ms),
+        "tpot_ms": _summarize(tpots_ms),
         "per_request": per_request,
     }
 
@@ -243,8 +323,24 @@ def run_smoke(
 ) -> dict[str, Any]:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    profile_jsonl_path = output_dir / "moe_offload_profile.jsonl"
+    trace_jsonl_path = output_dir / "moe_offload_trace.jsonl"
+    if profile_jsonl_path.exists():
+        profile_jsonl_path.unlink()
+    if trace_jsonl_path.exists():
+        trace_jsonl_path.unlink()
     mode = getattr(args, "mode", "fixed_slot_sync")
-    configure_sew_offload_env(mode, num_slots=args.num_slots)
+    configure_sew_offload_env(
+        mode,
+        num_slots=args.num_slots,
+        resident_layer_ids=getattr(args, "resident_layer_ids", ""),
+        release_original_expert_weights=getattr(args, "release_original_expert_weights", False),
+        layered_runtime=getattr(args, "layered_runtime", False),
+        fanout_threshold=getattr(args, "fanout_threshold", 0),
+        trace_path=str(trace_jsonl_path),
+    )
+    if mode != "no_offload":
+        os.environ["VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH"] = str(profile_jsonl_path)
     reset_moe_offload_runtime()
 
     llm_kwargs = _build_llm_kwargs(args, config, mode)
@@ -273,9 +369,14 @@ def run_smoke(
             "mode": mode,
             "model": llm_kwargs["model"],
             "num_slots": int(args.num_slots) if mode == "fixed_slot_sync" else 0,
+            "layered_runtime": bool(getattr(args, "layered_runtime", False)) if mode == "fixed_slot_sync" else False,
+            "fanout_threshold": int(getattr(args, "fanout_threshold", 0)) if mode == "fixed_slot_sync" else 0,
             "load_seconds": load_s,
             "manifest": str(args.manifest),
             "buckets": args.buckets,
+            "moe_offload_profile": get_moe_offload_runtime().profiling_summary(),
+            "moe_offload_profile_jsonl": str(profile_jsonl_path),
+            "moe_offload_profile_jsonl_events": _read_profile_jsonl(profile_jsonl_path),
         }
     )
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

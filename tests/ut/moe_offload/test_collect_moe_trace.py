@@ -16,10 +16,17 @@
 #
 
 import json
+from argparse import Namespace
 
 import pytest
+import torch
 
-from tools.sew_offload.collect_moe_trace import load_manifest, prepare_synthetic_smoke_manifest
+from tools.sew_offload.collect_moe_trace import (
+    collect_trace,
+    load_manifest,
+    prepare_synthetic_smoke_manifest,
+)
+from vllm_ascend.moe_offload.runtime import get_moe_offload_runtime
 
 
 def test_prepare_synthetic_smoke_manifest_writes_selected_bucket(tmp_path):
@@ -83,3 +90,59 @@ def test_load_manifest_rejects_empty_selection(tmp_path):
 
     with pytest.raises(ValueError, match="no requests selected"):
         load_manifest(manifest_path, buckets={"missing"}, max_requests=0)
+
+
+def test_collect_trace_uses_output_as_cross_process_trace_path(tmp_path, monkeypatch):
+    class FakeLLM:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def generate(self, prompts, sampling_params, use_tqdm):
+            assert prompts == ["hello"]
+            assert len(sampling_params) == 1
+            assert use_tqdm is False
+            get_moe_offload_runtime().trace_routing(
+                layer_id=0,
+                topk_ids=torch.tensor([[1, 2]], dtype=torch.int32),
+                topk_weights=torch.tensor([[0.6, 0.4]], dtype=torch.float32),
+                num_experts=8,
+                mode="decode",
+            )
+            return []
+
+    output_path = tmp_path / "trace.jsonl"
+    monkeypatch.setattr("tools.sew_offload.collect_moe_trace.LLM", FakeLLM)
+
+    args = Namespace(
+        model="/tmp/fake-model",
+        output=str(output_path),
+        max_model_len=16,
+        max_num_seqs=1,
+        max_num_batched_tokens=16,
+        kv_cache_memory_mb=16,
+        gpu_memory_utilization=0.5,
+        enforce_eager=True,
+        ignore_eos=True,
+    )
+    config = {
+        "model": {"path": "/tmp/fake-model", "tensor_parallel_size": 1},
+        "dataset": {"seed": 20260529},
+    }
+    requests = [
+        {
+            "prompt": "hello",
+            "max_output_tokens": 1,
+            "temperature": 0.0,
+            "top_p": 1.0,
+        }
+    ]
+
+    num_records = collect_trace(args, config, requests)
+
+    assert num_records == 1
+    assert output_path.exists()
+    assert json.loads(output_path.read_text(encoding="utf-8"))["expert_token_counts"] == {
+        "1": 1,
+        "2": 1,
+    }
+    assert "VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH" in __import__("os").environ

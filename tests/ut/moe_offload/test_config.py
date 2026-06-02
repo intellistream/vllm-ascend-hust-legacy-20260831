@@ -29,6 +29,8 @@ def test_default_config_is_disabled(monkeypatch):
         "VLLM_ASCEND_MOE_OFFLOAD_MAX_PHASES",
         "VLLM_ASCEND_MOE_OFFLOAD_ASYNC_LOAD",
         "VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS",
+        "VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME",
+        "VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -41,6 +43,8 @@ def test_default_config_is_disabled(monkeypatch):
     assert cfg.max_phases == 2
     assert cfg.async_load is False
     assert cfg.trace_max_records == 4096
+    assert cfg.layered_runtime is False
+    assert cfg.fanout_threshold == 0
 
 
 def test_env_config_parses_values(monkeypatch):
@@ -51,6 +55,8 @@ def test_env_config_parses_values(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_MAX_PHASES", "1")
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_ASYNC_LOAD", "1")
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS", "16")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME", "1")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD", "4")
 
     cfg = MoeOffloadConfig.from_env()
 
@@ -61,6 +67,8 @@ def test_env_config_parses_values(monkeypatch):
     assert cfg.max_phases == 1
     assert cfg.async_load is True
     assert cfg.trace_max_records == 16
+    assert cfg.layered_runtime is True
+    assert cfg.fanout_threshold == 4
 
 
 def test_env_variables_are_registered(monkeypatch):

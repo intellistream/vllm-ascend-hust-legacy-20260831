@@ -20,6 +20,8 @@ import json
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tools.sew_offload.run_fixed_slot_smoke import (
     configure_sew_offload_env,
     load_manifest,
@@ -165,6 +167,11 @@ def test_run_fixed_slot_smoke_sets_env_and_writes_summary(tmp_path, monkeypatch)
     generated = MagicMock()
     generated.request_id = "short_chat_0000"
     generated.outputs = [MagicMock(token_ids=[1, 2, 3, 4])]
+    generated.metrics = MagicMock(
+        first_token_latency=0.25,
+        first_token_ts=10.0,
+        last_token_ts=10.6,
+    )
 
     with (
         patch("tools.sew_offload.run_fixed_slot_smoke.reset_moe_offload_runtime") as mock_reset,
@@ -187,16 +194,23 @@ def test_run_fixed_slot_smoke_sets_env_and_writes_summary(tmp_path, monkeypatch)
     assert summary["num_slots"] == 2
     assert summary["completed"] == 1
     assert summary["total_output_tokens"] == 4
+    assert summary["ttft_ms"]["mean"] == 250.0
+    assert summary["tpot_ms"]["mean"] == pytest.approx(200.0)
     summary_path = output_dir / "summary.json"
     assert json.loads(summary_path.read_text(encoding="utf-8"))["status"] == "ok"
 
 
-def test_configure_sew_offload_env_supports_default_and_trace_only_modes(monkeypatch):
+def test_configure_sew_offload_env_supports_default_and_trace_only_modes(tmp_path, monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_ENABLED", "1")
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY", "0")
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS", "8")
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_POLICY", "lru")
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS", "16")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH", str(tmp_path / "stale_trace.jsonl"))
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS", "0,1")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS", "1")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME", "1")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD", "2")
 
     configure_sew_offload_env("no_offload", num_slots=8)
     assert "VLLM_ASCEND_MOE_OFFLOAD_ENABLED" not in os.environ
@@ -204,11 +218,31 @@ def test_configure_sew_offload_env_supports_default_and_trace_only_modes(monkeyp
     assert "VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS" not in os.environ
     assert "VLLM_ASCEND_MOE_OFFLOAD_POLICY" not in os.environ
     assert "VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS" not in os.environ
+    assert "VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH" not in os.environ
+    assert "VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS" not in os.environ
+    assert "VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS" not in os.environ
+    assert "VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME" not in os.environ
+    assert "VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD" not in os.environ
 
     configure_sew_offload_env("trace_only", num_slots=8)
     assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_ENABLED"] == "1"
     assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY"] == "1"
     assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS"] == "0"
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH"].endswith("moe_offload_trace.jsonl")
+
+    configure_sew_offload_env(
+        "fixed_slot_sync",
+        num_slots=8,
+        resident_layer_ids="1,2,3",
+        release_original_expert_weights=True,
+        layered_runtime=True,
+        fanout_threshold=4,
+    )
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS"] == "1,2,3"
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS"] == "1"
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME"] == "1"
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD"] == "4"
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH"].endswith("moe_offload_profile.jsonl")
 
 
 def test_run_no_offload_smoke_omits_native_offload_kwargs_and_writes_outputs(tmp_path):
@@ -268,4 +302,78 @@ def test_run_no_offload_smoke_omits_native_offload_kwargs_and_writes_outputs(tmp
             "output_token_ids": [7, 8],
             "output_tokens": 2,
         }
+    ]
+
+
+def test_run_smoke_writes_moe_offload_profile_to_summary(tmp_path):
+    output_dir = tmp_path / "smoke"
+    args = argparse.Namespace(
+        mode="fixed_slot_sync",
+        model=None,
+        output_dir=str(output_dir),
+        manifest=str(tmp_path / "requests.jsonl"),
+        buckets="short_chat",
+        max_requests=1,
+        max_model_len=512,
+        max_num_seqs=1,
+        max_num_batched_tokens=512,
+        kv_cache_memory_mb=512,
+        gpu_memory_utilization=0.9,
+        enforce_eager=True,
+        ignore_eos=True,
+        num_slots=2,
+        offload_backend="prefetch",
+        offload_group_size=4,
+        offload_num_in_group=1,
+        offload_prefetch_step=1,
+        offload_params="experts",
+    )
+    request = {
+        "request_id": "short_chat_0000",
+        "bucket": "short_chat",
+        "prompt": "hello",
+        "max_output_tokens": 1,
+        "temperature": 0.0,
+        "top_p": 1.0,
+    }
+    generated = MagicMock()
+    generated.request_id = "short_chat_0000"
+    generated.outputs = [MagicMock(token_ids=[7], text="hi")]
+    profile = {
+        "events": [{"name": "register_layer_for_fixed_slots", "seconds": 0.1}],
+        "total_seconds_by_event": {"register_layer_for_fixed_slots": 0.1},
+        "memory_ledger": {"registered_layers": 1},
+    }
+    profile_jsonl = output_dir / "moe_offload_profile.jsonl"
+
+    with (
+        patch("tools.sew_offload.run_fixed_slot_smoke.reset_moe_offload_runtime"),
+        patch("tools.sew_offload.run_fixed_slot_smoke.get_moe_offload_runtime", create=True) as mock_runtime,
+        patch("tools.sew_offload.run_fixed_slot_smoke.LLM") as mock_llm_cls,
+    ):
+        mock_runtime.return_value.profiling_summary.return_value = profile
+        mock_llm = MagicMock()
+        mock_llm.generate.return_value = [generated]
+
+        def build_llm(**kwargs):
+            del kwargs
+            profile_jsonl.write_text(
+                json.dumps({"name": "release_original_expert_weights", "seconds": 0.2}) + "\n",
+                encoding="utf-8",
+            )
+            return mock_llm
+
+        mock_llm_cls.side_effect = build_llm
+
+        summary = run_smoke(args, _config(), [request])
+
+    assert summary["moe_offload_profile"]["events"] == profile["events"]
+    assert summary["moe_offload_profile_jsonl_events"] == [
+        {"name": "release_original_expert_weights", "seconds": 0.2}
+    ]
+    summary_path = output_dir / "summary.json"
+    written = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert written["moe_offload_profile"]["events"] == profile["events"]
+    assert written["moe_offload_profile_jsonl_events"] == [
+        {"name": "release_original_expert_weights", "seconds": 0.2}
     ]

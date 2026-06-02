@@ -28,9 +28,12 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
     MoEMlpComputeInput,
     MoEPrepareOutput,
+    MoERoutingParams,
+    MoEWeights,
     build_mlp_compute_input,
     build_token_dispatch_input,
 )
+from vllm_ascend.moe_offload.runtime import MoeOffloadDecisionPath, get_moe_offload_runtime
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
     PrepareAndFinalizeWithAll2All,
@@ -125,6 +128,7 @@ class MoECommMethod(ABC):
         assert moe_comm_method is not None, "Missing communication context"
 
         before_dispatch_evt = torch.npu.current_stream().record_event()
+        fused_experts_input = self._maybe_apply_moe_offload_plan(fused_experts_input)
         routed_topk_ids = fused_experts_input.topk_ids
         if fused_experts_input.routing.log2phy is not None:
             routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
@@ -159,6 +163,70 @@ class MoECommMethod(ABC):
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+    def _maybe_apply_moe_offload_plan(self, fused_experts_input: MoEFusedExpertsInput) -> MoEFusedExpertsInput:
+        offload = fused_experts_input.offload
+        if offload is None or not offload.enabled:
+            return fused_experts_input
+
+        runtime = get_moe_offload_runtime()
+        active_experts = tuple(
+            int(expert_id) for expert_id in torch.unique(fused_experts_input.topk_ids.detach().cpu()).tolist()
+        )
+        use_slot_cache_path = True
+        if runtime.should_use_layered_runtime:
+            decision = runtime.decide_layered_path(
+                layer_id=offload.layer_id,
+                active_experts=active_experts,
+            )
+            if decision.path is MoeOffloadDecisionPath.FAIL_CLOSED:
+                raise RuntimeError(
+                    "MoE offload layered runtime failed closed: "
+                    f"layer_id={offload.layer_id}, reason={decision.reason}"
+                )
+            use_slot_cache_path = decision.path is MoeOffloadDecisionPath.SLOT_CACHE_PATH
+
+        if not use_slot_cache_path:
+            return fused_experts_input
+
+        prepared_weights = runtime.prepare_fixed_slot_plan(
+            layer_id=offload.layer_id,
+            active_experts=active_experts,
+            num_logical_experts=offload.num_logical_experts,
+            device=fused_experts_input.topk_ids.device,
+        )
+        prepared_weights.validate_backend_ready(expected_device_type=offload.expected_device_type)
+        return MoEFusedExpertsInput(
+            hidden_states=fused_experts_input.hidden_states,
+            topk_weights=fused_experts_input.topk_weights,
+            topk_ids=fused_experts_input.topk_ids,
+            weights=MoEWeights(
+                w1=prepared_weights.w1,
+                w2=prepared_weights.w2,
+                w1_bias=fused_experts_input.weights.w1_bias,
+                w2_bias=fused_experts_input.weights.w2_bias,
+                w1_scale=fused_experts_input.weights.w1_scale,
+                w2_scale=fused_experts_input.weights.w2_scale,
+                w1_scale_bias=fused_experts_input.weights.w1_scale_bias,
+                w2_scale_bias=fused_experts_input.weights.w2_scale_bias,
+                w1_offset=fused_experts_input.weights.w1_offset,
+                w2_offset=fused_experts_input.weights.w2_offset,
+            ),
+            routing=MoERoutingParams(
+                expert_map=fused_experts_input.routing.expert_map,
+                global_redundant_expert_num=fused_experts_input.routing.global_redundant_expert_num,
+                mc2_mask=fused_experts_input.routing.mc2_mask,
+                apply_router_weight_on_input=fused_experts_input.routing.apply_router_weight_on_input,
+                log2phy=prepared_weights.log2phy,
+                physical_expert_count=prepared_weights.physical_expert_count,
+                pertoken_scale=fused_experts_input.routing.pertoken_scale,
+            ),
+            quant=fused_experts_input.quant,
+            activation=fused_experts_input.activation,
+            need_trans=fused_experts_input.need_trans,
+            dynamic_eplb=fused_experts_input.dynamic_eplb,
+            offload=fused_experts_input.offload,
+        )
 
     @abstractmethod
     def _get_token_dispatcher(self) -> MoETokenDispatcher:

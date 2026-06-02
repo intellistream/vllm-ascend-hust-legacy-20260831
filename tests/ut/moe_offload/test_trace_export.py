@@ -82,6 +82,34 @@ def test_runtime_exports_trace_jsonl(tmp_path):
     assert exported[0]["expert_token_counts"] == {"1": 1, "3": 1}
 
 
+def test_runtime_appends_trace_jsonl_when_trace_path_is_set(tmp_path, monkeypatch):
+    trace_path = tmp_path / "child-process-trace.jsonl"
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH", str(trace_path))
+    runtime = MoeOffloadRuntime(MoeOffloadConfig(enabled=True, trace_only=True))
+
+    runtime.trace_routing(
+        layer_id=6,
+        topk_ids=torch.tensor([[1, 7], [7, 8]], dtype=torch.int32),
+        topk_weights=torch.tensor([[0.6, 0.4], [0.9, 0.1]], dtype=torch.float32),
+        num_experts=16,
+        mode="decode",
+    )
+
+    exported = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    assert exported == [
+        {
+            "active_experts": [1, 7, 8],
+            "expert_token_counts": {"1": 1, "7": 2, "8": 1},
+            "layer_id": 6,
+            "mode": "decode",
+            "num_experts": 16,
+            "num_tokens": 2,
+            "step_id": 0,
+            "top_k": 2,
+        }
+    ]
+
+
 def test_disabled_runtime_exports_empty_trace(tmp_path):
     runtime = MoeOffloadRuntime(MoeOffloadConfig(enabled=False, trace_only=False))
     runtime.trace_routing(

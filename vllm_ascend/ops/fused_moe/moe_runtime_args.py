@@ -66,6 +66,7 @@ from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
     MoEFusedExpertsInput,
     MoEMC2CombineMetadata,
     MoEMlpComputeInput,
+    MoEOffloadParams,
     MoEPrepareOutput,
     MoETokenDispatchInput,
     MoETokenDispatchOutput,
@@ -145,6 +146,10 @@ def build_fused_experts_input(
     w2_scale_bias: torch.Tensor | None = None,
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
+    offload_enabled: bool = False,
+    offload_layer_id: int = -1,
+    offload_num_logical_experts: int = -1,
+    offload_expected_device_type: str = "npu",
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
@@ -174,6 +179,14 @@ def build_fused_experts_input(
         activation=activation,
         need_trans=need_trans,
         dynamic_eplb=dynamic_eplb,
+        offload=MoEOffloadParams(
+            enabled=offload_enabled,
+            layer_id=offload_layer_id,
+            num_logical_experts=offload_num_logical_experts,
+            expected_device_type=offload_expected_device_type,
+        )
+        if offload_enabled
+        else None,
         quant=MoEQuantParams(
             quant_type=quant_type,
             comm_quant_mode=comm_quant_mode,
@@ -233,6 +246,7 @@ __all__ = [
     "MoEFusedExpertsInput",
     "MoEMC2CombineMetadata",
     "MoEMlpComputeInput",
+    "MoEOffloadParams",
     "MoEPrepareOutput",
     "MoEQuantParams",
     "MoERoutingParams",

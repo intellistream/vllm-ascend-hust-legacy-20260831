@@ -16,17 +16,21 @@
 #
 
 from dataclasses import dataclass
+from enum import Enum
 from itertools import count
+import json
 from pathlib import Path
+from time import perf_counter
 
 import torch
 
+from vllm_ascend import envs
 from vllm_ascend.moe_offload.config import MoeOffloadConfig
 from vllm_ascend.moe_offload.expert_key import ExpertKey
 from vllm_ascend.moe_offload.host_store import HostExpertStore
 from vllm_ascend.moe_offload.slot_bank import ExpertSlotBank, SlotState
 from vllm_ascend.moe_offload.slot_mapping import ExpertSlotMapping, PreparedSlotWeights
-from vllm_ascend.moe_offload.trace_collector import TraceCollector
+from vllm_ascend.moe_offload.trace_collector import TraceCollector, TraceRecord
 from vllm_ascend.moe_offload.expert_weight_release import release_layer_original_expert_weights
 from vllm_ascend.moe_offload.tiered_residency import TieredResidencyPolicy
 from vllm_ascend.moe_offload.transfer_engine import TransferEngine
@@ -48,12 +52,73 @@ class MoeOffloadMemoryLedger:
     def total_managed_bytes(self) -> int:
         return self.original_expert_weight_bytes + self.host_store_bytes + self.slot_bank_bytes
 
+    def to_jsonable(self) -> dict[str, int | bool]:
+        return {
+            "registered_layers": int(self.registered_layers),
+            "host_experts": int(self.host_experts),
+            "original_expert_weight_bytes": int(self.original_expert_weight_bytes),
+            "host_store_bytes": int(self.host_store_bytes),
+            "slot_bank_bytes": int(self.slot_bank_bytes),
+            "original_expert_weights_retained": self.original_expert_weights_retained,
+            "total_managed_bytes": int(self.total_managed_bytes),
+        }
+
 
 @dataclass(frozen=True)
 class MoeExpertReleasePlan:
     ready: bool
     layers_ready: tuple[int, ...]
     blockers: tuple[str, ...]
+
+
+class MoeOffloadDecisionPath(str, Enum):
+    FULL_WEIGHT_PATH = "full_weight_path"
+    SLOT_CACHE_PATH = "slot_cache_path"
+    FAIL_CLOSED = "fail_closed"
+
+
+@dataclass(frozen=True)
+class MoeOffloadPathDecision:
+    path: MoeOffloadDecisionPath
+    layer_id: int
+    active_expert_count: int
+    active_experts: tuple[int, ...]
+    fanout_threshold: int
+    full_weights_available: bool
+    slot_cache_ready: bool
+    reason: str
+
+    def to_jsonable(self) -> dict[str, object]:
+        return {
+            "path": self.path.value,
+            "layer_id": self.layer_id,
+            "active_expert_count": self.active_expert_count,
+            "active_experts": list(self.active_experts),
+            "fanout_threshold": self.fanout_threshold,
+            "full_weights_available": self.full_weights_available,
+            "slot_cache_ready": self.slot_cache_ready,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class MoeOffloadProfileEvent:
+    name: str
+    layer_id: int | None
+    seconds: float
+    memory_ledger: MoeOffloadMemoryLedger
+    payload: dict[str, object] | None = None
+
+    def to_jsonable(self) -> dict[str, object]:
+        data = {
+            "name": self.name,
+            "layer_id": self.layer_id,
+            "seconds": self.seconds,
+            "memory_ledger": self.memory_ledger.to_jsonable(),
+        }
+        if self.payload is not None:
+            data["payload"] = self.payload
+        return data
 
 
 class MoeOffloadRuntime:
@@ -66,6 +131,7 @@ class MoeOffloadRuntime:
         self._original_expert_weight_bytes_by_layer: dict[int, int] = {}
         self._released_original_weight_layers: set[int] = set()
         self._transfer_engine = TransferEngine()
+        self._profile_events: list[MoeOffloadProfileEvent] = []
 
     def trace_routing(
         self,
@@ -77,13 +143,14 @@ class MoeOffloadRuntime:
         mode: str = "unknown",
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.config.should_trace:
-            self.trace_collector.record(
+            record = self.trace_collector.record(
                 layer_id=layer_id,
                 step_id=next(self._step_counter),
                 topk_ids=topk_ids,
                 num_experts=num_experts,
                 mode=mode,
             )
+            self._append_trace_record_jsonl(record)
         return topk_ids, topk_weights
 
     def export_trace(self, path: str | Path) -> int:
@@ -92,6 +159,10 @@ class MoeOffloadRuntime:
     @property
     def should_use_fixed_slots(self) -> bool:
         return self.config.enabled and not self.config.trace_only and self.config.num_slots > 0
+
+    @property
+    def should_use_layered_runtime(self) -> bool:
+        return self.should_use_fixed_slots and self.config.layered_runtime
 
     def register_layer_for_fixed_slots(
         self,
@@ -103,6 +174,7 @@ class MoeOffloadRuntime:
         if layer_id < 0:
             raise ValueError("layer.layer_id is required for fixed-slot registration")
 
+        start = perf_counter()
         self._host_store.register_layer(layer)
         w13_weight = getattr(layer, "w13_weight")
         w2_weight = getattr(layer, "w2_weight")
@@ -114,6 +186,11 @@ class MoeOffloadRuntime:
             tuple(int(dim) for dim in w2_weight.shape[1:]),
             dtype=w13_weight.dtype,
             device=device,
+        )
+        self._record_profile_event(
+            "register_layer_for_fixed_slots",
+            layer_id=layer_id,
+            start=start,
         )
 
     def is_layer_registered(self, layer_id: int) -> bool:
@@ -140,6 +217,68 @@ class MoeOffloadRuntime:
             host_store_bytes=self._host_store.total_bytes,
             slot_bank_bytes=sum(slot_bank.total_bytes for slot_bank in self._slot_banks.values()),
         )
+
+    def profiling_summary(self) -> dict[str, object]:
+        total_seconds_by_event: dict[str, float] = {}
+        for event in self._profile_events:
+            total_seconds_by_event[event.name] = total_seconds_by_event.get(event.name, 0.0) + event.seconds
+        return {
+            "events": [event.to_jsonable() for event in self._profile_events],
+            "total_seconds_by_event": total_seconds_by_event,
+            "memory_ledger": self.memory_ledger().to_jsonable(),
+        }
+
+    def original_expert_weights_available_for_layer(self, layer_id: int) -> bool:
+        return int(layer_id) not in self._released_original_weight_layers
+
+    def decide_layered_path(
+        self,
+        *,
+        layer_id: int,
+        active_experts: tuple[int, ...],
+    ) -> MoeOffloadPathDecision:
+        normalized_layer_id = int(layer_id)
+        unique_active_experts = _dedupe_preserve_order(active_experts)
+        fanout_threshold = int(self.config.effective_fanout_threshold)
+        full_weights_available = self.original_expert_weights_available_for_layer(normalized_layer_id)
+        slot_cache_ready = self.should_use_fixed_slot_plan_for_layer(normalized_layer_id) and (
+            normalized_layer_id in self._slot_banks
+        )
+
+        if not self.should_use_layered_runtime:
+            path = MoeOffloadDecisionPath.SLOT_CACHE_PATH
+            reason = "layered_runtime_disabled"
+        elif len(unique_active_experts) > fanout_threshold:
+            if full_weights_available:
+                path = MoeOffloadDecisionPath.FULL_WEIGHT_PATH
+                reason = "high_fanout_full_weights_available"
+            else:
+                path = MoeOffloadDecisionPath.FAIL_CLOSED
+                reason = "high_fanout_full_weights_unavailable"
+        elif slot_cache_ready:
+            path = MoeOffloadDecisionPath.SLOT_CACHE_PATH
+            reason = "low_fanout_slot_cache_ready"
+        else:
+            path = MoeOffloadDecisionPath.FAIL_CLOSED
+            reason = "low_fanout_slot_cache_unavailable"
+
+        decision = MoeOffloadPathDecision(
+            path=path,
+            layer_id=normalized_layer_id,
+            active_expert_count=len(unique_active_experts),
+            active_experts=unique_active_experts,
+            fanout_threshold=fanout_threshold,
+            full_weights_available=full_weights_available,
+            slot_cache_ready=slot_cache_ready,
+            reason=reason,
+        )
+        self._record_profile_event(
+            "layered_path_decision",
+            layer_id=normalized_layer_id,
+            start=perf_counter(),
+            payload=decision.to_jsonable(),
+        )
+        return decision
 
     def plan_original_weight_release(
         self,
@@ -219,9 +358,15 @@ class MoeOffloadRuntime:
         if not plan.ready:
             return plan
 
+        start = perf_counter()
         release_layer_original_expert_weights(layer)
         self._released_original_weight_layers.add(layer_id)
         self._original_expert_weight_bytes_by_layer[layer_id] = 0
+        self._record_profile_event(
+            "release_original_expert_weights",
+            layer_id=layer_id,
+            start=start,
+        )
         return MoeExpertReleasePlan(ready=True, layers_ready=(layer_id,), blockers=())
 
     def prepare_fixed_slot_plan(
@@ -289,6 +434,44 @@ class MoeOffloadRuntime:
             "fixed-slot execution requires num_logical_experts and backend wiring; "
             "use prepare_fixed_slot_plan() for the current safe planning path"
         )
+
+    def _record_profile_event(
+        self,
+        name: str,
+        *,
+        layer_id: int | None,
+        start: float,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        event = MoeOffloadProfileEvent(
+            name=name,
+            layer_id=layer_id,
+            seconds=perf_counter() - start,
+            memory_ledger=self.memory_ledger(),
+            payload=payload,
+        )
+        self._profile_events.append(event)
+        self._append_profile_event_jsonl(event)
+
+    @staticmethod
+    def _append_profile_event_jsonl(event: MoeOffloadProfileEvent) -> None:
+        profile_path = envs.VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH
+        if not profile_path:
+            return
+        path = Path(profile_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event.to_jsonable(), sort_keys=True) + "\n")
+
+    @staticmethod
+    def _append_trace_record_jsonl(record: TraceRecord) -> None:
+        trace_path = envs.VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH
+        if not trace_path:
+            return
+        path = Path(trace_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record.to_jsonable(), sort_keys=True) + "\n")
 
 
 def _tensor_nbytes(tensor: torch.Tensor) -> int:
