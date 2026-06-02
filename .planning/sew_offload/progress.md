@@ -852,3 +852,21 @@
 - 自我反思：
   - 当前不能把“未补跑”解释为工程失败；这是硬件资源不可控导致的验证阻塞。
   - 继续规划 D.11 是有价值的，但实现前最好先取得 D.10 下沉后的 1-token strict compare，避免未来出现错误时无法判断来自下沉 remap 还是 phase split。
+
+## 2026-06-02 D.10 post-downsink 真实 NPU smoke 补跑通过
+
+- NPU 6 资源窗口恢复（HBM 约 3620MB、AICore 0%、无业务 PID），按计划补跑下沉版（fused_experts 边界内生化）真实 smoke。
+- 配置：NPU 6，Qwen3-30B-A3B，inline `Hello`，layer 0 non-resident + layers 1..47 resident，`--num-slots 8`，`--fanout-threshold 8`，`--release-original-expert-weights`，native prefetch expert offload（group_size 4 / num_in_group 1 / prefetch_step 1 / params experts），`max_model_len=512`、`max_num_seqs=1`、`kv_cache_memory_mb=512`。
+- 1-token：
+  - baseline `artifacts/sew_offload/runs/d10_postdownsink_no_offload_1tok_20260602`：status ok，reported weight `56.9001 GB`，token id `[353]`。
+  - candidate `artifacts/sew_offload/runs/d10_postdownsink_fused_boundary_layered_1tok_retry_20260602`：status ok，reported weight `42.3454 GB`，throughput `1.189 tok/s`，TTFT `839.34 ms`，token id `[353]`，path decision `slot_cache_path`/`low_fanout_slot_cache_ready`，`release_original_expert_weights` 后 layer 0 original expert bytes 从 `1207959552` 归零。
+  - strict compare `correctness_compare.json`：status ok，matched=1。
+  - 第一次启动曾因 NPU 6 残留幽灵设备上下文（PID 不在 Linux 进程表、AICore 活跃）偶发 engine core init 失败；未擅自 reset/kill，约 30s 上下文自行释放后原样重跑即成功。
+- 8-token：
+  - baseline `artifacts/sew_offload/runs/d10_postdownsink_no_offload_8tok_20260602`：status ok，throughput `5.512 tok/s`，TTFT `582.88 ms`，TPOT `124.01 ms`，token ids `[353,91957,9,0,358,2776,501,311]`。
+  - candidate `artifacts/sew_offload/runs/d10_postdownsink_fused_boundary_layered_8tok_20260602`：status ok，throughput `1.475 tok/s`，TTFT `1012.95 ms`，TPOT `630.06 ms`，token ids `[353,91957,9,0,358,2776,501,311]`，全程 9 次 `slot_cache_path`/`low_fanout_slot_cache_ready`（短 prompt prefill fan-out 亦低于阈值 8）。
+  - strict compare `correctness_compare.json`：status ok，matched=1。
+- 结论：
+  - post-downsink NPU smoke 解除阻塞：下沉到 `MoECommMethod.fused_experts()` 后的 path decision、slot plan、`log2phy/physical_expert_count` remap 与 dynamic count/grouped matmul 在真实 NPU 上保持 token-id correctness。
+  - 同步 slot path 性能仍显著慢于 no-offload（8-token candidate `1.475 tok/s` vs baseline `5.512 tok/s`），只作为 offloading 通路与 observability 闭环，不写成性能收益。
+  - D.10 correctness 门禁已过，可进入 MVP-D.11 dispatch 后 phase split 语义原型；不再把硬件资源问题和 phase split 语义问题混在一起。

@@ -10,7 +10,7 @@
 
 ## 当前阶段
 
-阶段 13：**MVP-D.10**（dynamic-count layered runtime 原型）收口中；MVP-D.9 的分段打点、小范围 release=1 NPU smoke、no-offload 对照、真实 trace JSONL、resident/slot/global sweep、prefill/resident-aware 离线策略验证与 Static Expert Window 源码复核均已完成。D.10 已完成默认关闭的在线 path selector，并完成 `MoECommMethod.fused_experts` 边界内生化代码与 UT；旧 hook 位置的 1-token/8-token 真实 NPU smoke 已通过并输出 throughput/TTFT/TPOT。post-downsink 真实 NPU smoke 当前被 NPU 6 残留 HBM 上下文/启动内存门禁阻塞，待设备资源释放后补跑。阶段 14：**MVP-D.11**（dispatch 后 phase split 语义原型）已完成任务规划；进入实现前仍建议先补齐 D.10 post-downsink 1-token strict compare，避免把硬件资源问题和 phase split 语义问题混在一起。
+阶段 13：**MVP-D.10**（dynamic-count layered runtime 原型）已收口；MVP-D.9 的分段打点、小范围 release=1 NPU smoke、no-offload 对照、真实 trace JSONL、resident/slot/global sweep、prefill/resident-aware 离线策略验证与 Static Expert Window 源码复核均已完成。D.10 已完成默认关闭的在线 path selector 与 `MoECommMethod.fused_experts` 边界内生化代码/UT，且 2026-06-02 NPU 6 资源窗口恢复后补跑的 post-downsink 真实 smoke 全部通过：1-token 与 8-token candidate 均 status ok，与 no-offload baseline strict token-id 对照全部一致，fused boundary path decision 在真实 NPU 上验证正确。阶段 14：**MVP-D.11**（dispatch 后 phase split 语义原型）已完成任务规划，且 D.10 post-downsink 1-token/8-token strict compare 门禁已满足，可进入实现。
 
 ## 阶段 12：MVP-D.9 任务表
 
@@ -43,8 +43,8 @@
 | Decision observability | complete | profile JSONL 记录 active count、path、full/slot readiness、reason 和 ledger |
 | UT 回归 | complete | 默认路径、low fanout slot path、high fanout full path、released fail-closed、smoke env/metrics |
 | 小范围 NPU smoke | complete | NPU 6：1-token 与 1 prompt × 8-token no-offload strict token-id 对照通过；输出 throughput/TTFT/TPOT |
-| post-downsink NPU smoke | blocked | 下沉后 3 次真实 smoke 均在 vLLM startup memory gate 前失败；2026-06-02 再查 NPU 6 仍约 47.8GB HBM 占用、AICore 活跃、PID 不在 Linux 进程表，未擅自 reset/kill |
-| D.10 复盘门禁 | in_progress | 当前同步 slot path 性能显著慢于 no-offload；下沉 UT 已过，待 post-downsink smoke 资源窗口后再考虑 D.11 phase split |
+| post-downsink NPU smoke | complete | 2026-06-02 NPU 6 资源窗口恢复后补跑下沉版 smoke：1-token 与 8-token candidate 均 status ok，与 no-offload baseline strict token-id 对照全部通过（1-token `[353]`；8-token `[353,91957,9,0,358,2776,501,311]`）；首跑曾因 NPU 6 残留幽灵上下文偶发 engine init 失败，约 30s 自行释放后重跑成功 |
+| D.10 复盘门禁 | complete | 下沉后 fused boundary path decision 在真实 NPU 上验证正确：短 prompt 全程走 `slot_cache_path`/`low_fanout_slot_cache_ready`；同步 slot path 性能仍显著慢于 no-offload（8-token candidate throughput 1.475 tok/s vs no-offload 5.512 tok/s），只作为 offloading 通路与 observability 闭环，不作为性能收益；correctness 门禁已过，可进入 D.11 phase split |
 
 ## 阶段 14：MVP-D.11 任务表
 
@@ -59,7 +59,7 @@
 | Equivalence UT | pending | 小张量 mock 验证 single phase 与多 phase 输出逐元素一致；覆盖空 phase、乱序 phase、重复/缺失 slice fail closed |
 | Boundary integration guard | pending | 在 `MoECommMethod.fused_experts()` 中默认关闭；仅 env opt-in 且 AllGather/unquantized/no bias/no EP 窄路径启用 |
 | Observability | pending | profile JSONL 记录 phase 数、每 phase experts/token count、回填耗时、fail reason |
-| NPU semantic smoke | pending | 资源可用后先跑 1-token strict compare，再跑 8-token；D.11 不要求性能提升，只要求 token-id correctness |
+| NPU semantic smoke | pending | 资源可用后先跑 1-token strict compare，再跑 8-token；D.11 不要求性能提升，只要求 token-id correctness（D.10 post-downsink 门禁已满足） |
 | D.11 复盘门禁 | pending | 若 Python 多 phase 开销过高，记录为语义脚手架；MVP-E async 前必须保留 single-phase fallback |
 
 ## 阶段清单
@@ -79,8 +79,8 @@
 | 9. Native offload benchmark pilot | complete | `tools/sew_offload/run_minimal_offload_benchmark.py`、native prefetch expert/all-param 失败证据、no-offload 三指标 sanity |
 | 10. SEW runtime MVP | in_progress | MVP-A/B/C 完成；MVP-D fixed-slot sync correctness 最小闭环已通过真实 NPU smoke |
 | 11. MoE Offload 支持核实与总体架构 | complete | `docs/sew-offload/08-ascend-moe-offload-architecture.md`：不支持证据链、系统架构、控制/数据面图、路线图 |
-| 12. Dynamic-count layered runtime | in_progress | MVP-D.10 path selector 已跑通真实 NPU smoke；fused_experts 下沉代码/UT 已完成，post-downsink smoke 被 NPU 资源门禁阻塞 |
-| 13. Dispatch 后 phase split | planned | MVP-D.11 任务已拆解；实现前优先补 D.10 post-downsink 1-token strict compare |
+| 12. Dynamic-count layered runtime | complete | MVP-D.10 path selector 与 fused_experts 下沉代码/UT 完成；post-downsink 1-token/8-token 真实 NPU smoke 与 strict compare 全部通过 |
+| 13. Dispatch 后 phase split | planned | MVP-D.11 任务已拆解；D.10 post-downsink strict compare 门禁已满足，可进入实现 |
 
 ## 当前 MVP-A 状态
 
@@ -132,7 +132,7 @@
 - 2026-06-02 D.9 小范围 release=1 smoke：NPU 6，1 个 non-resident layer（layer 0）+ 47 个 resident layers，release=1 成功；profile JSONL 显示 register layer 0 用时约 2.03s，release 约 0.0004s，ledger 中 original expert bytes 从约 1.208GB 降到 0；no-offload vs candidate 1-token 严格 token-id 对照通过。
 - 2026-06-02 D.10 dynamic-count layered runtime：默认关闭的 path selector 已在旧 hook 位置通过真实 NPU 1-token/8-token smoke 和 strict token-id compare；8-token candidate throughput `1.675 tok/s`、TTFT `868.72 ms`、TPOT `558.14 ms`，no-offload baseline throughput `6.337 tok/s`、TTFT `445.15 ms`、TPOT `116.71 ms`。
 - 2026-06-02 D.10 fused boundary 下沉：`apply()` 不再直接做 slot 权重准备，而是把 offload metadata 传入 fused input；`MoECommMethod.fused_experts()` 在 dispatch 前根据 `topk_ids` 做 path decision、slot plan 和 fail-closed。UT/compile/diff 已通过；post-downsink 真实 smoke 被 NPU 6 残留 HBM 上下文阻塞。
-- 下一步顺序更新：先等待/清理 NPU 6 资源并补跑 post-downsink smoke；通过后再做 MVP-D.11 dispatch 后 phase split 语义原型；然后才进入 MVP-E async transfer 与 overlap metrics；最后考虑 D.12 staging-aware fused/custom op 或 window-aware global pool。
+- 下一步顺序更新：D.10 post-downsink 1-token/8-token strict compare 已于 2026-06-02 补跑通过；现可直接进入 MVP-D.11 dispatch 后 phase split 语义原型；然后才进入 MVP-E async transfer 与 overlap metrics；最后考虑 D.12 staging-aware fused/custom op 或 window-aware global pool。
 
 ## 关键约束
 
