@@ -26,6 +26,7 @@ from tools.sew_offload.collect_moe_trace import (
     prepare_synthetic_smoke_manifest,
 )
 from vllm_ascend.moe_offload.runtime import get_moe_offload_runtime, reset_moe_offload_runtime
+from vllm_ascend.moe_offload.pipeline import get_moe_pipeline_profiler, reset_moe_pipeline_profiler
 
 
 DEFAULT_CONFIG = "docs/sew-offload/benchmark_config.yaml"
@@ -43,6 +44,7 @@ SEW_OFFLOAD_ENV_VARS = (
     "VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME",
     "VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD",
     "VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH",
+    "VLLM_ASCEND_MOE_PIPELINE_PROFILING",
 )
 
 
@@ -84,6 +86,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--offload-num-in-group", type=int, default=1)
     parser.add_argument("--offload-prefetch-step", type=int, default=1)
     parser.add_argument("--offload-params", default="experts")
+    parser.add_argument("--moe-pipeline-profiling", action="store_true")
     return parser.parse_args()
 
 
@@ -155,6 +158,7 @@ def configure_sew_offload_env(
     layered_runtime: bool = False,
     fanout_threshold: int = 0,
     trace_path: str = "moe_offload_trace.jsonl",
+    moe_pipeline_profiling: bool = False,
 ) -> None:
     if mode == "no_offload":
         for env_name in SEW_OFFLOAD_ENV_VARS:
@@ -179,6 +183,7 @@ def configure_sew_offload_env(
     )
     os.environ["VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME"] = "1" if layered_runtime else "0"
     os.environ["VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD"] = str(int(fanout_threshold))
+    os.environ["VLLM_ASCEND_MOE_PIPELINE_PROFILING"] = "1" if moe_pipeline_profiling else "0"
     os.environ.setdefault("VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH", "moe_offload_profile.jsonl")
 
 
@@ -338,10 +343,12 @@ def run_smoke(
         layered_runtime=getattr(args, "layered_runtime", False),
         fanout_threshold=getattr(args, "fanout_threshold", 0),
         trace_path=str(trace_jsonl_path),
+        moe_pipeline_profiling=bool(getattr(args, "moe_pipeline_profiling", False)),
     )
     if mode != "no_offload":
         os.environ["VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH"] = str(profile_jsonl_path)
     reset_moe_offload_runtime()
+    reset_moe_pipeline_profiler()
 
     llm_kwargs = _build_llm_kwargs(args, config, mode)
     load_t0 = time.perf_counter()
@@ -377,6 +384,7 @@ def run_smoke(
             "moe_offload_profile": get_moe_offload_runtime().profiling_summary(),
             "moe_offload_profile_jsonl": str(profile_jsonl_path),
             "moe_offload_profile_jsonl_events": _read_profile_jsonl(profile_jsonl_path),
+            "moe_pipeline_summary": get_moe_pipeline_profiler().summarize(),
         }
     )
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -389,6 +397,7 @@ def run_fixed_slot_smoke(
     requests: list[dict[str, Any]],
 ) -> dict[str, Any]:
     args.mode = "fixed_slot_sync"
+    args.moe_pipeline_profiling = getattr(args, "moe_pipeline_profiling", False)
     return run_smoke(args, config, requests)
 
 

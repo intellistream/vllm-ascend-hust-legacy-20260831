@@ -176,6 +176,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     ),
     # MVP-D.9 verification: optional JSONL path for cross-process profiling artifacts.
     "VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH": lambda: os.getenv("VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH", ""),
+    # Pipeline-level profiling: record Stage T/R/C/M npu.Event elapsed times (trace-only, no overlap changes).
+    "VLLM_ASCEND_MOE_PIPELINE_PROFILING": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MOE_PIPELINE_PROFILING", "0"))
+    ),
 }
 
 # end-env-vars-definition

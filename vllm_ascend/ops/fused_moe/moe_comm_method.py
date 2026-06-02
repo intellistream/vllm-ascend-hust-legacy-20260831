@@ -34,6 +34,7 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     build_token_dispatch_input,
 )
 from vllm_ascend.moe_offload.runtime import MoeOffloadDecisionPath, get_moe_offload_runtime
+from vllm_ascend.moe_offload.pipeline import get_moe_pipeline_profiler
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
     PrepareAndFinalizeWithAll2All,
@@ -127,8 +128,18 @@ class MoECommMethod(ABC):
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
+        # --- P0 pipeline profiling: npu.Event trace-only timing ---
+        pipeline_profiler = get_moe_pipeline_profiler()
+        do_pipe_profile = pipeline_profiler.enabled
+        if do_pipe_profile:
+            e0 = pipeline_profiler.record()  # before Stage T (offload plan / transfer)
+
         before_dispatch_evt = torch.npu.current_stream().record_event()
         fused_experts_input = self._maybe_apply_moe_offload_plan(fused_experts_input)
+
+        if do_pipe_profile:
+            e1 = pipeline_profiler.record()  # after Stage T, before Stage R
+
         routed_topk_ids = fused_experts_input.topk_ids
         if fused_experts_input.routing.log2phy is not None:
             routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
@@ -139,6 +150,9 @@ class MoECommMethod(ABC):
         )
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
+        if do_pipe_profile:
+            e2 = pipeline_profiler.record()  # after Stage R, before Stage C
+
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
             token_dispatch_output=token_dispatch_output,
@@ -147,11 +161,23 @@ class MoECommMethod(ABC):
 
         mlp_output = self._apply_mlp(mlp_compute_input)
 
+        if do_pipe_profile:
+            e3 = pipeline_profiler.record()  # after Stage C, before Stage M
+
         before_combine_evt = torch.npu.current_stream().record_event()
         routed_out = self.token_dispatcher.token_combine(
             hidden_states=mlp_output,
             combine_metadata=token_dispatch_output.combine_metadata,
         )
+
+        if do_pipe_profile:
+            e4 = pipeline_profiler.record()  # after Stage M
+            step_id = getattr(fused_experts_input, "_pipeline_step_id", 0)
+            pipeline_profiler.commit(
+                layer_id=getattr(fused_experts_input.offload, "layer_id", -1) if fused_experts_input.offload else -1,
+                step_id=step_id,
+                events=(e0, e1, e2, e3, e4),
+            )
 
         return FusedExpertsResult(
             routed_out=routed_out,
