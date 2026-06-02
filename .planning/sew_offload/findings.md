@@ -640,3 +640,35 @@
 - 验证门禁：
   - 单测必须证明 single phase 与 multi phase 输出一致。
   - post-downsink D.10 1-token strict compare 仍是进入 D.11 真实 NPU smoke 的建议前置门禁。
+
+## 2026-06-02 post-downsink D.10 1-token 验证结论
+
+- `MoECommMethod.fused_experts` 下沉后的真实 NPU 1-token smoke 已通过：
+  - artifact：`artifacts/sew_offload/runs/d10_fused_boundary_layered_1tok_retry4_20260602`
+  - candidate token id `[1096]`，与 no-offload baseline `[1096]` 一致。
+  - strict compare `status=ok`、`matched=1`。
+- 设计含义：
+  - 下沉到 fused boundary 后，slot path 的权重替换、`log2phy` remap、`physical_expert_count` 和后续 token dispatch/grouped matmul/combine 至少在 1-token 真实路径上是正确的。
+  - profile 同时出现 `slot_cache_path` 和 `full_weight_path`，说明 layered decision 在真实 forward 中生效，而不是只在 UT 或离线 trace 中生效。
+  - 1-token 的 TPOT 为 0 是正常现象，不能用于评估连续 decode；后续需要 post-downsink 8-token smoke 才能报告更有意义的 TPOT。
+- 对 D.11 的影响：
+  - D.11 的前置风险降低：现在若 phase split 后出现 token mismatch，更可能是 phase 回填/切分问题，而不是 D.10 fused boundary remap 本身未闭环。
+  - 但进入 D.11 前仍建议补一个 post-downsink 8-token strict compare，因为 D.11 主要服务 decode 阶段，而 decode 稳定性需要多 token 输出观察。
+
+## 2026-06-02 post-downsink D.10 8-token 验证结论
+
+- 8-token post-downsink smoke 已通过：
+  - artifact：`artifacts/sew_offload/runs/d10_fused_boundary_layered_8tok_20260602`
+  - candidate token ids `[1096, 374, 264, 5052, 54, 12, 4596, 1078]`
+  - no-offload baseline token ids `[1096, 374, 264, 5052, 54, 12, 4596, 1078]`
+  - strict compare `status=ok`、`matched=1`
+- 指标结论：
+  - candidate throughput `1.648 tok/s`、TTFT `910.87 ms`、TPOT `563.37 ms`
+  - no-offload baseline throughput `6.337 tok/s`、TTFT `445.15 ms`、TPOT `116.71 ms`
+  - 当前 offload path 明显慢于 no-offload，只能作为 correctness/observability MVP，不能作为性能收益结果。
+- 路径结论：
+  - profile 中 1 次 high fan-out `full_weight_path` 与 8 次 decode `slot_cache_path` 同时出现。
+  - 这证明 D.10 的分层决策在连续 decode 中稳定触发，slot-cache path 不只是 1-token 偶然通过。
+- 阶段结论：
+  - D.10 可以收口：默认关闭、fail closed、full/slot path selection、slot remap、真实 NPU 1-token/8-token correctness 和三指标输出均已闭环。
+  - 下一步 D.11 的目标应保持为语义原型：分批计算和回填等价性，不直接承诺性能。
