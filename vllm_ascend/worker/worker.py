@@ -20,11 +20,6 @@
 import copy
 import gc
 import logging
-import math
-import os
-import re
-import subprocess
-import sys
 from types import NoneType
 
 import torch
@@ -49,10 +44,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
-from vllm.v1.worker.worker_base import (
-    CompilationTimes,  # noqa: E402
-    WorkerBase,
-)
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
@@ -69,6 +61,8 @@ from vllm_ascend.utils import (
     enable_sp,
     get_ascend_device_type,
     register_ascend_customop,
+    setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -82,220 +76,6 @@ torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
 )  # noqa: E402
 torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
-
-
-def _format_startup_memory_error(
-    free_memory: int,
-    total_memory: int,
-    gpu_memory_utilization: float,
-    visible_device_count: int,
-) -> str:
-    gib = lambda value: round(value / GiB_bytes, 2)
-
-    requested_memory = total_memory * gpu_memory_utilization
-    max_usable_ratio = free_memory / total_memory if total_memory > 0 else 0.0
-    suggested_ratio = max(0.01, math.floor(max(max_usable_ratio - 0.01, 0.0) * 100) / 100)
-
-    message_lines = [
-        (
-            f"Free memory on device ({gib(free_memory)}/{gib(total_memory)} GiB) on startup "
-            f"is less than desired GPU memory utilization ({gpu_memory_utilization}, "
-            f"{gib(requested_memory)} GiB)."
-        ),
-        (
-            "Free memory on the selected Ascend device or lower "
-            f"`--gpu-memory-utilization` to at most about {suggested_ratio:.2f}."
-        ),
-    ]
-
-    if visible_device_count > 1 and not os.environ.get("ASCEND_RT_VISIBLE_DEVICES"):
-        message_lines.append(
-            "Multiple Ascend devices are visible. If other cards are idle, select one first with "
-            "`ASCEND_RT_VISIBLE_DEVICES=<id>` after checking `npu-smi info`."
-        )
-
-    return " ".join(message_lines)
-
-
-def _parse_npu_smi_logical_map(mapping_output: str) -> dict[tuple[str, str], int]:
-    logical_map: dict[tuple[str, str], int] = {}
-    for line in mapping_output.splitlines():
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        npu_id, chip_id, logical_id = parts[:3]
-        if npu_id.isdigit() and chip_id.isdigit() and logical_id.isdigit():
-            logical_map[(npu_id, chip_id)] = int(logical_id)
-    return logical_map
-
-
-def _parse_npu_smi_hbm_stats(
-    info_output: str,
-    logical_map: dict[tuple[str, str], int],
-    visible_device_count: int,
-) -> list[tuple[int, int, int]]:
-    hbm_usage_pattern = re.compile(r"(\d+)\s*/\s*(\d+)\s*$")
-    device_stats: list[tuple[int, int, int]] = []
-    current_npu_id: str | None = None
-    current_health: str | None = None
-
-    for raw_line in info_output.splitlines():
-        line = raw_line.strip()
-        if not line.startswith("|"):
-            continue
-
-        parts = [part.strip() for part in line.strip("|").split("|")]
-        if len(parts) < 3:
-            continue
-
-        left_column = parts[0].split()
-        if len(left_column) >= 2 and left_column[0].isdigit() and parts[1] and ":" not in parts[1]:
-            current_npu_id = left_column[0]
-            current_health = parts[1]
-            continue
-
-        if current_npu_id is None or current_health != "OK":
-            continue
-
-        if len(left_column) != 1 or not left_column[0].isdigit() or ":" not in parts[1]:
-            continue
-
-        chip_id = left_column[0]
-        logical_id = logical_map.get((current_npu_id, chip_id))
-        if logical_id is None or logical_id >= visible_device_count:
-            continue
-
-        hbm_match = hbm_usage_pattern.search(parts[2])
-        if hbm_match is None:
-            continue
-
-        used_memory_mb = int(hbm_match.group(1))
-        total_memory_mb = int(hbm_match.group(2))
-        free_memory_mb = max(0, total_memory_mb - used_memory_mb)
-        device_stats.append((logical_id, free_memory_mb << 20, total_memory_mb << 20))
-
-    return device_stats
-
-
-def _select_best_idle_ascend_device(visible_device_count: int) -> tuple[int, int, int] | None:
-    if visible_device_count <= 1:
-        return None
-
-    mapping_result = subprocess.run(
-        ["npu-smi", "info", "-m"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    if mapping_result.returncode != 0:
-        raise RuntimeError(mapping_result.stderr.strip() or "npu-smi info -m failed")
-
-    info_result = subprocess.run(
-        ["npu-smi", "info"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    if info_result.returncode != 0:
-        raise RuntimeError(info_result.stderr.strip() or "npu-smi info failed")
-
-    logical_map = _parse_npu_smi_logical_map(mapping_result.stdout)
-    device_stats = _parse_npu_smi_hbm_stats(info_result.stdout, logical_map, visible_device_count)
-    if not device_stats:
-        return None
-
-    device_stats.sort(key=lambda item: (-item[1], item[0]))
-    for logical_id, free_memory, total_memory in device_stats:
-        if _probe_ascend_device_availability(logical_id):
-            return logical_id, free_memory, total_memory
-
-        logger.info(
-            "Skipping Ascend device %s during auto-selection because the runtime probe failed.",
-            logical_id,
-        )
-
-    return None
-
-
-def _probe_ascend_device_availability(logical_id: int) -> bool:
-    probe_env = os.environ.copy()
-    probe_env["ASCEND_RT_VISIBLE_DEVICES"] = str(logical_id)
-
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            ("import torch; import torch_npu; torch.npu.set_device('npu:0'); torch.zeros(1, device='npu')"),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        env=probe_env,
-    )
-    return probe.returncode == 0
-
-
-def _get_visible_ascend_device_count() -> int:
-    visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
-    if visible_devices.strip():
-        return len([device for device in visible_devices.split(",") if device.strip()])
-
-    mapping_result = subprocess.run(
-        ["npu-smi", "info", "-m"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    if mapping_result.returncode != 0:
-        raise RuntimeError(mapping_result.stderr.strip() or "npu-smi info -m failed")
-
-    logical_map = _parse_npu_smi_logical_map(mapping_result.stdout)
-    return len(set(logical_map.values()))
-
-
-def _maybe_auto_select_idle_ascend_device(local_rank: int, parallel_config) -> int | None:
-    if os.environ.get("ASCEND_RT_VISIBLE_DEVICES"):
-        return None
-
-    if local_rank != 0:
-        return None
-
-    if getattr(parallel_config, "world_size", 1) != 1:
-        return None
-
-    if getattr(parallel_config, "local_world_size", 1) != 1:
-        return None
-
-    try:
-        visible_device_count = _get_visible_ascend_device_count()
-    except Exception as exc:
-        logger.info("Unable to inspect Ascend visibility before auto-selection: %s", exc)
-        return None
-
-    if visible_device_count <= 1:
-        return None
-
-    try:
-        selected_device = _select_best_idle_ascend_device(visible_device_count)
-    except Exception as exc:
-        logger.info("Unable to auto-select an idle Ascend device: %s", exc)
-        return None
-
-    if selected_device is None:
-        return None
-
-    logical_id, free_memory, total_memory = selected_device
-    logger.info(
-        "Auto-selected Ascend device %s for single-card startup (free %.2f/%.2f GiB).",
-        logical_id,
-        free_memory / GiB_bytes,
-        total_memory / GiB_bytes,
-    )
-    return logical_id
 
 
 class NPUWorker(WorkerBase):
@@ -328,8 +108,9 @@ class NPUWorker(WorkerBase):
         if get_ascend_device_type() != AscendDeviceType.A5:
             _register_atb_extensions()
         register_ascend_customop(vllm_config)
-        # init ascend config
+        # init ascend config and soc version
         init_ascend_config(vllm_config)
+        check_ascend_device_type()
 
         super().__init__(
             vllm_config=vllm_config,
@@ -361,6 +142,9 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
+        if self.use_v2_model_runner and vllm_version_is("0.20.2"):
+            logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.20.2; falling back to v1 model runner.")
+            self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
@@ -474,28 +258,8 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def _init_device(self):
-        selected_device = _maybe_auto_select_idle_ascend_device(
-            self.local_rank, self.parallel_config
-        )
-        device_index = selected_device if selected_device is not None else self.local_rank
-
-        device = torch.device(f"npu:{device_index}")
-        try:
-            torch.npu.set_device(device)
-        except Exception as exc:
-            if selected_device is None or device_index == self.local_rank:
-                raise
-
-            logger.warning(
-                "Failed to initialize auto-selected Ascend device %s (%s); falling back to local_rank %s.",
-                device_index,
-                exc,
-                self.local_rank,
-            )
-            device = torch.device(f"npu:{self.local_rank}")
-            torch.npu.set_device(device)
-
-        check_ascend_device_type()
+        device = torch.device(f"npu:{self.local_rank}")
+        torch.npu.set_device(device)
 
         # Import _inductor for graph mode execution with triton
         # This lazy import avoids torch_npu re-initialization in patch
@@ -508,6 +272,9 @@ class NPUWorker(WorkerBase):
 
         gc.collect()
         torch.npu.empty_cache()
+
+        if get_ascend_device_type() == AscendDeviceType.A5:
+            setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot()
@@ -730,7 +497,7 @@ class NPUWorker(WorkerBase):
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
-    def compile_or_warm_up_model(self):
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
         if not self.model_config.enforce_eager:
@@ -811,10 +578,15 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-
         return CompilationTimes(
             language_model=self.vllm_config.compilation_config.compilation_time,
-            encoder=self.compilation_config.encoder_compilation_time,
+            # `encoder_compilation_time` was added after v0.19.1 (vLLM #39240); fall
+            # back to 0.0 so the older release still constructs CompilationTimes.
+            encoder=getattr(
+                self.vllm_config.compilation_config,
+                "encoder_compilation_time",
+                0.0,
+            ),
         )
 
     def _warm_up_atb(self):
