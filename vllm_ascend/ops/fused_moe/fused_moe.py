@@ -89,6 +89,25 @@ def _fixed_slot_device_for_processed_weight(weight: torch.Tensor) -> torch.devic
     return weight.device
 
 
+def _empty_npu_cache_if_available() -> None:
+    if hasattr(torch, "npu") and hasattr(torch.npu, "empty_cache"):
+        torch.npu.empty_cache()
+
+
+def _should_stage_processed_expert_weights_to_cpu(layer) -> bool:
+    layer_id = int(getattr(layer, "layer_id", -1))
+    if layer_id < 0:
+        return False
+    return get_moe_offload_runtime().should_use_fixed_slot_plan_for_layer(layer_id)
+
+
+def _stage_processed_weight_to_cpu_if_needed(weight: torch.Tensor, *, enabled: bool) -> torch.Tensor:
+    if enabled and weight.device.type != "cpu":
+        weight = weight.to("cpu")
+        _empty_npu_cache_if_available()
+    return weight
+
+
 def _build_fixed_slot_profile_topk_ids(
     *,
     num_tokens: int,
@@ -114,25 +133,33 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
+        stage_processed_weights_to_cpu = _should_stage_processed_expert_weights_to_cpu(layer)
 
         w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(1, 2).contiguous()
+        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
+            w13_data = torch_npu.npu_format_cast(w13_data, ACL_FORMAT_FRACTAL_NZ)
+        else:
+            w13_data = maybe_trans_nz(w13_data)
+        w13_data = _stage_processed_weight_to_cpu_if_needed(
+            w13_data,
+            enabled=stage_processed_weights_to_cpu,
+        )
         layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
+        del w13_data
+        _empty_npu_cache_if_available()
 
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
-        layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
-
-        # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
-        # Therefore, we must cast weights to NZ when fusion is enabled.
-        # Once the underlying dispatch_ffn_combine operator is updated to support
-        # ND format (or other formats), remove this specific 'if' check and the forced
-        # npu_format_cast. At that point, the operator should be able to handle weights
-        # in their native format without explicit casting here.
         if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
-            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            w2_data = torch_npu.npu_format_cast(w2_data, ACL_FORMAT_FRACTAL_NZ)
         else:
-            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
-            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+            w2_data = maybe_trans_nz(w2_data)
+        w2_data = _stage_processed_weight_to_cpu_if_needed(
+            w2_data,
+            enabled=stage_processed_weights_to_cpu,
+        )
+        layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+        del w2_data
+        _empty_npu_cache_if_available()
         moe_offload_runtime = get_moe_offload_runtime()
         layer_id = int(getattr(layer, "layer_id", -1))
         if moe_offload_runtime.should_use_fixed_slot_plan_for_layer(layer_id):

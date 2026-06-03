@@ -140,6 +140,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # High-level Ascend MoE expert offload switch. 0 or unset keeps the normal
+    # path. A positive value enables the PrefetchOffloader + fixed-slot MoE
+    # defaults without using cpu_offload_gb/UVA.
+    "VLLM_ASCEND_MOE_OFFLOAD_GB": lambda: float(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_GB", "0")),
     # Enable the Ascend MoE expert offload runtime. Default is disabled.
     "VLLM_ASCEND_MOE_OFFLOAD_ENABLED": lambda: bool(int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_ENABLED", "0"))),
     # Trace routed expert working sets without changing execution.

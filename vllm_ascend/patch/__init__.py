@@ -35,7 +35,7 @@
 #   1. `torch.distributed.all_reduce`, `torch.distributed.broadcast`
 #    Why:
 #       tensor alignment for 310p
-#    How：
+#    How:
 #       rewrite all_reduce and broadcast in torch.distributed
 #    Related PR (if no, explain why):
 #       No, not ready yet.
@@ -262,6 +262,24 @@
 #    Future Plan:
 #       Remove this patch once the vLLM fix is included in the supported vLLM
 #       version.
+#
+# ** 12. File: platform/patch_moe_offload_autoconfig.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.engine.arg_utils.EngineArgs.create_engine_config`
+#    Why:
+#       Ascend MoE expert offload needs the vLLM PrefetchOffloader plus the
+#       vllm-ascend fixed-slot MoE runtime. Using `cpu_offload_gb` selects UVA
+#       offload, which is not the working NPU route.
+#    How：
+#       When `VLLM_ASCEND_MOE_OFFLOAD_GB` is set to a positive value, fill only
+#       missing/default EngineArgs prefetch fields and set missing MoE offload
+#       environment defaults before vLLM builds `VllmConfig`.
+#    Related PR (if no, explain why):
+#       No, this is an Ascend-specific integration switch for the research MoE
+#       offload runtime.
+#    Future Plan:
+#       Replace this patch with a native vLLM/vLLM Ascend argument once the
+#       PrefetchOffloader and MoE slot runtime have a stable public config hook.
 #
 # * Worker Patch:
 # ===============
