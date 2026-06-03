@@ -112,6 +112,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Use the experimental mapped-host gather custom op for CPU offload loads.
+    "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER", "0"))
+    ),
+    # Optional torch extension containing _C_ascend.kv_cache_block_gather.
+    # This is mainly useful while testing without rebuilding vllm-ascend itself.
+    "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_LIB": lambda: os.getenv(
+        "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_LIB", None
+    ),
+    # Optional custom-op opapi library for the in-tree kv_cache_block_gather binding.
+    "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB": lambda: os.getenv(
+        "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB", None
+    ),
 }
 
 # end-env-vars-definition

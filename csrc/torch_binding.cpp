@@ -50,10 +50,15 @@
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
+#include <cstdlib>
+#include <cstdint>
+#include <dlfcn.h>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <vector>
+#include <unistd.h>
 
 namespace vllm_ascend {
 
@@ -107,6 +112,123 @@ void enqueue_device_print(std::unique_ptr<DevicePrintPayload> payload,
         delete raw_payload;
     }
     TORCH_CHECK(ret == ACL_SUCCESS, "aclrtLaunchHostFunc failed, error code: ", ret);
+}
+
+struct HostMapping {
+    uintptr_t host_base;
+    uint64_t size;
+    void* device_base;
+};
+
+std::mutex& get_host_mapping_mutex()
+{
+    static std::mutex host_mapping_mutex;
+    return host_mapping_mutex;
+}
+
+std::vector<HostMapping>& get_host_mappings()
+{
+    static std::vector<HostMapping> host_mappings;
+    return host_mappings;
+}
+
+uint64_t round_up_u64(uint64_t value, uint64_t alignment)
+{
+    return (value + alignment - 1) / alignment * alignment;
+}
+
+void* get_host_gather_opapi_handler()
+{
+    static void* handler = []() -> void* {
+        const char* path = std::getenv("VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB");
+        if (path == nullptr || path[0] == '\0') {
+            return nullptr;
+        }
+        void* loaded = dlopen(path, RTLD_LAZY | RTLD_GLOBAL);
+        TORCH_CHECK(loaded != nullptr,
+                    "kv_cache_block_gather: failed to dlopen ",
+                    "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB=",
+                    path,
+                    ", error=",
+                    dlerror());
+        return loaded;
+    }();
+    return handler;
+}
+
+void* get_host_gather_opapi_func_addr(const char* api_name)
+{
+    void* handler = get_host_gather_opapi_handler();
+    if (handler != nullptr) {
+        void* func_addr = dlsym(handler, api_name);
+        if (func_addr != nullptr) {
+            return func_addr;
+        }
+    }
+    return GetOpApiFuncAddr(api_name);
+}
+
+void* get_mapped_host_device_ptr(void* host_ptr, uint64_t bytes)
+{
+    TORCH_CHECK(host_ptr != nullptr, "kv_cache_block_gather: src_pages data pointer is null");
+    TORCH_CHECK(bytes > 0, "kv_cache_block_gather: src_pages must not be empty");
+
+    const long page_size_long = sysconf(_SC_PAGESIZE);
+    TORCH_CHECK(page_size_long > 0, "kv_cache_block_gather: sysconf(_SC_PAGESIZE) failed");
+    const uint64_t page_size = static_cast<uint64_t>(page_size_long);
+    const uintptr_t host_addr = reinterpret_cast<uintptr_t>(host_ptr);
+    const uintptr_t aligned_addr = host_addr / page_size * page_size;
+    const uint64_t offset = static_cast<uint64_t>(host_addr - aligned_addr);
+    const uint64_t register_size = round_up_u64(offset + bytes, page_size);
+
+    std::lock_guard<std::mutex> guard(get_host_mapping_mutex());
+    auto& mappings = get_host_mappings();
+    for (const auto& mapping : mappings) {
+        const uintptr_t mapping_end = mapping.host_base + mapping.size;
+        const uintptr_t request_end = aligned_addr + register_size;
+        if (aligned_addr >= mapping.host_base && request_end <= mapping_end) {
+            return static_cast<char*>(mapping.device_base) + (host_addr - mapping.host_base);
+        }
+    }
+
+    void* mapped_base = nullptr;
+    const aclError ret = aclrtHostRegister(reinterpret_cast<void*>(aligned_addr),
+                                           register_size,
+                                           ACL_HOST_REGISTER_MAPPED,
+                                           &mapped_base);
+    TORCH_CHECK(ret == ACL_SUCCESS,
+                "kv_cache_block_gather: aclrtHostRegister failed, error code: ",
+                ret,
+                ", host_ptr=",
+                host_ptr,
+                ", register_size=",
+                register_size);
+    mappings.push_back(HostMapping{aligned_addr, register_size, mapped_base});
+    return static_cast<char*>(mapped_base) + offset;
+}
+
+aclTensor* create_acl_tensor_with_data(const at::Tensor& tensor, void* data)
+{
+    static const auto aclCreateTensor = GET_OP_API_FUNC(aclCreateTensor);
+    TORCH_CHECK(aclCreateTensor != nullptr, "kv_cache_block_gather: aclCreateTensor not found");
+    const aclDataType acl_data_type =
+        kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(tensor.scalar_type())];
+    TORCH_CHECK(acl_data_type != ACL_DT_UNDEFINED,
+                "kv_cache_block_gather: unsupported tensor dtype ",
+                c10::toString(tensor.scalar_type()));
+    c10::SmallVector<int64_t, 5> storage_dims;
+    for (const auto dim : tensor.sizes()) {
+        storage_dims.push_back(dim);
+    }
+    return aclCreateTensor(tensor.sizes().data(),
+                           tensor.sizes().size(),
+                           acl_data_type,
+                           tensor.strides().data(),
+                           0,
+                           ACL_FORMAT_ND,
+                           storage_dims.data(),
+                           storage_dims.size(),
+                           data);
 }
 
 }
@@ -288,6 +410,110 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
                     ", dst=", dst_data[i],
                     ", size=", size_data[i]);
     }
+}
+
+void kv_cache_block_gather(const torch::Tensor& src_block_ids,
+                           const torch::Tensor& src_pages,
+                           const torch::Tensor& dst_block_ids,
+                           torch::Tensor& out)
+{
+    TORCH_CHECK(src_block_ids.is_privateuseone(), "src_block_ids must be on NPU");
+    TORCH_CHECK(dst_block_ids.is_privateuseone(), "dst_block_ids must be on NPU");
+    TORCH_CHECK(out.is_privateuseone(), "out must be on NPU");
+    TORCH_CHECK(src_pages.device().is_cpu(), "src_pages must be a CPU tensor");
+    TORCH_CHECK(src_block_ids.scalar_type() == at::ScalarType::Int, "src_block_ids must be int32");
+    TORCH_CHECK(dst_block_ids.scalar_type() == at::ScalarType::Int, "dst_block_ids must be int32");
+    TORCH_CHECK(src_block_ids.dim() == 1 && dst_block_ids.dim() == 1,
+                "src_block_ids and dst_block_ids must be 1D");
+    TORCH_CHECK(src_block_ids.size(0) == dst_block_ids.size(0),
+                "src_block_ids and dst_block_ids length must match");
+    if (src_block_ids.size(0) == 0) {
+        return;
+    }
+    TORCH_CHECK(src_block_ids.is_contiguous(), "src_block_ids must be contiguous");
+    TORCH_CHECK(dst_block_ids.is_contiguous(), "dst_block_ids must be contiguous");
+    TORCH_CHECK(src_pages.is_contiguous(), "src_pages must be contiguous");
+    TORCH_CHECK(out.is_contiguous(), "out must be contiguous");
+    TORCH_CHECK(src_pages.dim() >= 1 && out.dim() >= 1,
+                "src_pages and out must have at least 1 dimension");
+    TORCH_CHECK(src_pages.scalar_type() == out.scalar_type(),
+                "src_pages and out dtype must match");
+    TORCH_CHECK(src_pages.scalar_type() == at::ScalarType::Float ||
+                    src_pages.scalar_type() == at::ScalarType::Half ||
+                    src_pages.scalar_type() == at::ScalarType::BFloat16,
+                "src_pages dtype must be float32, float16, or bfloat16");
+
+    const c10_npu::OptionalNPUGuard npu_guard(out.device());
+    void* mapped_src_pages = get_mapped_host_device_ptr(
+        src_pages.data_ptr(),
+        static_cast<uint64_t>(src_pages.numel() * src_pages.element_size()));
+
+    aclTensor* acl_src_block_ids = ConvertType(src_block_ids);
+    aclTensor* acl_src_pages = create_acl_tensor_with_data(src_pages, mapped_src_pages);
+    aclTensor* acl_dst_block_ids = ConvertType(dst_block_ids);
+    aclTensor* acl_out = ConvertType(out);
+
+    static const auto get_workspace_addr =
+        get_host_gather_opapi_func_addr("aclnnKvCacheBlockGatherGetWorkspaceSize");
+    static const auto op_api_addr = get_host_gather_opapi_func_addr("aclnnKvCacheBlockGather");
+    TORCH_CHECK(get_workspace_addr != nullptr && op_api_addr != nullptr,
+                "aclnnKvCacheBlockGather or aclnnKvCacheBlockGatherGetWorkspaceSize not found in op_api libraries");
+
+    using GetWorkspaceFunc = int (*)(const aclTensor*,
+                                     const aclTensor*,
+                                     const aclTensor*,
+                                     const aclTensor*,
+                                     uint64_t*,
+                                     aclOpExecutor**);
+    auto get_workspace = reinterpret_cast<GetWorkspaceFunc>(get_workspace_addr);
+
+    uint64_t workspace_size = 0;
+    aclOpExecutor* executor = nullptr;
+    const int workspace_status = get_workspace(acl_src_block_ids,
+                                               acl_src_pages,
+                                               acl_dst_block_ids,
+                                               acl_out,
+                                               &workspace_size,
+                                               &executor);
+    TORCH_CHECK(workspace_status == 0,
+                "call aclnnKvCacheBlockGatherGetWorkspaceSize failed, detail:",
+                aclGetRecentErrMsg());
+
+    void* workspace_addr = nullptr;
+    at::Tensor workspace_tensor;
+    if (workspace_size != 0) {
+        at::TensorOptions options =
+            at::TensorOptions(torch_npu::utils::get_npu_device_type());
+        workspace_tensor = at::empty({static_cast<int64_t>(workspace_size)},
+                                     options.dtype(at::kByte));
+        workspace_addr = const_cast<void*>(workspace_tensor.storage().data());
+    }
+
+    auto acl_call = [workspace_addr,
+                     workspace_size,
+                     executor,
+                     acl_src_block_ids,
+                     acl_src_pages,
+                     acl_dst_block_ids,
+                     acl_out,
+                     op_api_addr]() -> int {
+        using OpApiFunc = int (*)(void*, uint64_t, aclOpExecutor*, const aclrtStream);
+        auto op_api = reinterpret_cast<OpApiFunc>(op_api_addr);
+        auto acl_stream = c10_npu::getCurrentNPUStream().stream(false);
+        const int ret = op_api(workspace_addr, workspace_size, executor, acl_stream);
+        Release(acl_src_block_ids);
+        Release(acl_src_pages);
+        Release(acl_dst_block_ids);
+        Release(acl_out);
+        TORCH_CHECK(ret == 0,
+                    "call aclnnKvCacheBlockGather failed, detail:",
+                    aclGetRecentErrMsg());
+        return ret;
+    };
+    at_npu::native::OpCommand cmd;
+    cmd.Name("aclnnKvCacheBlockGather");
+    cmd.SetCustomHandler(acl_call);
+    cmd.Run();
 }
 
 AscendType get_dtype_from_torch(at::ScalarType scalarType)
@@ -1087,6 +1313,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     // internally submits async memcpy on the current NPU stream.
     ops.def("swap_blocks_batch(Tensor x, Tensor y, Tensor z, int direction) -> ()");
     ops.impl("swap_blocks_batch", torch::kCPU, &vllm_ascend::swap_blocks_batch);
+
+    ops.def("kv_cache_block_gather(Tensor src_block_ids, Tensor src_pages, Tensor dst_block_ids, Tensor! out) -> ()");
+    ops.impl("kv_cache_block_gather", torch::kPrivateUse1, &vllm_ascend::kv_cache_block_gather);
+
     ops.def("device_print(str msg) -> ()");
     ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
              static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));

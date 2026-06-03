@@ -21,6 +21,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
+import vllm_ascend.envs as ascend_envs
 from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.metadata import (
     MetadataServer,
     MetadataServerProc,
@@ -240,6 +241,22 @@ class CPUOffloadingConnectorWorker:
         self.save_stream = torch.npu.Stream()
         self.zmq_rpc_client = MetadataServer.ZMQRPCClient()
         self.load_block_mapping: list[tuple[int, int]] = []
+        self.use_host_gather = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER
+        self.host_gather_op = None
+        self._host_gather_fallback_logged = False
+        if self.use_host_gather:
+            host_gather_lib = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_LIB
+            if host_gather_lib:
+                torch.ops.load_library(host_gather_lib)
+            try:
+                self.host_gather_op = torch.ops._C_ascend.kv_cache_block_gather
+            except AttributeError:
+                logger.warning(
+                    "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER is enabled, but "
+                    "torch.ops._C_ascend.kv_cache_block_gather is not available. "
+                    "Falling back to tensor copy."
+                )
+                self.use_host_gather = False
         self.save_input_queue: queue.Queue[tuple[str, ReqMeta]] = queue.Queue()
         self.save_output_queue: queue.Queue[str] = queue.Queue()
         self.save_thread = threading.Thread(target=self._save_listener)
@@ -319,15 +336,65 @@ class CPUOffloadingConnectorWorker:
         self.current_layer += 1
         self.load_kv_layer(self.current_layer)
 
+    def _copy_kv_part(self, cpu_layer_part: torch.Tensor, gpu_layer_part: torch.Tensor) -> None:
+        for cpu_block_id, gpu_block_id in self.load_block_mapping:
+            gpu_layer_part[gpu_block_id].copy_(cpu_layer_part[cpu_block_id], non_blocking=True)
+
+    def _log_host_gather_fallback_once(self, reason: str) -> None:
+        if not self._host_gather_fallback_logged:
+            logger.info("CPU offload mapped-host gather fallback: %s", reason)
+            self._host_gather_fallback_logged = True
+
+    def _can_use_host_gather(self, cpu_layer_part: torch.Tensor, gpu_layer_part: torch.Tensor) -> bool:
+        if not self.use_host_gather or self.host_gather_op is None:
+            return False
+        if not cpu_layer_part.is_contiguous() or not gpu_layer_part.is_contiguous():
+            self._log_host_gather_fallback_once("cpu/gpu KV cache part is not contiguous")
+            return False
+        if cpu_layer_part.dtype != gpu_layer_part.dtype:
+            self._log_host_gather_fallback_once("cpu/gpu KV cache dtype mismatch")
+            return False
+        if cpu_layer_part.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+            self._log_host_gather_fallback_once(f"unsupported KV cache dtype {cpu_layer_part.dtype}")
+            return False
+        return True
+
+    def _make_host_gather_indices(self, device: torch.device) -> tuple[int, int, torch.Tensor, torch.Tensor]:
+        src_min = min(cpu_block_id for cpu_block_id, _ in self.load_block_mapping)
+        src_max = max(cpu_block_id for cpu_block_id, _ in self.load_block_mapping)
+        src_block_ids = torch.tensor(
+            [cpu_block_id - src_min for cpu_block_id, _ in self.load_block_mapping],
+            dtype=torch.int32,
+            device=device,
+        )
+        dst_block_ids = torch.tensor(
+            [gpu_block_id for _, gpu_block_id in self.load_block_mapping],
+            dtype=torch.int32,
+            device=device,
+        )
+        return src_min, src_max, src_block_ids, dst_block_ids
+
     def load_kv_layer(self, layer: int):
         if layer == len(self.gpu_kv_caches):
             return
         gpu_kv_caches = next(self.gpu_kv_caches_load_iter)
         cpu_kv_caches = self.cpu_kv_caches[layer]
         with torch.npu.stream(self.load_stream):
-            for cpu_block_id, gpu_block_id in self.load_block_mapping:
+            if not self.load_block_mapping:
+                return
+            if self.use_host_gather and self.host_gather_op is not None:
+                src_min, src_max, src_block_ids, dst_block_ids = self._make_host_gather_indices(
+                    gpu_kv_caches[0].device
+                )
                 for gpu_layer_part, cpu_layer_part in zip(gpu_kv_caches, cpu_kv_caches):
-                    gpu_layer_part[gpu_block_id].copy_(cpu_layer_part[cpu_block_id], non_blocking=True)
+                    cpu_layer_span = cpu_layer_part[src_min : src_max + 1]
+                    if self._can_use_host_gather(cpu_layer_span, gpu_layer_part):
+                        self.host_gather_op(src_block_ids, cpu_layer_span, dst_block_ids, gpu_layer_part)
+                    else:
+                        self._copy_kv_part(cpu_layer_part, gpu_layer_part)
+                return
+            for gpu_layer_part, cpu_layer_part in zip(gpu_kv_caches, cpu_kv_caches):
+                self._copy_kv_part(cpu_layer_part, gpu_layer_part)
 
     def get_finished(self) -> set[str]:
         done_sending: set[str] = set()
