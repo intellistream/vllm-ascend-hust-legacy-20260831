@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import Any
@@ -91,8 +92,10 @@ class SpecDecodeBaseProposer(EagleProposer):
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, runner)
 
+        self.runner = runner
+
         self.use_async_scheduling = self.vllm_config.scheduler_config.async_scheduling
-        self.pass_hidden_states_to_model = pass_hidden_states_to_model
+        self.pass_hidden_states_to_model = (pass_hidden_states_to_model and self.method != "draft_model")
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
         self.arange_cpu = torch.arange(self.arange.shape[0], device="cpu", dtype=torch.int32)
@@ -100,10 +103,10 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         self.enable_shared_expert_dp = shared_expert_dp_enabled()
 
-        self.pcp_size = self.runner.pcp_size
-        self.dcp_size = self.runner.dcp_size
-        self.pcp_rank = self.runner.pcp_rank
-        self.dcp_rank = self.runner.dcp_rank
+        self.pcp_size = getattr(self.runner, "pcp_size", 1)
+        self.dcp_size = getattr(self.runner, "dcp_size", 1)
+        self.pcp_rank = getattr(self.runner, "pcp_rank", 0)
+        self.dcp_rank = getattr(self.runner, "dcp_rank", 0)
 
         self.full_indices = range(
             self.runner.max_num_tokens * self.pcp_size * self.dcp_size
@@ -196,9 +199,52 @@ class SpecDecodeBaseProposer(EagleProposer):
         self._draft_attn_layer_names = set(all_attn_layers.keys()) - target_attn_layer_names - all_indexer_layer_names
 
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
+
+        # Normal draft_model, e.g. Qwen3-0.6B, may not register extra draft
+        # attention layers into vllm_config. In that case, fall back to the
+        # draft model's own module names. These unprefixed names match the
+        # target kv_cache_group names used by vLLM.
+        if not self.attn_layer_names and getattr(self.speculative_config, "method", None) == "draft_model":
+            self.attn_layer_names = [
+                "draft_model." + name
+                for name, _ in self.model.named_modules()
+                if name.startswith("model.layers.")
+                and name.endswith(".self_attn.attn")
+            ]
+            self._draft_attn_layer_names = set(self.attn_layer_names)
+            print(
+                "[DRAFT_PATCH] eagle_proposer filled attn_layer_names:",
+                self.attn_layer_names[:3],
+                "... total",
+                len(self.attn_layer_names),
+            )
+
+        # Register classic draft_model attention modules into static_forward_context.
+        # get_layers_from_vllm_config() only reads static_forward_context, so merely
+        # setting self.attn_layer_names is not enough.
+        if getattr(self.speculative_config, "method", None) == "draft_model":
+            static_ctx = self.vllm_config.compilation_config.static_forward_context
+            for name, module in self.model.named_modules():
+                if (
+                    name.startswith("model.layers.")
+                    and name.endswith(".self_attn.attn")
+                    and isinstance(module, AttentionLayerBase)
+                ):
+                    static_ctx["draft_model." + name] = module
+            print(
+                "[DRAFT_PATCH] static_forward_context registered draft attention:",
+                sum(1 for k in static_ctx if k.startswith("draft_model.model.layers.") and k.endswith(".self_attn.attn")),
+            )
+
         draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         self.kernel_block_size = (
-            draft_attn_layers_dict[self.attn_layer_names[0]].get_attn_backend().get_supported_kernel_block_sizes()[0]
+            (
+            draft_attn_layers_dict[self.attn_layer_names[0]]
+            .get_attn_backend()
+            .get_supported_kernel_block_sizes()[0]
+            if len(self.attn_layer_names) > 0
+            else 128
+        )
         )
 
         self.piece_all_attn_layer_name = []
@@ -574,7 +620,6 @@ class SpecDecodeBaseProposer(EagleProposer):
         # Clone the data so that when calculating the data at position 2 and position 3
         # in the merged graph, it does not affect position 1
         # FIXME(lilinsiman)
-        common_attn_metadata.block_table_tensor = common_attn_metadata.block_table_tensor.clone()
 
         if self.pcp_size * self.dcp_size > 1:
             if self.num_speculative_tokens > 1 and not attn_metadata_i.num_prefills:
@@ -728,7 +773,26 @@ class SpecDecodeBaseProposer(EagleProposer):
             if self.method == "mtp":
                 model_kwargs["positions"] = model_positions
 
+        torch.npu.synchronize()
+        _t0 = time.time()
+
         ret_hidden_states = self.model(**model_kwargs)
+
+        torch.npu.synchronize()
+        _t1 = time.time()
+
+        if not hasattr(self, "_draft_forward_count"):
+            self._draft_forward_count = 0
+
+        self._draft_forward_count += 1
+
+        if self._draft_forward_count % 50 == 0:
+            print(
+                f"[DRAFT_FORWARD] "
+                f"{(_t1 - _t0)*1000:.3f} ms "
+                f"tokens={num_input_tokens} "
+                f"batch={batch_size}"
+            )
         if not self.model_returns_tuple():
             last_hidden_states = ret_hidden_states
             hidden_states = last_hidden_states
@@ -776,9 +840,11 @@ class SpecDecodeBaseProposer(EagleProposer):
 
         draft_token_ids = logits.argmax(dim=-1)
 
-        # Early exit if there is only one draft token to be generated.
+        # Early exit only if there is actually one draft token to be generated.
+        # Classic draft_model must not return early here; otherwise
+        # num_speculative_tokens > 1 will never generate later draft positions.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
-            # [batch_size, 1]
+            # [batch_size, num_speculative_tokens]
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.pcp_size * self.dcp_size > 1 and is_prefill:
@@ -816,6 +882,7 @@ class SpecDecodeBaseProposer(EagleProposer):
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_tensor[draft_step]
+
             positions += 1
 
             # NOTE(woosuk): We should handle the case where the draft model
@@ -868,7 +935,10 @@ class SpecDecodeBaseProposer(EagleProposer):
                 "positions": model_positions,
                 "inputs_embeds": inputs_embeds,
             }
-            if self.pass_hidden_states_to_model:
+            if (
+                self.pass_hidden_states_to_model
+                and self.method != "draft_model"
+            ):
                 model_kwargs["hidden_states"] = model_hidden_states
 
             ret_hidden_states = self.model(**model_kwargs)
@@ -1004,7 +1074,11 @@ class SpecDecodeBaseProposer(EagleProposer):
                 target_positions = target_positions[0]
 
             self._set_positions(num_tokens, target_positions)
-            self.hidden_states[:num_tokens] = target_hidden_states
+            # Normal draft_model has its own hidden size, e.g. Qwen3-0.6B=1024
+            # while target Qwen3-8B=4096. Only Eagle/MTP-style proposers should
+            # copy target hidden states into the draft hidden-state buffer.
+            if self.pass_hidden_states_to_model:
+                self.hidden_states[:num_tokens] = target_hidden_states
 
             return num_tokens, token_indices_to_sample, cad, (query_lens_d, ori_token_indices_to_sample)
         else:
