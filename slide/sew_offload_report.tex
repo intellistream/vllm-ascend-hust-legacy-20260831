@@ -93,100 +93,6 @@ $\downarrow$ 详见下页
 \end{beamercolorbox}
 \end{frame}
 
-\begin{frame}[t]{为什么 GPU 抽象在 Ascend NPU 上不完整}
-\footnotesize
-\vspace{-0.55em}
-
-\bluepoint{昇腾 NPU 的三类差异化特性，决定了 GPU 式 offloading 不能直接迁移}
-
-\vspace{0.3em}
-
-\begin{columns}[T]
-\begin{column}{0.33\textwidth}
-\begin{block}{\textcolor{AccentRed}{1. 静态图执行偏好}}
-\scriptsize
-\vspace{-0.3em}
-\begin{itemize}
-  \item \textbf{NPUGraph / ACLGraph capture-replay：}
-  录制完整执行图后以极低开销重放；捕获时
-  tensor 地址、shape、dtype 被冻结，
-  重放期间\textbf{不允许改变}。
-
-  \item \textbf{Static Kernel 编译：}
-  固定 shape 算子可提前编译为高度优化
-  binary；shape 变体每增一种就多编译一份。
-
-  \item \textbf{稳定权重地址是关键约束：}
-  动态装载 expert → 权重地址每轮变化
-  → graph capture 失效 → 退回 eager 模式；
-  CUDA 上轻量的动态 kernel launch 在
-  Ascend 上代价高昂。
-\end{itemize}
-\end{block}
-\end{column}
-
-\begin{column}{0.33\textwidth}
-\begin{block}{\textcolor{AccentRed}{2. 显式数据搬运编排}}
-\scriptsize
-\vspace{-0.3em}
-\begin{itemize}
-  \item \textbf{三个独立搬运单元：}
-  三套搬运引擎各有专用通路：MTE1 走
-  L1→L0A/L0B（喂矩阵），MTE2 走全局内存
-  →L1/UB（从 HBM 取数），MTE3 走 UB→
-  全局内存（写回结果）。
-
-  \item \textbf{搬运与计算靠事件同步锁协调：}
-  搬运和计算各有独立指令队列，可并行但
-  需显式插入 SetFlag/WaitFlag 控制依赖——
-  前一步没做完后一步必须等。
-
-  \item \textbf{不编排就变成计算空等：}
-  GPU 的隐式并发在昇腾上不存在；数据预取、
-  权重加载、矩阵计算、结果写回必须组织成
-  Ping-Pong 双缓冲流水，否则搬运耗时直接
-  暴露为矩阵单元的停顿。
-\end{itemize}
-\end{block}
-\end{column}
-
-\begin{column}{0.33\textwidth}
-\begin{block}{\textcolor{AccentRed}{3. 异构计算单元分工}}
-\scriptsize
-\vspace{-0.3em}
-\begin{itemize}
-  \item \textbf{矩阵计算单元：} 专门针对大规模矩阵乘
-  优化，适合 MoE MLP 的主计算负载；
-
-  \item \textbf{向量计算单元：} 适合元素级操作，
-  如激活函数、路由选择、重排与合并；
-
-  \item \textbf{标量单元与指令调度：} 把不同阶段
-  计算分配到合适单元，避免小专家执行被
-  调度开销淹没。
-
-  \item \textbf{GPU 卸载为何不能直接搬：}
-  GPU 上一个核包揽矩阵乘、激活和搬运，
-  动态装 expert 直接跑；昇腾上这些被拆到
-  三条独立流水线——动态装载让同步时序每轮
-  变化，无法预编排，只能串行等。
-  \textbf{固定槽位让编排可复用：} 槽位地址和尺寸
-  不变，只替换专家到槽位的映射即可。
-\end{itemize}
-\end{block}
-\end{column}
-\end{columns}
-
-\vspace{0.1em}
-\begin{beamercolorbox}[wd=\linewidth,sep=0.35em,rounded=true]{block body}
-\scriptsize
-\textbf{\textcolor{AccentRed}{核心洞察：}}
-Ascend NPU 不是"慢一点的 GPU"，而是一台有\textbf{静态图执行器、独立搬运引擎和异构计算单元}的加速器。
-GPU 的动态 cache 抽象忽略这三个维度，直接移植 MoE offloading 会导致 graph 退化、搬运等待和计算单元错配。
-SEW-Offload 的设计正是围绕这三个特性展开。
-\end{beamercolorbox}
-\end{frame}
-
 \begin{frame}[t]{Why it matters?}
 \footnotesize
 \vspace{-0.4em}
@@ -227,7 +133,7 @@ SEW-Offload 的设计正是围绕这三个特性展开。
 
 \begin{column}{0.32\textwidth}
 \begin{minipage}[t][0.34\textheight][t]{\linewidth}
-\begin{block}{3. 为什么 Ascend offload 重要}
+\begin{block}{3. 为什么 offload 重要}
 \scriptsize
 \begin{itemize}
   \item \textbf{HBM 直接卡部署：} 大 MoE expert 权重放不下单卡 HBM，必须有可用卸载路径；
@@ -290,42 +196,58 @@ NPUMoE &
 
 \begin{frame}[t]{What is your key idea?}
 \footnotesize
-\vspace{-0.45em}
+\vspace{-0.65em}
 
-\bluepoint{把 expert offloading 从“cache hit rate 问题”改写为“可静态化、可预取、可分阶段执行的调度问题”。}
+\bluepoint{把目标从"提高 cache hit rate"改写为"最小化暴露在关键路径上的 stall"：}
 
-\vspace{0.25em}
+\vspace{-0.1em}
+\begin{center}
+\begin{beamercolorbox}[wd=0.58\linewidth,sep=0.3em,rounded=true,center]{block body}
+\footnotesize
+\textbf{\textcolor{AccentRed}{优化目标：}}
+$\displaystyle T_{\text{stall}} = \max\bigl(0,\; T_{\text{load-miss}} - T_{\text{overlap}}\bigr)$
+\quad
+\textcolor{DarkGray}{不是 hit rate 高就行，而是 miss 加载能否被计算覆盖}
+\end{beamercolorbox}
+\end{center}
+
+\vspace{0.0em}
 \begin{center}
 \resizebox{0.98\linewidth}{!}{%
 \begin{tikzpicture}[
-  font=\scriptsize,
-  challenge/.style={draw=AccentRed, fill=SoftYellow, rounded corners=2pt, text width=3.55cm, minimum height=1.1cm, align=center},
-  idea/.style={draw=MainBlue, fill=SoftGreen, rounded corners=2pt, text width=3.85cm, minimum height=1.75cm, align=center},
-  arrow/.style={-{Latex[length=2.4mm]}, very thick, color=MainBlue}
+  font=\footnotesize,
+  challenge/.style={draw=AccentRed, fill=SoftYellow, rounded corners=2pt, text width=3.35cm, minimum height=1.15cm, align=center, inner sep=3pt},
+  idea/.style={draw=MainBlue, fill=SoftGreen, rounded corners=2pt, text width=3.45cm, minimum height=1.75cm, align=center, inner sep=3pt},
+  arrow/.style={-{Latex[length=2.6mm]}, very thick, color=MainBlue},
+  pipearrow/.style={-{Latex[length=2.0mm]}, thick, color=DarkGray}
 ]
-\node[challenge] (c1) at (0,0) {\textbf{Challenge 1}\\动态专家如何利用NPU静态特性};
-\node[idea, below=0.55cm of c1] (i1) {\textbf{Static Expert Slots}\\预先分配固定 HBM slots；\\运行时只换 slot 里的 expert，\\不换 NPU 看到的地址。};
+% Challenge row
+\node[challenge] (c1) at (0,0) {\textbf{Challenge 1}\\[2pt]动态权重地址\\破坏 NPUGraph 重放\\与 Static Kernel 复用};
+\node[challenge] (c2) at (4.8,0) {\textbf{Challenge 2}\\[2pt]按热度预取 $\rightarrow$ hit rate 高\\但 miss 专家加载仍可能\\暴露在关键路径上};
+\node[challenge] (c3) at (9.6,0) {\textbf{Challenge 3}\\[2pt]等待所有 miss expert\\到齐再执行 $\rightarrow$ Cube 空闲,\\MTE 搬运与计算串行};
+
+% Idea row
+\node[idea] (i1) at (0,-2.35) {\textbf{Fixed Expert Slots}\\[3pt]HBM 预分配固定数量 slot,\\地址/形状/布局\textbf{永久不变};\\运行时只改 expert\_id $\rightarrow$ slot\_id,\\NPU 执行图始终看到稳定入口};
+\node[idea] (i2) at (4.8,-2.35) {\textbf{Deadline-Aware Prefetch}\\[3pt]每次加载 = 带 deadline 的作业;\\按 \textbf{最晚就绪时间、影响 token 数、\\搬运代价}三维排序,\\紧迫且影响大的 expert 优先搬};
+\node[idea] (i3) at (9.6,-2.35) {\textbf{Hit-First Phased Execution}\\[3pt]不等全部 expert 到齐:\\\textbf{Phase 0} 先执行 slot 中已就绪 experts,\\同时后台搬运 miss experts;\\\textbf{Phase 1} 再执行刚加载完的 experts};
+
+% Arrows: challenge -> idea (drawn after all nodes defined)
 \draw[arrow] (c1) -- (i1);
-
-\node[challenge] (c2) at (4.8,0) {\textbf{Challenge 2}\\如何避免只按热度预取产生的高开销};
-\node[idea, below=0.55cm of c2] (i2) {\textbf{Deadline-Aware Prefetch}\\把每次加载当作带 deadline 的 job；\\按使用时间、加载成本和 token 数\\决定先搬谁。};
 \draw[arrow] (c2) -- (i2);
-
-\node[challenge] (c3) at (9.6,0) {\textbf{Challenge 3}\\如何让miss不阻塞整层MoE};
-\node[idea, below=0.55cm of c3] (i3) {\textbf{Hit-First Phased Execution}\\不要等所有 expert 到齐；\\先跑已在 HBM 的 experts，\\边算边加载 miss experts。};
 \draw[arrow] (c3) -- (i3);
 
-\draw[arrow] ([xshift=0.15cm]i1.east) -- ([xshift=-0.15cm]i2.west);
-\draw[arrow] ([xshift=0.15cm]i2.east) -- ([xshift=-0.15cm]i3.west);
+% Pipeline arrows between ideas
+\draw[pipearrow] ([xshift=0.12cm]i1.east) -- node[above, font=\tiny, text=DarkGray]{稳定入口} ([xshift=-0.12cm]i2.west);
+\draw[pipearrow] ([xshift=0.12cm]i2.east) -- node[above, font=\tiny, text=DarkGray]{调度结果} ([xshift=-0.12cm]i3.west);
 \end{tikzpicture}
 }
 \end{center}
 
-\vspace{0.15em}
-\begin{beamercolorbox}[wd=\linewidth,sep=0.55em,rounded=true]{block body}
+\vspace{-0.05em}
+\begin{beamercolorbox}[wd=\linewidth,sep=0.4em,rounded=true]{block body}
 \scriptsize
-\textbf{\textcolor{AccentRed}{核心思路：}}
-先给 NPU 预留一组固定的专家位置，让执行入口和权重地址保持稳定；再根据每个缺失专家什么时候会被用到、搬运代价有多高、影响多少 token，决定先搬谁；如果仍然来不及搬完，就先执行已经在显存里的专家，同时继续搬运缺失专家，避免整层 MoE 因少数缺失专家而停住。
+\textbf{\textcolor{AccentRed}{三层机制协同：}}
+\textbf{① Fixed Slots} 提供 NPU 友好的稳定执行基底 $\rightarrow$ \textbf{② Deadline-Aware Prefetch} 决定谁先搬进 slot（最小化 $T_{\text{load-miss}}$）$\rightarrow$ \textbf{③ Hit-First Phased Execution} 用已有 expert 的计算覆盖剩余加载（最大化 $T_{\text{overlap}}$），最终将暴露 stall 压到最低。
 \end{beamercolorbox}
 \end{frame}
 
