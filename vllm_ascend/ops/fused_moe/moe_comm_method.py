@@ -159,7 +159,25 @@ class MoECommMethod(ABC):
             use_fusion_ops=self.use_fusion_ops,
         )
 
-        mlp_output = self._apply_mlp(mlp_compute_input)
+        # --- MVP-D.11: post-dispatch phase split (default off) ---
+        _phase_split_enabled, _phase_plan, _phase_fail_reason = self._maybe_plan_phase_split(
+            fused_experts_input=fused_experts_input,
+            mlp_compute_input=mlp_compute_input,
+            token_dispatch_output=token_dispatch_output,
+        )
+        if _phase_split_enabled and _phase_plan is not None:
+            from vllm_ascend.moe_offload.phase_split import execute_phased_mlp
+
+            mlp_output = execute_phased_mlp(
+                mlp_compute_input=mlp_compute_input,
+                phase_plan=_phase_plan,
+            )
+        elif _phase_split_enabled and _phase_fail_reason is not None:
+            raise RuntimeError(
+                "MoE phase split failed closed: " + _phase_fail_reason
+            )
+        else:
+            mlp_output = self._apply_mlp(mlp_compute_input)
 
         if do_pipe_profile:
             e3 = pipeline_profiler.record()  # after Stage C, before Stage M
@@ -189,6 +207,102 @@ class MoECommMethod(ABC):
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+    def _maybe_plan_phase_split(
+        self,
+        *,
+        fused_experts_input: MoEFusedExpertsInput,
+        mlp_compute_input: MoEMlpComputeInput,
+        token_dispatch_output,
+    ) -> tuple[bool, object | None, str | None]:
+        """MVP-D.11: decide whether to split MLP into phases.
+
+        Returns ``(enabled, phase_plan | None, fail_reason | None)``.
+        """
+        runtime = get_moe_offload_runtime()
+        if not runtime.config.phase_split_enabled:
+            return False, None, None
+
+        # --- Narrow-path gate ---
+        # D.11 supports: AllGather + unquantized + no bias + no EP.
+        from vllm_ascend.ascend_forward_context import MoECommType as _MoECommType
+
+        if _EXTRA_CTX.moe_comm_type != _MoECommType.ALLGATHER:
+            return True, None, "phase_split_requires_AllGather"
+        if mlp_compute_input.quant.is_quant:
+            return True, None, "phase_split_requires_unquantized"
+        if fused_experts_input.weights.w1_bias is not None or fused_experts_input.weights.w2_bias is not None:
+            return True, None, "phase_split_requires_no_bias"
+        if fused_experts_input.routing.expert_map is not None:
+            return True, None, "phase_split_requires_no_expert_map"
+
+        # --- Build phase plan ---
+        from vllm_ascend.moe_offload.phase_split import (
+            MoEPhasePlan,
+            PhaseSplitProfileEvent,
+            _write_phase_split_profile_jsonl,
+            compute_expert_token_slices,
+            plan_hit_miss_phases,
+        )
+
+        offload = fused_experts_input.offload
+        layer_id = offload.layer_id if offload is not None else -1
+
+        try:
+            group_list = mlp_compute_input.group_list
+            group_list_type = mlp_compute_input.group_list_type
+
+            expert_slices = compute_expert_token_slices(group_list, group_list_type)
+            num_experts_in_group = len(expert_slices)
+
+            # Active expert ids are 0..(num_experts_in_group-1) — the group_list
+            # is already permuted to the local expert order.
+            active_expert_ids = tuple(range(num_experts_in_group))
+
+            # Build slot readiness map from the offload runtime.
+            slot_readiness: dict[int, bool] = {}
+            if offload is not None and offload.enabled and runtime.should_use_fixed_slot_plan_for_layer(layer_id):
+                slot_bank = runtime._slot_banks.get(layer_id)
+                if slot_bank is not None:
+                    for expert_id in active_expert_ids:
+                        from vllm_ascend.moe_offload.expert_key import ExpertKey
+                        from vllm_ascend.moe_offload.slot_bank import SlotState
+
+                        key = ExpertKey(layer_id, int(expert_id))
+                        slot = slot_bank.lookup(key)
+                        slot_readiness[int(expert_id)] = (
+                            slot is not None and slot.state == SlotState.READY
+                        )
+
+            max_phases = runtime.config.max_phases
+            phase_plan: MoEPhasePlan = plan_hit_miss_phases(
+                expert_slices=expert_slices,
+                active_expert_ids=active_expert_ids,
+                slot_readiness=slot_readiness if slot_readiness else None,
+                max_phases=max_phases,
+            )
+
+            # Observability
+            event = PhaseSplitProfileEvent(
+                name="phase_split_plan",
+                layer_id=layer_id,
+                seconds=0.0,  # plan time is negligible at this point
+                phase_plan_jsonable=phase_plan.to_jsonable(),
+            )
+            _write_phase_split_profile_jsonl(event)
+
+            return True, phase_plan, None
+
+        except Exception as exc:
+            fail_reason = f"phase_split_plan_failed: {exc}"
+            event = PhaseSplitProfileEvent(
+                name="phase_split_fail_closed",
+                layer_id=layer_id,
+                seconds=0.0,
+                fail_reason=fail_reason,
+            )
+            _write_phase_split_profile_jsonl(event)
+            return True, None, fail_reason
 
     def _maybe_apply_moe_offload_plan(self, fused_experts_input: MoEFusedExpertsInput) -> MoEFusedExpertsInput:
         offload = fused_experts_input.offload

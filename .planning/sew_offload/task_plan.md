@@ -51,13 +51,16 @@
 | 子任务 | 状态 | 说明 |
 | --- | --- | --- |
 | D.11 范围冻结 | complete | 只做 dispatch 后 phase split 语义原型；不做 async transfer、不做性能优化、不改 router/top-k/token count |
-| Phase split contract | pending | 定义 `MoEPhasePlan` / `MoEPhase` / 回填 contract，输入为 dispatch 后 `group_list` 与 active experts，输出为完整 permuted MLP output |
-| Dispatch-output expert slicing | pending | 在 dynamic count `group_list` 上计算每个 expert 的 token slice；支持 group_list_type=1 的 AllGather 窄路径，复杂通信先 fail closed |
-| Phase planner | pending | 把 active experts 切成 resident/slot-ready/miss 或 hit/miss phases；D.11 先用同步 ready 判定，不启动 async load |
-| Partial MLP execution seam | pending | 允许 `_apply_mlp` 对单个 phase 的 contiguous expert/token slice 运行，并返回可回填的 phase output |
-| Full-buffer scatter/gather | pending | 把各 phase 输出回填到完整 `sorted_hidden_states` 对应顺序，最后复用原 `token_combine` |
-| Equivalence UT | pending | 小张量 mock 验证 single phase 与多 phase 输出逐元素一致；覆盖空 phase、乱序 phase、重复/缺失 slice fail closed |
-| Boundary integration guard | pending | 在 `MoECommMethod.fused_experts()` 中默认关闭；仅 env opt-in 且 AllGather/unquantized/no bias/no EP 窄路径启用 |
+| Phase split contract | complete | `MoEPhasePlan` / `MoEPhase` / 回填 contract 已定义在 `vllm_ascend/moe_offload/phase_split.py`；`MoEPhasePlan` 包含 phases、hit/miss count、total_tokens、reason |
+| Dispatch-output expert slicing | complete | `compute_expert_token_slices()` 支持 group_list_type=0/1；AllGather 窄路径，复杂通信 fail closed |
+| Phase planner | complete | `plan_hit_miss_phases()` 基于同步 `slot_readiness` 字典做 hit/miss 切分；默认单 phase fallback；`max_phases=1` 强制单 phase |
+| Partial MLP execution seam | complete | `_extract_phase_tokens()`、`_build_phase_group_list()`、`_slice_expert_weights()` 构造子 MLP 输入；`execute_phased_mlp()` 对每个 phase 调用 `_apply_mlp_fn` |
+| Full-buffer scatter/gather | complete | `_scatter_phase_output()` 对各 phase 输出按 `token_slices` 回填到完整输出 buffer；单 phase fast-path 跳过 scatter |
+| Equivalence UT | complete | 31 个 UT 通过：覆盖 type 0/1 slicing、hit/miss/all-hit/all-miss/空 expert 等价性、group_list 构建、权重切片、scatter、profile JSONL、空 phase fallback、乱序/缺失 slice fail-closed |
+| Boundary integration guard | complete | `MoECommMethod._maybe_plan_phase_split()` + `fused_experts()` 集成；默认 `VLLM_ASCEND_MOE_OFFLOAD_PHASE_SPLIT=0` 关闭；只在 AllGather+unquantized+no bias+no EP 窄路径启用；否则 fail closed |
+| Observability | complete | `PhaseSplitProfileEvent` 写入 profile JSONL 记录 phase plan、fail reason、layer_id；与现有 `VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH` 复用同一 JSONL 流 |
+| NPU semantic smoke | pending | 资源可用后先跑 1-token strict compare，再跑 8-token；D.11 不要求性能提升，只要求 token-id correctness（D.10 post-downsink 门禁已满足） |
+| D.11 复盘门禁 | pending | 若 Python 多 phase 开销过高，记录为语义脚手架；MVP-E async 前必须保留 single-phase fallback |
 | Observability | pending | profile JSONL 记录 phase 数、每 phase experts/token count、回填耗时、fail reason |
 | NPU semantic smoke | pending | 资源可用后先跑 1-token strict compare，再跑 8-token；D.11 不要求性能提升，只要求 token-id correctness（D.10 post-downsink 门禁已满足） |
 | D.11 复盘门禁 | pending | 若 Python 多 phase 开销过高，记录为语义脚手架；MVP-E async 前必须保留 single-phase fallback |
@@ -77,10 +80,10 @@
 | 7. 质量门禁 | in_progress | correctness、性能、citation、复现、默认关闭验证 |
 | 8. 现有 offloading 实测 | complete | Qwen3-30B-A3B 单卡 baseline、UVA/offload-prefetch 日志、失败/瓶颈定位 |
 | 9. Native offload benchmark pilot | complete | `tools/sew_offload/run_minimal_offload_benchmark.py`、native prefetch expert/all-param 失败证据、no-offload 三指标 sanity |
-| 10. SEW runtime MVP | in_progress | MVP-A/B/C 完成；MVP-D fixed-slot sync correctness 最小闭环已通过真实 NPU smoke |
+| 10. SEW runtime MVP | in_progress | MVP-A/B/C 完成；MVP-D fixed-slot sync correctness 最小闭环已通过真实 NPU smoke；MVP-D.11 phase split 语义原型代码/UT 已完成 |
 | 11. MoE Offload 支持核实与总体架构 | complete | `docs/sew-offload/08-ascend-moe-offload-architecture.md`：不支持证据链、系统架构、控制/数据面图、路线图 |
 | 12. Dynamic-count layered runtime | complete | MVP-D.10 path selector 与 fused_experts 下沉代码/UT 完成；post-downsink 1-token/8-token 真实 NPU smoke 与 strict compare 全部通过 |
-| 13. Dispatch 后 phase split | planned | MVP-D.11 任务已拆解；D.10 post-downsink strict compare 门禁已满足，可进入实现 |
+| 13. Dispatch 后 phase split | complete | MVP-D.11 代码/UT 完成：MoEPhasePlan、expert slicing、hit/miss planner、partial MLP、scatter/gather、等价性验证、boundary guard 全部到位；NPU semantic smoke 待资源可用 |
 
 ## 当前 MVP-A 状态
 
@@ -132,7 +135,28 @@
 - 2026-06-02 D.9 小范围 release=1 smoke：NPU 6，1 个 non-resident layer（layer 0）+ 47 个 resident layers，release=1 成功；profile JSONL 显示 register layer 0 用时约 2.03s，release 约 0.0004s，ledger 中 original expert bytes 从约 1.208GB 降到 0；no-offload vs candidate 1-token 严格 token-id 对照通过。
 - 2026-06-02 D.10 dynamic-count layered runtime：默认关闭的 path selector 已在旧 hook 位置通过真实 NPU 1-token/8-token smoke 和 strict token-id compare；8-token candidate throughput `1.675 tok/s`、TTFT `868.72 ms`、TPOT `558.14 ms`，no-offload baseline throughput `6.337 tok/s`、TTFT `445.15 ms`、TPOT `116.71 ms`。
 - 2026-06-02 D.10 fused boundary 下沉：`apply()` 不再直接做 slot 权重准备，而是把 offload metadata 传入 fused input；`MoECommMethod.fused_experts()` 在 dispatch 前根据 `topk_ids` 做 path decision、slot plan 和 fail-closed。UT/compile/diff 已通过；post-downsink 真实 smoke 被 NPU 6 残留 HBM 上下文阻塞。
-- 下一步顺序更新：D.10 post-downsink 1-token/8-token strict compare 已于 2026-06-02 补跑通过；现可直接进入 MVP-D.11 dispatch 后 phase split 语义原型；然后才进入 MVP-E async transfer 与 overlap metrics；最后考虑 D.12 staging-aware fused/custom op 或 window-aware global pool。
+- 下一步顺序更新：D.11 NPU semantic smoke（待 NPU 资源窗口可用后先跑 1-token strict compare，再跑 8-token）；然后进入 MVP-E async transfer 与 overlap metrics；最后考虑 D.12 staging-aware fused/custom op 或 window-aware global pool。
+
+## MVP-D.11 实现摘要（2026-06-04）
+
+- 新增 `vllm_ascend/moe_offload/phase_split.py`：
+  - `MoEPhase` / `MoEPhasePlan`：phase split contract dataclass，含 `to_jsonable()`。
+  - `compute_expert_token_slices()`：支持 group_list_type 0（cumsum）和 1（count）。
+  - `plan_hit_miss_phases()`：基于 slot_readiness map 做 hit/miss 切分；支持 max_phases=1 强制单 phase。
+  - `_extract_phase_tokens()`：从 sorted hidden_states 按 token_slices 抽取并 concat。
+  - `_build_phase_group_list()`：构造只包含子集 expert 的 group_list（兼容 type 0/1）。
+  - `_slice_expert_weights()`：对 MoEWeights 做 expert 维度的索引切片。
+  - `_scatter_phase_output()`：把 phase 输出回填到完整 output buffer。
+  - `execute_phased_mlp()`：顶层编排器；单 phase fast-path 直接委托 `_apply_mlp_fn`。
+  - `PhaseSplitProfileEvent` + `_write_phase_split_profile_jsonl()`：observability。
+- 修改 `vllm_ascend/ops/fused_moe/moe_comm_method.py`：
+  - 新增 `_maybe_plan_phase_split()` 方法：检查 phase_split 启用、窄路径 gate（AllGather+unquant+no bias+no EP）、构建 phase plan、写 profile JSONL。
+  - `fused_experts()` 中在 `build_mlp_compute_input` 后分支：phase_split 启用 → `execute_phased_mlp()`；否则 → 原 `_apply_mlp()`。
+- 环境变量：`VLLM_ASCEND_MOE_OFFLOAD_PHASE_SPLIT`（默认 0）。
+- 配置：`MoeOffloadConfig.phase_split_enabled`。
+- UT：`tests/ut/moe_offload/test_phase_split.py`，31 个测试全部通过。
+  - 覆盖：type 0/1 slicing、hit/miss/all-hit/all-miss 等价性、空 expert、group_list 构建、权重切片、scatter、profile JSONL、空 phase fallback、乱序/缺失 slice fail-closed。
+- 回归：现有 moe_offload 测试 133 passed（2 预存在 import error + 1 预存在 env monkeypatch 失败未计入）。
 
 ## 关键约束
 

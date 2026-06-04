@@ -17,6 +17,10 @@ from typing import Any
 import yaml
 from vllm import LLM, SamplingParams
 
+from tools.sew_offload.sharegpt_manifest import (
+    assert_no_random_dataset,
+    build_sharegpt_manifest,
+)
 from vllm_ascend.moe_offload.runtime import get_moe_offload_runtime, reset_moe_offload_runtime
 
 
@@ -65,40 +69,24 @@ def _bucket_target_prompt_tokens(bucket: dict[str, Any], index: int) -> int:
     return int(round(low + (high - low) * ratio))
 
 
-def prepare_synthetic_smoke_manifest(
+def prepare_sharegpt_manifest(
     *,
     config: dict[str, Any],
     manifest_path: Path,
     requests_per_bucket: int,
     buckets: set[str] | None,
+    model_path: str | None = None,
 ) -> None:
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    seed_text = (
-        "This is a SEW-Offload trace collection request for mixture of experts "
-        "inference on Ascend NPU."
+    # requests_per_bucket <= 0 means "use each bucket's full configured count".
+    cap = requests_per_bucket if requests_per_bucket and requests_per_bucket > 0 else None
+    written = build_sharegpt_manifest(
+        config=config,
+        manifest_path=manifest_path,
+        model_path=model_path or config["model"]["path"],
+        requests_per_bucket=cap,
+        buckets=buckets,
     )
-    with manifest_path.open("w", encoding="utf-8") as f:
-        for bucket in config["workload_buckets"]:
-            name = bucket["name"]
-            if buckets is not None and name not in buckets:
-                continue
-            count = min(requests_per_bucket, int(bucket["num_requests"]))
-            for i in range(count):
-                target_tokens = _bucket_target_prompt_tokens(bucket, i)
-                repeat_count = max(1, target_tokens // 16)
-                prompt = " ".join([seed_text] * repeat_count)
-                record = {
-                    "request_id": f"{name}_{i:04d}",
-                    "bucket": name,
-                    "prompt": prompt,
-                    "target_prompt_tokens": target_tokens,
-                    "max_output_tokens": int(bucket["output_tokens"]),
-                    "temperature": 0.0,
-                    "top_p": 1.0,
-                    "seed": int(config["dataset"]["seed"]),
-                    "dataset": "synthetic_smoke",
-                }
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"MANIFEST_OK written={written} path={manifest_path}", flush=True)
 
 
 def load_manifest(
@@ -173,17 +161,19 @@ def _count_jsonl_records(path: Path) -> int:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
+    assert_no_random_dataset(config)
     selected_buckets = csv_set(args.buckets) or None
     manifest_path = Path(args.manifest or config["dataset"]["manifest_path"])
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if args.prepare_smoke_manifest:
-        prepare_synthetic_smoke_manifest(
+        prepare_sharegpt_manifest(
             config=config,
             manifest_path=manifest_path,
             requests_per_bucket=args.smoke_requests_per_bucket,
             buckets=selected_buckets,
+            model_path=args.model,
         )
         if args.prepare_only:
             print(f"PREPARE_OK manifest={manifest_path}", flush=True)

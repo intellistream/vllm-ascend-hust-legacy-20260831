@@ -34,6 +34,13 @@ from vllm_ascend.moe_offload.pipeline import (
     get_moe_pipeline_profiler,
     reset_moe_pipeline_profiler,
 )
+from vllm_ascend.moe_offload.phase_split import (
+    MoEPhase,
+    MoEPhasePlan,
+    compute_expert_token_slices,
+    execute_phased_mlp,
+    plan_hit_miss_phases,
+)
 from vllm_ascend.moe_offload.slot_simulator import ExpertSizeTable, SlotSimulationSummary, SlotSimulator
 from vllm_ascend.moe_offload.trace_collector import TraceCollector, TraceRecord
 from vllm_ascend.moe_offload.transfer_engine import TransferEngine
@@ -52,6 +59,10 @@ __all__ = [
     "MoeOffloadConfig",
     "MoeOffloadMemoryLedger",
     "MoeOffloadRuntime",
+    "MoePipelineProfiler",
+    "MoePipelineTiming",
+    "MoEPhase",
+    "MoEPhasePlan",
     "PreparedSlotWeights",
     "SlotState",
     "SlotSimulationSummary",
@@ -59,6 +70,11 @@ __all__ = [
     "TraceCollector",
     "TraceRecord",
     "TransferEngine",
+    "compute_expert_token_slices",
+    "execute_phased_mlp",
     "get_moe_offload_runtime",
+    "get_moe_pipeline_profiler",
+    "plan_hit_miss_phases",
     "reset_moe_offload_runtime",
+    "reset_moe_pipeline_profiler",
 ]

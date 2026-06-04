@@ -48,12 +48,18 @@ docs/sew-offload/benchmark_config.yaml
 正式 benchmark 数据集固定为：
 
 ```text
-lmsys/lmsys-chat-1m
+ShareGPT_V3_unfiltered_cleaned_split
+```
+
+本地文件：
+
+```text
+/data/datasets/ShareGPT_V3_unfiltered_cleaned_split.json
 ```
 
 原因：
 
-- 来自真实聊天请求，更接近 serving 场景。
+- 来自真实人类对话请求，更接近 serving 场景。
 - prompt 长度和内容分布丰富，适合观察 MoE expert offloading 的真实压力。
 - 可以用固定 seed 和 tokenizer length filter 生成可复现请求集合。
 
@@ -63,7 +69,12 @@ lmsys/lmsys-chat-1m
 artifacts/sew_offload/benchmarks/sew_bench_ascend_moe_30b/requests.jsonl
 ```
 
-如果数据集暂时不可用，可以先用 synthetic smoke set 跑通流程，但 smoke set 结果不能作为正式 benchmark 结果。
+**强制约束（适用于所有实验，包括 smoke / 调试）**：
+
+- 所有 benchmark 请求都必须从上述 ShareGPT 数据集采样。
+- 禁止使用随机 / 合成 / 拼接生成的 prompt（`random_dataset_allowed: false`、`synthetic_smoke_allowed: false`）。
+- smoke 测试也必须用 ShareGPT 真实 prompt，只是请求数更少；不允许再用 synthetic seed-text 重复填充。
+
 
 ## 3. 固定 Workload Buckets
 

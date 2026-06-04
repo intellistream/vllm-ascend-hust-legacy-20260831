@@ -39,6 +39,8 @@ class MoeOffloadConfig:
     # MVP-D.10: dynamic-count layered runtime path selector (default off).
     layered_runtime: bool = False
     fanout_threshold: int = 0
+    # MVP-D.11: post-dispatch phase split semantic prototype (default off).
+    phase_split_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "MoeOffloadConfig":
@@ -56,6 +58,7 @@ class MoeOffloadConfig:
             release_original_expert_weights=envs.VLLM_ASCEND_MOE_OFFLOAD_RELEASE_ORIGINAL_EXPERT_WEIGHTS,
             layered_runtime=envs.VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME,
             fanout_threshold=envs.VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD,
+            phase_split_enabled=envs.VLLM_ASCEND_MOE_OFFLOAD_PHASE_SPLIT,
         )
 
     @property

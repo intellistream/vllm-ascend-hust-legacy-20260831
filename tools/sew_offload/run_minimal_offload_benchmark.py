@@ -19,8 +19,12 @@ from typing import Any
 import torch
 import torch_npu
 import yaml
-from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
+
+from tools.sew_offload.sharegpt_manifest import (
+    assert_no_random_dataset,
+    build_sharegpt_manifest,
+)
 
 
 DEFAULT_CONFIG = "docs/sew-offload/benchmark_config.yaml"
@@ -82,69 +86,22 @@ def _bucket_filter(buckets: str) -> set[str] | None:
     return selected or None
 
 
-def _token_count(tokenizer: Any, text: str) -> int:
-    return len(tokenizer.encode(text, add_special_tokens=False))
-
-
-def _prompt_to_length(tokenizer: Any, target_tokens: int, seed_text: str) -> str:
-    parts: list[str] = []
-    text = ""
-    while _token_count(tokenizer, text) < target_tokens:
-        parts.append(seed_text)
-        text = " ".join(parts)
-    token_ids = tokenizer.encode(text, add_special_tokens=False)[:target_tokens]
-    return tokenizer.decode(token_ids, skip_special_tokens=True)
-
-
-def _bucket_target_prompt_tokens(bucket: dict[str, Any], index: int) -> int:
-    prompt_tokens = bucket["prompt_tokens"]
-    if prompt_tokens == "mixed":
-        mixed_targets = [192, 768, 3072, 384]
-        return mixed_targets[index % len(mixed_targets)]
-    low, high = prompt_tokens
-    if high <= low:
-        return int(low)
-    # Deterministic spread across the bucket range.
-    ratio = (index % 5) / 4
-    return int(round(low + (high - low) * ratio))
-
-
-def prepare_smoke_manifest(
+def prepare_sharegpt_manifest(
     config: dict[str, Any],
     manifest_path: Path,
     requests_per_bucket: int,
     buckets: set[str] | None,
 ) -> None:
-    tokenizer = AutoTokenizer.from_pretrained(
-        config["model"]["path"],
-        trust_remote_code=False,
+    # requests_per_bucket <= 0 means "use each bucket's full configured count".
+    cap = requests_per_bucket if requests_per_bucket and requests_per_bucket > 0 else None
+    written = build_sharegpt_manifest(
+        config=config,
+        manifest_path=manifest_path,
+        model_path=config["model"]["path"],
+        requests_per_bucket=cap,
+        buckets=buckets,
     )
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    seed_text = (
-        "This is a benchmark request for mixture of experts inference on "
-        "Ascend NPU. The prompt is repeated to reach the target token length."
-    )
-    with manifest_path.open("w", encoding="utf-8") as f:
-        for bucket in config["workload_buckets"]:
-            name = bucket["name"]
-            if buckets is not None and name not in buckets:
-                continue
-            count = min(requests_per_bucket, int(bucket["num_requests"]))
-            for i in range(count):
-                prompt_tokens = _bucket_target_prompt_tokens(bucket, i)
-                prompt = _prompt_to_length(tokenizer, prompt_tokens, seed_text)
-                record = {
-                    "request_id": f"{name}_{i:04d}",
-                    "bucket": name,
-                    "prompt": prompt,
-                    "prompt_tokens": _token_count(tokenizer, prompt),
-                    "max_output_tokens": int(bucket["output_tokens"]),
-                    "temperature": 0.0,
-                    "top_p": 1.0,
-                    "seed": int(config["dataset"]["seed"]),
-                    "dataset": "synthetic_smoke",
-                }
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    print(f"MANIFEST_OK written={written} path={manifest_path}", flush=True)
 
 
 def load_manifest(
@@ -325,11 +282,12 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     config = _load_config(args.config)
+    assert_no_random_dataset(config)
     selected_buckets = _bucket_filter(args.buckets)
     manifest_path = Path(args.manifest or config["dataset"]["manifest_path"])
 
     if args.prepare_smoke_manifest:
-        prepare_smoke_manifest(
+        prepare_sharegpt_manifest(
             config,
             manifest_path,
             args.smoke_requests_per_bucket,

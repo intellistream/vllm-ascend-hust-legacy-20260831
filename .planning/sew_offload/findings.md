@@ -137,7 +137,16 @@
 
 **待办：** 真实 trace JSONL；`release=1` NPU smoke + strict compare；可选把 SEW env 加入 vLLM allowlist 减日志噪音。
 
-## 2026-06-02 MVP-D.9 复盘与动态 count 路径修正
+## 2026-06-04 MVP-D.11 实现发现
+
+- D.11 核心设计：在 `token_dispatch_output` 之后、`_apply_mlp` 之前插入 phase split。单 phase fast-path 直接委托，多 phase 走 extract→slice→build→scatter 路径。
+- AllGather 路径使用 `group_list_type=1`（count 模式），`sorted_hidden_states` 按 expert 顺序排列。Phase split 需要从 group_list 计算每个 expert 的 token slice `[start, end)`，然后对子集 expert 做 token 抽取和权重切片。
+- `_slice_expert_weights()` 对 `MoEWeights` 的 w1/w2/w1_bias/w2_bias 等字段统一做 `tensor[list(expert_indices)]` 索引；None 字段保留 None。
+- 判断 expert readiness：当前默认所有 expert 均为 ready（hit），仅当 offload runtime 启用且 slot_bank 中该 expert 状态不是 `SlotState.READY` 时才标记为 miss。这为 MVP-E async transfer 保留了正确的 hit/miss 语义入口。
+- 窄路径 gate：`VLLM_ASCEND_MOE_OFFLOAD_PHASE_SPLIT=1` 只在 AllGather + unquantized + no bias + no EP 下启用，否则 fail closed 抛出 RuntimeError。不覆盖 MC2/All2All/FusedMC2/quantized/bias/EP 路径。
+- 等价性验证：mock MLP 使用 `x @ w1[e] @ w2[e]`（方阵权重），确保单 phase 与多 phase（hit/miss 切分）输出逐元素一致。31 个 UT 全部通过。
+- 与 D.10 的关系：D.10 的 `_maybe_apply_moe_offload_plan` 在 dispatch 前做 slot plan remap；D.11 的 `_maybe_plan_phase_split` 在 dispatch 后做 phase split。两者互不冲突——D.10 改变了 `fused_experts_input` 的 weights/routing，D.11 在此基础上切分 MLP compute。
+- 当前 D.11 使用同步 slot_readiness 判定；MVP-E 将改为异步判断 + stream overlap。
 
 - 最新提交：`ac6e3922 feat(moe-offload): MVP D.9 implement tiered residency and partial release for expert weights`，当前 `research` 与 `origin/research` 对齐。
 - MVP-D.9 的实际范围：

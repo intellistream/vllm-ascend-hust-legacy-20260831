@@ -178,6 +178,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD": lambda: int(
         os.getenv("VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD", "0")
     ),
+    # MVP-D.11: opt-in post-dispatch phase split semantic prototype.
+    # Splits MoE MLP into hit/miss phases. Default off.
+    "VLLM_ASCEND_MOE_OFFLOAD_PHASE_SPLIT": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_PHASE_SPLIT", "0"))
+    ),
     # MVP-D.9 verification: optional JSONL path for cross-process profiling artifacts.
     "VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH": lambda: os.getenv("VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH", ""),
     # Pipeline-level profiling: record Stage T/R/C/M npu.Event elapsed times (trace-only, no overlap changes).

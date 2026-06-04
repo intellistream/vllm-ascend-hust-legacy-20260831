@@ -28,12 +28,17 @@ model:
     drop_experts: false
 
 dataset:
-  source: lmsys/lmsys-chat-1m
+  source: sharegpt
+  variant: ShareGPT_V3_unfiltered_cleaned_split
+  local_path: /data/datasets/ShareGPT_V3_unfiltered_cleaned_split.json
   seed: 20260529
   num_requests: 1000
   manifest_path: artifacts/sew_offload/benchmarks/sew_bench_ascend_moe_30b/requests.jsonl
-  smoke_dataset_allowed_for_debug: true
-  smoke_dataset_publishable: false
+  # Mandatory: every benchmark (including smoke/debug) must draw prompts from the
+  # ShareGPT dataset above. Random/synthetic/generated prompts are not allowed
+  # for any run, smoke included.
+  random_dataset_allowed: false
+  synthetic_smoke_allowed: false
 
 workload_buckets:
   - name: short_chat
