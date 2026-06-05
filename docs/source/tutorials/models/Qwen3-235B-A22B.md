@@ -445,7 +445,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 '{"kv_connector": "MooncakeConnectorV1",
 "kv_role": "kv_producer",
 "kv_port": "30000",
-"engine_id": "0",
 "kv_connector_extra_config": {
       "prefill": {
             "dp_size": 2,
@@ -509,7 +508,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 '{"kv_connector": "MooncakeConnectorV1",
 "kv_role": "kv_consumer",
 "kv_port": "30100",
-"engine_id": "1",
 "kv_connector_extra_config": {
       "prefill": {
             "dp_size": 2,
@@ -574,7 +572,6 @@ vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
 '{"kv_connector": "MooncakeConnectorV1",
 "kv_role": "kv_consumer",
 "kv_port": "30100",
-"engine_id": "1",
 "kv_connector_extra_config": {
       "prefill": {
             "dp_size": 2,

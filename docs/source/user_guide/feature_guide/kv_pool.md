@@ -523,7 +523,6 @@ export VLLM_USE_V1=1
 KV_CONFIG='{
   "kv_connector": "MultiConnector",
   "kv_role": "'$KV_ROLE'",
-  "engine_id": "2",
   "kv_connector_extra_config": {
     "connectors": [
       {

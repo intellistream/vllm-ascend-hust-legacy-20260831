@@ -396,7 +396,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_producer",
       "kv_port": "30000",
-      "engine_id": "0",
       "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 2,
@@ -474,7 +473,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_producer",
       "kv_port": "30100",
-      "engine_id": "1",
       "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 2,
@@ -551,7 +549,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_consumer",
       "kv_port": "30200",
-      "engine_id": "2",
       "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 2,
@@ -628,7 +625,6 @@ To run the vllm-ascend `Prefill-Decode Disaggregation` service, you need to depl
       '{"kv_connector": "MooncakeConnectorV1",
       "kv_role": "kv_consumer",
       "kv_port": "30200",
-      "engine_id": "2",
       "kv_connector_extra_config": {
                 "prefill": {
                         "dp_size": 2,
