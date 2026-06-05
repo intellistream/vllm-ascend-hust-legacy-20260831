@@ -270,14 +270,19 @@ class NPUModelRunner(GPUModelRunner):
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
         # Set up Attention
-        self.use_sparse = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
-            vllm_config.model_config.hf_text_config, "index_topk"
+        hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+        self.use_sparse = (
+            hf_text_config is not None
+            and hasattr(hf_text_config, "index_topk")
+            and hasattr(hf_text_config, "kv_lora_rank")
+            and hasattr(hf_text_config, "qk_rope_head_dim")
+            and hasattr(hf_text_config, "index_head_dim")
         )
         if self.use_sparse:
             self.sparse_head_dim = (
-                self.model_config.hf_text_config.kv_lora_rank,
-                self.model_config.hf_text_config.qk_rope_head_dim,
-                self.model_config.hf_text_config.index_head_dim,
+                hf_text_config.kv_lora_rank,
+                hf_text_config.qk_rope_head_dim,
+                hf_text_config.index_head_dim,
             )
         # dsa c8
         self.use_sparse_c8_indexer = self.ascend_config.enable_sparse_c8

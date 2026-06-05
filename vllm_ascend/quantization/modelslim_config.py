@@ -351,7 +351,16 @@ def get_linear_quant_type(
                     f"use {quant_type}. Please check quantization config."
                 )
     else:
-        quant_type = quant_description[prefix + ".weight"]
+        key = prefix + ".weight"
+
+    if key not in quant_description:
+        logger.warning(
+            "Quant description missing for %s, fallback to unquantized.",
+            key,
+        )
+        return None
+
+    quant_type = quant_description[key]
     return quant_type
 
 
@@ -404,7 +413,11 @@ def create_scheme_for_layer(
     quant_type = get_quant_type_for_layer(quant_description, prefix, layer_type, packed_modules_mapping)
 
     if quant_type is None:
-        raise ValueError(f"Could not determine quantization type for layer {prefix}.")
+        logger.warning(
+            "Could not determine quantization type for layer %s, fallback to unquantized.",
+            prefix,
+        )
+        return None
 
     # Use registry to get scheme class
     scheme_cls = get_scheme_class(quant_type, layer_type)
@@ -599,6 +612,12 @@ class AscendModelSlimConfig(QuantizationConfig):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):
                 return UnquantizedEmbeddingMethod()
             scheme = create_scheme_for_layer(self.quant_description, prefix, "linear", self.packed_modules_mapping)
+            if scheme is None:
+                logger.warning(
+                    "No quant scheme for embedding %s, fallback to UnquantizedEmbeddingMethod.",
+                    prefix,
+                )
+                return UnquantizedEmbeddingMethod()
             return AscendEmbeddingMethod(scheme)
         return None
 
@@ -671,7 +690,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             kv_head_dim_list = [k_quant_head_dim, v_quant_head_dim]
         return calc_split_factor(kv_head_dim_list)
 
-    def maybe_update_config(self, model_name: str, revision: str | None = None) -> None:
+    def maybe_update_config(self, model_name: str, revision: str | None = None, hf_config=None, **kwargs) -> None:
         """Load the ModelSlim quantization config from model directory.
 
         This method is called by vllm after get_quant_config() returns

@@ -49,12 +49,45 @@ class AscendDraftModelProposer(SpecDecodeBaseProposer):
         # so we load them with a modified vllm config
         from vllm.compilation.backends import set_model_tag
 
-        temp_vllm_config = create_vllm_config_for_draft_model(self.vllm_config)
+        temp_vllm_config = create_vllm_config_for_draft_model(
+            self.vllm_config,
+            self.speculative_config.draft_model_config,
+            self.vllm_config.parallel_config,
+        )
         with set_model_tag("draft_model"):
             model = get_model(
                 vllm_config=temp_vllm_config,
                 prefix="draft_model",
             )
+
+        self.attn_layer_names = [
+            name for name, _ in model.named_modules()
+            if name.startswith("model.layers.")
+            and name.endswith(".self_attn.attn")
+        ]
+        print(
+            "[DRAFT_PATCH] filled draft attn_layer_names:",
+            self.attn_layer_names[:3],
+            "... total",
+            len(self.attn_layer_names),
+        )
+
+        # Register real draft Attention modules for get_attention_context().
+        # Do NOT map draft_model.* to target attention, because Qwen3-0.6B
+        # and Qwen3-8B have different hidden/head sizes.
+        import vllm.model_executor.layers.attention.attention as attn_mod
+        for name, module in model.named_modules():
+            if (
+                name.startswith("model.layers.")
+                and name.endswith(".self_attn.attn")
+            ):
+                attn_mod._DRAFT_MODEL_ATTENTION_LAYERS["draft_model." + name] = module
+
+        print(
+            "[DRAFT_PATCH] registered draft attention modules:",
+            len(attn_mod._DRAFT_MODEL_ATTENTION_LAYERS),
+        )
+
         return model
 
     @override
