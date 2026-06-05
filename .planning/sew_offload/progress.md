@@ -871,9 +871,26 @@
   - 同步 slot path 性能仍显著慢于 no-offload（8-token candidate `1.475 tok/s` vs baseline `5.512 tok/s`），只作为 offloading 通路与 observability 闭环，不写成性能收益。
   - D.10 correctness 门禁已过，可进入 MVP-D.11 dispatch 后 phase split 语义原型；不再把硬件资源问题和 phase split 语义问题混在一起。
 
-## 2026-06-04 MVP-D.11 实现
+## 2026-06-05 MVP-D.11 NPU Semantic Smoke
 
-- 恢复 `.planning/sew_offload/` 上下文，确认 D.10 post-downsink 门禁已过，可进入 D.11。
+- 检查 NPU 资源：NPU 2/4/5 空闲（~61.8GB free HBM），选择 NPU 2。
+- 确认 `ASCEND_RT_VISIBLE_DEVICES` 是 Ascend NPU 的正确设备隔离变量（`CUDA_VISIBLE_DEVICES` 无效）。
+- 创建 `tools/sew_offload/run_phase_split_smoke.py`：D.11 独立 smoke runner，支持 `--mode no_offload|phase_split`。
+- 运行 1-token smoke：
+  - baseline（no_offload）：token `[26288]`，throughput 2.29 tok/s ✅
+  - candidate（phase_split）：token `[26288]`，throughput 2.16 tok/s ✅
+  - strict compare：`status=ok, matched=1`
+- 运行 8-token smoke：
+  - baseline：`[26288,102064,104949,9370,104034,20074,89161,102021]`，5.60 tok/s ✅
+  - candidate：完全一致，4.71 tok/s ✅
+  - strict compare：`status=ok, matched=1`
+- Profile JSONL：96 events（1-token）、432 events（8-token），均为 all-hit single phase。
+- 阶段 13/14（MVP-D.11）**全部完成**。
+
+## 下一步
+
+- 进入 MVP-E：async transfer + overlap metrics。
+- D.12 staging-aware fused/custom op 或 window-aware global pool。
 - 新增 `vllm_ascend/moe_offload/phase_split.py`：
   - `MoEPhase` / `MoEPhasePlan` contract dataclasses。
   - `compute_expert_token_slices()`：group_list type 0/1 → per-expert `[start, end)`。

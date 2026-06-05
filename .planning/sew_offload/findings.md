@@ -137,7 +137,13 @@
 
 **待办：** 真实 trace JSONL；`release=1` NPU smoke + strict compare；可选把 SEW env 加入 vLLM allowlist 减日志噪音。
 
-## 2026-06-04 MVP-D.11 实现发现
+## 2026-06-05 MVP-D.11 NPU Smoke 发现
+
+- NPU 2（910B3，60.40GB 空闲 HBM）可用，成功运行 D.11 phase split smoke。
+- `ASCEND_RT_VISIBLE_DEVICES`（非 `CUDA_VISIBLE_DEVICES`）是 Ascend NPU 的正确设备隔离变量。`CUDA_VISIBLE_DEVICES` 在 NPU 环境下无效，会导致自动设备选择超时。
+- Phase split 在当前无 offload 配置下每层均为 all-hit single phase，走 `execute_phased_mlp()` fast-path。每层每 decode step 产生一条 `phase_split_plan` profile event。
+- 1-token & 8-token strict token-id compare 全部通过（status=ok）。
+- Python 层 phase plan + JSONL 写盘开销约 16%（8-token: 4.71 vs 5.60 tok/s），与 D.10 的同步 slot path 开销（~73%）相比轻微，属于语义脚手架预期范围。
 
 - D.11 核心设计：在 `token_dispatch_output` 之后、`_apply_mlp` 之前插入 phase split。单 phase fast-path 直接委托，多 phase 走 extract→slice→build→scatter 路径。
 - AllGather 路径使用 `group_list_type=1`（count 模式），`sorted_hidden_states` 按 expert 顺序排列。Phase split 需要从 group_list 计算每个 expert 的 token slice `[start, end)`，然后对子集 expert 做 token 抽取和权重切片。

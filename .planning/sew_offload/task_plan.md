@@ -59,11 +59,8 @@
 | Equivalence UT | complete | 31 个 UT 通过：覆盖 type 0/1 slicing、hit/miss/all-hit/all-miss/空 expert 等价性、group_list 构建、权重切片、scatter、profile JSONL、空 phase fallback、乱序/缺失 slice fail-closed |
 | Boundary integration guard | complete | `MoECommMethod._maybe_plan_phase_split()` + `fused_experts()` 集成；默认 `VLLM_ASCEND_MOE_OFFLOAD_PHASE_SPLIT=0` 关闭；只在 AllGather+unquantized+no bias+no EP 窄路径启用；否则 fail closed |
 | Observability | complete | `PhaseSplitProfileEvent` 写入 profile JSONL 记录 phase plan、fail reason、layer_id；与现有 `VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH` 复用同一 JSONL 流 |
-| NPU semantic smoke | pending | 资源可用后先跑 1-token strict compare，再跑 8-token；D.11 不要求性能提升，只要求 token-id correctness（D.10 post-downsink 门禁已满足） |
-| D.11 复盘门禁 | pending | 若 Python 多 phase 开销过高，记录为语义脚手架；MVP-E async 前必须保留 single-phase fallback |
-| Observability | pending | profile JSONL 记录 phase 数、每 phase experts/token count、回填耗时、fail reason |
-| NPU semantic smoke | pending | 资源可用后先跑 1-token strict compare，再跑 8-token；D.11 不要求性能提升，只要求 token-id correctness（D.10 post-downsink 门禁已满足） |
-| D.11 复盘门禁 | pending | 若 Python 多 phase 开销过高，记录为语义脚手架；MVP-E async 前必须保留 single-phase fallback |
+| NPU semantic smoke | complete | 2026-06-05 NPU 2：1-token strict compare **status=ok**（baseline `[26288]` vs candidate `[26288]`）；8-token strict compare **status=ok**（baseline `[26288,102064,104949,9370,104034,20074,89161,102021]` vs candidate 完全一致）；throughput 1-token 2.16 tok/s（vs baseline 2.29）、8-token 4.71 tok/s（vs baseline 5.60） |
+| D.11 复盘门禁 | complete | Python 多 phase 开销确认：phase_split=1 下每层每 token 触发 phase plan（96 事件/1-token，432 事件/8-token），8-token throughput 下降约 16%（4.71 vs 5.60 tok/s）。记录为语义脚手架；MVP-E async 前保留 single-phase fallback 作为 correctness 底座 |
 
 ## 阶段清单
 
@@ -83,7 +80,7 @@
 | 10. SEW runtime MVP | in_progress | MVP-A/B/C 完成；MVP-D fixed-slot sync correctness 最小闭环已通过真实 NPU smoke；MVP-D.11 phase split 语义原型代码/UT 已完成 |
 | 11. MoE Offload 支持核实与总体架构 | complete | `docs/sew-offload/08-ascend-moe-offload-architecture.md`：不支持证据链、系统架构、控制/数据面图、路线图 |
 | 12. Dynamic-count layered runtime | complete | MVP-D.10 path selector 与 fused_experts 下沉代码/UT 完成；post-downsink 1-token/8-token 真实 NPU smoke 与 strict compare 全部通过 |
-| 13. Dispatch 后 phase split | complete | MVP-D.11 代码/UT 完成：MoEPhasePlan、expert slicing、hit/miss planner、partial MLP、scatter/gather、等价性验证、boundary guard 全部到位；NPU semantic smoke 待资源可用 |
+| 13. Dispatch 后 phase split | complete | MVP-D.11 代码/UT/smoke 全部完成：1-token & 8-token strict compare **ok**；复盘确认 Python 多 phase 16% 开销，记录为语义脚手架 |
 
 ## 当前 MVP-A 状态
 
@@ -135,7 +132,7 @@
 - 2026-06-02 D.9 小范围 release=1 smoke：NPU 6，1 个 non-resident layer（layer 0）+ 47 个 resident layers，release=1 成功；profile JSONL 显示 register layer 0 用时约 2.03s，release 约 0.0004s，ledger 中 original expert bytes 从约 1.208GB 降到 0；no-offload vs candidate 1-token 严格 token-id 对照通过。
 - 2026-06-02 D.10 dynamic-count layered runtime：默认关闭的 path selector 已在旧 hook 位置通过真实 NPU 1-token/8-token smoke 和 strict token-id compare；8-token candidate throughput `1.675 tok/s`、TTFT `868.72 ms`、TPOT `558.14 ms`，no-offload baseline throughput `6.337 tok/s`、TTFT `445.15 ms`、TPOT `116.71 ms`。
 - 2026-06-02 D.10 fused boundary 下沉：`apply()` 不再直接做 slot 权重准备，而是把 offload metadata 传入 fused input；`MoECommMethod.fused_experts()` 在 dispatch 前根据 `topk_ids` 做 path decision、slot plan 和 fail-closed。UT/compile/diff 已通过；post-downsink 真实 smoke 被 NPU 6 残留 HBM 上下文阻塞。
-- 下一步顺序更新：D.11 NPU semantic smoke（待 NPU 资源窗口可用后先跑 1-token strict compare，再跑 8-token）；然后进入 MVP-E async transfer 与 overlap metrics；最后考虑 D.12 staging-aware fused/custom op 或 window-aware global pool。
+- 下一步顺序更新：D.11 已于 2026-06-05 完成 NPU semantic smoke（1-token & 8-token strict compare 全部 ok）；下一步进入 MVP-E async transfer 与 overlap metrics；最后考虑 D.12 staging-aware fused/custom op 或 window-aware global pool。
 
 ## MVP-D.11 实现摘要（2026-06-04）
 
@@ -157,6 +154,16 @@
 - UT：`tests/ut/moe_offload/test_phase_split.py`，31 个测试全部通过。
   - 覆盖：type 0/1 slicing、hit/miss/all-hit/all-miss 等价性、空 expert、group_list 构建、权重切片、scatter、profile JSONL、空 phase fallback、乱序/缺失 slice fail-closed。
 - 回归：现有 moe_offload 测试 133 passed（2 预存在 import error + 1 预存在 env monkeypatch 失败未计入）。
+
+### NPU Semantic Smoke（2026-06-05）
+
+- 环境：NPU 2（910B3，60.40GB 空闲 HBM），Qwen3-30B-A3B，`ASCEND_RT_VISIBLE_DEVICES=2`。
+- **1-token strict compare**: baseline `[26288]` == candidate `[26288]` ✅ `status=ok, matched=1`
+- **8-token strict compare**: baseline `[26288,102064,104949,9370,104034,20074,89161,102021]` == candidate ✅ `status=ok, matched=1`
+- Profile JSONL: 96 phase_split events (1-token), 432 (8-token)，均为 all-hit single phase fast-path。
+- 开销：8-token phase_split throughput 4.71 tok/s vs baseline 5.60 tok/s（~16% Python 层开销，属语义脚手架预期范围）。
+- 工具：新增 `tools/sew_offload/run_phase_split_smoke.py`。
+- Ascend NPU 设备隔离需使用 `ASCEND_RT_VISIBLE_DEVICES`（非 `CUDA_VISIBLE_DEVICES`）。
 
 ## 关键约束
 
