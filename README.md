@@ -67,6 +67,38 @@ Please use the following recommended versions to get started quickly:
 | v0.19.1rc1 | Latest release candidate | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/latest/installation.html) for more details |
 | v0.18.0 | Latest stable version | See [QuickStart](https://docs.vllm.ai/projects/ascend/en/v0.18.0/quick_start.html) and [Installation](https://docs.vllm.ai/projects/ascend/en/v0.18.0/installation.html) for more details |
 
+## Research Branch MoE Offload Service
+
+The `research` branch contains the Ascend MoE expert offload prototype. The
+validated single-NPU Qwen3-30B-A3B service command is:
+
+```bash
+MODEL_PATH=${MODEL_PATH:-/data/shared-models/Qwen3-30B-A3B}
+PORT=${PORT:-8016}
+ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-6}
+
+ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES} \
+VLLM_WORKER_MULTIPROC_METHOD=spawn \
+python -m vllm.entrypoints.openai.api_server \
+  --model "${MODEL_PATH}" \
+  --served-model-name qwen3-30b-a3b \
+  --host 0.0.0.0 \
+  --port "${PORT}" \
+  --trust-remote-code \
+  --dtype bfloat16 \
+  --tensor-parallel-size 1 \
+  --max-model-len 512 \
+  --max-num-seqs 1 \
+  --max-num-batched-tokens 512 \
+  --kv-cache-memory-bytes 536870912 \
+  --enforce-eager \
+  --ascend-moe-offload-gb 14
+```
+
+MoE offload currently runs through the eager path. Keep `--enforce-eager`
+enabled for this prototype because graph capture cannot record the runtime CPU
+decision path used by the offload scheduler.
+
 ## Contributing
 
 See [CONTRIBUTING](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/contribution/index.html) for more details, which is a step-by-step guide to help you set up the development environment, build and test.
