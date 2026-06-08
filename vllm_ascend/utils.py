@@ -211,6 +211,10 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if weight.dtype == torch.float32:
         return False
 
+    # meta tensor only keeps shape/dtype meta info without physical memory, it is not necessary to trans it to NZ
+    if weight.is_meta:
+        return False
+
     # 310P always converts to NZ.
     if is_310p():
         return True
@@ -235,6 +239,7 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - 310P: always convert supported weights to FRACTAL_NZ
 # - non-310P: follow VLLM_ASCEND_ENABLE_NZ
 # - FP32: never convert
+# - meta tensor: never convert
 def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
@@ -394,10 +399,20 @@ def enable_custom_op():
                 _CUSTOM_OP_ENABLED = True
             except ImportError:
                 _CUSTOM_OP_ENABLED = False
-                logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+                logger.warning(
+                    "Failed to register custom ops, all custom ops will be disabled. "
+                    "The custom ops library might not be installed or the environment is not configured correctly. "
+                    "Please check the custom ops installation and environment variables."
+                )
         else:
             _CUSTOM_OP_ENABLED = False
-            logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+            logger.warning(
+                "Failed to register custom ops, all custom ops will be disabled. "
+                "error=%s. "
+                "The custom ops library might not be installed or the environment is not configured correctly. "
+                "Please check the custom ops installation and environment variables.",
+                e,
+            )
     return _CUSTOM_OP_ENABLED
 
 
@@ -591,7 +606,11 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
                 f"cudagraph_capture_sizes(={valid_max_size})"
             )
         logger.warning(
-            "Truncating max_cudagraph_capture_size to %d",
+            "Truncating max_cudagraph_capture_size. "
+            "original_size=%d, truncated_size=%d. "
+            "The max_cudagraph_capture_size does not match the max value of cudagraph_capture_sizes. "
+            "Please check the compilation_config for consistency.",
+            vllm_config.compilation_config.max_cudagraph_capture_size,
             valid_max_size,
         )
 
@@ -601,7 +620,9 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
         vllm_config.compilation_config.cudagraph_capture_sizes
     ):
         logger.warning(
-            ("cudagraph_capture_sizes specified in compilation_config %s is overridden by config %s"),
+            "cudagraph_capture_sizes specified in compilation_config is overridden. "
+            "compilation_config_sizes=%s, overridden_sizes=%s. "
+            "The sizes are adjusted based on model configuration and resource constraints.",
             vllm_config.compilation_config.cudagraph_capture_sizes,
             cudagraph_capture_sizes,
         )
@@ -616,7 +637,6 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # the number of streams, which is 2048, we save 248 streams
     # as a buffer.
     # Maximum number of graphs that can be captured by ACL Graph
-    # TODO: Find out whether we need to solve allreduce function
     MAX_CAPTURE_SIZE = 1800
 
     # enable pcp or dcp will add new communication and consume additional approximately less than 100 streams
@@ -626,14 +646,24 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     compilation_config = vllm_config.compilation_config
     original_sizes, compilation_config.cudagraph_capture_sizes = compilation_config.cudagraph_capture_sizes, None
 
+    # TODO: Find out if we can have different sizes for mixed batch and uniform batch
+    # If so, we'll only have to reduce the sizes for mixed batch
+    from vllm.config.compilation import CUDAGraphMode
+
+    cudagraph_mode = compilation_config.cudagraph_mode
+    if cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+        MAX_CAPTURE_SIZE = max(0, MAX_CAPTURE_SIZE - len(original_sizes))
+
     # Calculate parallel configuration factor
     if not vllm_config.model_config:
         logger.warning(
-            "Got empty model config. This typically occurs when an empty vllm_config is "
-            "initialized (e.g., in unit tests), where config updates are intentionally skipped."
+            "Got empty model config. "
+            "This may indicate a configuration loading issue or an empty configuration file. "
+            "Please check the model configuration file and loading process."
         )
 
         return
+
     hf_config = vllm_config.model_config.hf_text_config
     if hasattr(hf_config, "num_hidden_layers"):
         num_hidden_layers = hf_config.num_hidden_layers
@@ -704,10 +734,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         )
         logger.info("Calculated maximum supported batch sizes for ACL graph: %s", max_num_batch_sizes)
         logger.warning(
-            "Currently, communication is performed using FFTS+ method, which reduces "
-            "the number of available streams and, as a result, limits the range of runtime "
-            "shapes that can be handled. To both improve communication performance and "
-            "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
+            "Currently, communication is performed using FFTS+ method. "
+            "impact: reduces available streams, limits runtime shapes. "
+            "solution: set HCCL_OP_EXPANSION_MODE=AIV to improve performance and increase supported shapes. "
         )
 
     arch_name = vllm_config.model_config.architecture
@@ -715,13 +744,14 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
         # Sample uniformly from original sizes
-        step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
-        indices = [round(i * step) for i in range(max_num_batch_sizes)]
-
-        # Ensure first and last elements are preserved
-        indices[0], indices[-1] = 0, len(original_sizes) - 1
-
-        sampled_sizes = [original_sizes[i] for i in indices]
+        if max_num_batch_sizes <= 1:
+            # Avoid division by zero when only one capture size can be kept.
+            sampled_sizes = [original_sizes[-1]]
+        else:
+            step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
+            indices = [round(i * step) for i in range(max_num_batch_sizes)]
+            indices[0], indices[-1] = 0, len(original_sizes) - 1
+            sampled_sizes = [original_sizes[i] for i in indices]
         update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
@@ -824,6 +854,18 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
 
+    if vllm_config is None:
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+        except AssertionError:
+            vllm_config = None
+    if vllm_config is not None and vllm_config.model_config.is_deepseek_mla:
+        from vllm_ascend.ops.fused_moe.gate_linear import AscendGateLinear
+
+        REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
+
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
         from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
@@ -880,7 +922,11 @@ def _init_ascend_device_type():
     global _ascend_device_type
     from vllm_ascend import _build_info  # type: ignore
 
-    _ascend_device_type = AscendDeviceType[_build_info.__device_type__]
+    device_type = getattr(_build_info, "__device_type__", None)
+    if device_type is None:
+        soc_version = getattr(_build_info, "__soc_version__", "ASCEND910B1").upper()
+        device_type = "_310P" if "310P" in soc_version else "A2"
+    _ascend_device_type = AscendDeviceType[device_type]
 
 
 def check_ascend_device_type():
@@ -965,7 +1011,7 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 
         if not _ENABLE_SP and enable_shared_expert_dp:
             _ENABLE_SP = True
-            logger.info("shared_expert_dp requires enable_sp = True. has set enable_sp to True")
+            logger.info("shared_expert_dp requires enable_sp=True. enable_sp has been set to True.")
 
     return bool(_ENABLE_SP)
 
@@ -973,10 +1019,6 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
-
-
-def prefill_context_parallel_enable() -> bool:
-    return get_ascend_config().enable_context_parallel
 
 
 def is_moe_model(vllm_config: VllmConfig):
@@ -1354,12 +1396,12 @@ def refresh_block_size(vllm_config):
     if cache_config.block_size is None:
         cache_config.block_size = 128
 
+    if not scheduler_config or not model_config:
+        return
+
     if model_config.hf_config.model_type == "deepseek_v4":
         # TODO(qcs): generalize the block_size
         cache_config.block_size = 128
-
-    if not scheduler_config or not model_config:
-        return
 
     if model_config.is_hybrid:
         # Hybrid attention+mamba models rely on the model-specific sizing
@@ -1372,9 +1414,17 @@ def refresh_block_size(vllm_config):
             cache_config.block_size = 128
             return
 
-    ascend_config = get_ascend_config()
-    if ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
-        logger.warning("Setting block size to 128 for xlite compatibility.")
+    try:
+        ascend_config = get_ascend_config()
+    except RuntimeError:
+        ascend_config = None
+    if ascend_config is not None and ascend_config.xlite_graph_config.enabled and cache_config.block_size > 128:
+        logger.warning(
+            "Setting block size for xlite compatibility. "
+            "original_block_size=%d, new_block_size=128. "
+            "xlite_graph_config requires block_size <= 128.",
+            cache_config.block_size,
+        )
         cache_config.block_size = 128
 
 
@@ -1423,17 +1473,28 @@ def singleton(cls):
     return get_instance
 
 
-# TODO: Temporarily use enable_sp to enable the dsa_cp feature of ds32.
-# and subsequent updates will introduce new interfaces. --zzhx1
 @lru_cache(maxsize=1)
 def enable_dsa_cp() -> bool:
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
-    is_ds_v32 = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
+    # DSA CP is only applicable to models with indexer (e.g., DSv3.2, DSv4).
+    has_indexer = hasattr(vllm_config.model_config, "hf_text_config") and hasattr(
         vllm_config.model_config.hf_text_config, "index_topk"
     )
-    return bool(is_ds_v32 and enable_sp())
+    if not has_indexer:
+        return False
+
+    dsa_cp_enable = False
+    additional_config = getattr(vllm_config, "additional_config", None)
+    if additional_config is not None and "enable_dsa_cp" in additional_config:
+        dsa_cp_enable = bool(additional_config["enable_dsa_cp"])
+
+    if dsa_cp_enable and not enable_sp():
+        raise ValueError(
+            "DSA CP requires SP to be enabled. Please enable SP(set VLLM_ASCEND_ENABLE_FLASHCOMM1=1) to use DSA CP."
+        )
+    return dsa_cp_enable and enable_sp()
 
 
 @lru_cache(maxsize=1)
