@@ -1,3 +1,6 @@
+import os
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
 from vllm.config import (
@@ -9,6 +12,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
@@ -19,13 +23,13 @@ from vllm.v1.kv_cache_interface import (
 )
 
 import vllm_ascend.compilation.acl_graph as acl_graph
-from tests.ut.conftest import RunnerDeviceType, npu_test
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 BLOCK_SIZE = 128
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+FAKE_WEIGHT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "_fake_weight")
 
 
 def initialize_kv_cache(runner: NPUModelRunner):
@@ -62,9 +66,10 @@ def initialize_kv_cache(runner: NPUModelRunner):
 
 def get_vllm_config():
     model_config = ModelConfig(
-        model="facebook/opt-125m",
+        model=FAKE_WEIGHT_PATH,
         dtype="float16",
         seed=42,
+        skip_tokenizer_init=True,
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
@@ -90,7 +95,20 @@ def get_vllm_config():
 @pytest.fixture
 def model_runner():
     vllm_config = get_vllm_config()
-    with set_current_vllm_config(vllm_config):
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm_ascend.worker.block_table.get_dcp_group") as mock_get_dcp_group,
+        patch("vllm_ascend.worker.block_table.get_pcp_group") as mock_get_pcp_group,
+    ):
+        mock_dcp_group = MagicMock(spec=GroupCoordinator)
+        mock_dcp_group.world_size = 1
+        mock_dcp_group.rank_in_group = 0
+        mock_get_dcp_group.return_value = mock_dcp_group
+        mock_pcp_group = MagicMock(spec=GroupCoordinator)
+        mock_pcp_group.world_size = 1
+        mock_pcp_group.rank_in_group = 0
+        mock_get_pcp_group.return_value = mock_pcp_group
+
         model_config = vllm_config.model_config
         num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
         head_size = model_config.get_head_size()
@@ -104,7 +122,6 @@ def model_runner():
         acl_graph._draft_graph_params = None
 
 
-@npu_test(num_npus=1, npu_type=RunnerDeviceType.A2)
 @pytest.mark.parametrize(
     "num_computed_tokens, num_scheduled_tokens, num_tokens, num_reqs, "
     "max_num_scheduled_tokens, use_cascade_attn, force_eager, "
@@ -366,7 +383,6 @@ def test_determine_batch_execution_and_padding(
                 )
                 # Padding can only increase, never shrink
                 assert batch_desc.num_tokens >= num_tokens
-
         # dp_size=1: no micro-batching, no cross-dp coordination
         assert should_ubatch is False
         assert num_tokens_across_dp is None
