@@ -18,6 +18,12 @@
 name: Release Code and Wheel
 
 on:
+  schedule:
+    # UTC+8: 10am, 16pm
+    - cron: '0 2,8 * * *'
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -27,11 +33,14 @@ on:
         type: choice
         options:
           - main
+          - v0.19.1rc1
+          - v0.18.0
+          - v0.18.0rc1
           - v0.17.0rc1
           - v0.16.0rc1
           - v0.15.0rc1
           - v0.14.0rc1
-          - v0.13.0rc3
+          - v0.13.0
 
 jobs:
   build_and_release_code:
@@ -78,7 +87,7 @@ jobs:
           path: dist/*
 
       - name: Release
-        if: false
+        if: ${{ github.event_name == 'push' }}
         run: |
           python3 -m twine upload dist/* -u __token__ -p ${{ secrets.PYPI_TOKEN }}
 
@@ -184,7 +193,7 @@ jobs:
           path: dist/
 
       - name: Release
-        if: false
+        if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
         run: |
           python3 -m pip install twine
           python3 -m twine upload --verbose dist/*.whl -u __token__ -p ${{ secrets.PYPI_TOKEN }}

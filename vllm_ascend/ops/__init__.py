@@ -16,19 +16,15 @@
 #
 
 import torch
-from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
-
-import vllm_ascend.ops.layernorm  # noqa
-import vllm_ascend.ops.register_custom_ops  # noqa
 
 try:
     import vllm_ascend.ops.fused_moe.fused_moe  # noqa
 except ModuleNotFoundError as exc:
-    logger.warning(
-        "Skipping Ascend fused MoE op registration because an optional upstream dependency is unavailable: %s",
-        exc,
-    )
+    if exc.name != "vllm.model_executor.layers.fused_moe.runner.default_moe_runner":
+        raise
+import vllm_ascend.ops.layernorm  # noqa
+import vllm_ascend.ops.register_custom_ops  # noqa
 
 if HAS_TRITON:
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa

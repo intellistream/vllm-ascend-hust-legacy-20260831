@@ -93,7 +93,7 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", "0"))),
     # Whether to anbale dynamic EPLB
     "DYNAMIC_EPLB": lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
-    # Whether to enable fused mc2(`dispatch_gmm_combine_decode`/`dispatch_ffn_combine` operator)
+    # Whether to enable fused MC2 (`dispatch_gmm_combine_decode` / `dispatch_ffn_combine`).
     # 0, or not set: default ALLTOALL and MC2 will be used.
     # 1: ALLTOALL and MC2 might be replaced by `dispatch_ffn_combine` operator.
     # `dispatch_ffn_combine` can be used only for moe layer with W8A8, EP<=32, non-mtp, non-dynamic-eplb.
@@ -101,12 +101,45 @@ env_variables: dict[str, Callable[[], Any]] = {
     # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
     # with W8A8. And MTP layer must be W8A8.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
-    # Whether to anbale balance scheduling
+    # Whether to enable balance scheduling in the v1 scheduler.
+    # Platform validation: only PD-mixed mode (`kv_role='kv_both'` or no kv_transfer_config).
+    # Not supported in PD-disaggregated mode (`kv_producer` / `kv_consumer` only).
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),
+    # Whether to enable utility-based victim selection in scheduler preemption.
+    "VLLM_ASCEND_ENABLE_UTILITY_VICTIM_SELECTION": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_UTILITY_VICTIM_SELECTION", "0"))
+    ),
+    # Emergency kill switch for utility-based victim selection.
+    "VLLM_ASCEND_UTILITY_KILL_SWITCH": lambda: bool(int(os.getenv("VLLM_ASCEND_UTILITY_KILL_SWITCH", "0"))),
+    # Completion factor weight in utility delta calculation.
+    "VLLM_ASCEND_UTILITY_COMPLETION_WEIGHT": lambda: float(
+        os.getenv("VLLM_ASCEND_UTILITY_COMPLETION_WEIGHT", "0.5")
+    ),
+    # Preemption-count factor weight in utility delta calculation.
+    "VLLM_ASCEND_UTILITY_PREEMPT_WEIGHT": lambda: float(os.getenv("VLLM_ASCEND_UTILITY_PREEMPT_WEIGHT", "0.3")),
+    # Minimum KV utilization ratio required to enable utility ranking.
+    "VLLM_ASCEND_UTILITY_KV_GATE": lambda: float(os.getenv("VLLM_ASCEND_UTILITY_KV_GATE", "0.0")),
+    # Cooldown window (seconds) between two utility-based victim selections.
+    "VLLM_ASCEND_UTILITY_COOLDOWN_S": lambda: float(os.getenv("VLLM_ASCEND_UTILITY_COOLDOWN_S", "0.0")),
+    # Minimum running queue size required before enabling utility-based victim selection.
+    "VLLM_ASCEND_UTILITY_MIN_RUNNING": lambda: int(os.getenv("VLLM_ASCEND_UTILITY_MIN_RUNNING", "1")),
+    # Whether to capture shared-snapshot counterfactual records for utility decisions.
+    "VLLM_ASCEND_UTILITY_SNAPSHOT_ENABLED": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_UTILITY_SNAPSHOT_ENABLED", "0"))
+    ),
+    # Number of top-ranked candidates to keep in each utility decision snapshot.
+    "VLLM_ASCEND_UTILITY_SNAPSHOT_TOP_K": lambda: int(os.getenv("VLLM_ASCEND_UTILITY_SNAPSHOT_TOP_K", "3")),
+    # Number of recent utility decision snapshots retained in memory.
+    "VLLM_ASCEND_UTILITY_SNAPSHOT_HISTORY_SIZE": lambda: int(
+        os.getenv("VLLM_ASCEND_UTILITY_SNAPSHOT_HISTORY_SIZE", "32")
+    ),
     # use fused op transpose_kv_cache_by_block, default is True
     "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": lambda: bool(
         int(os.getenv("VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK", "1"))
     ),
+    # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
+    # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
+    "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
 }
 
 # end-env-vars-definition

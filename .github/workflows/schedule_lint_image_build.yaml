@@ -1,5 +1,8 @@
 name: 'Image build lint'
 on:
+  schedule:
+    # Runs at 00:00 UTC+8 every day
+    - cron: '0 20 * * *' 
   workflow_dispatch:
     inputs:
       vllm_hash:
@@ -7,6 +10,12 @@ on:
         default: main
         required: true
         type: string
+  push:
+    paths:
+      - '.github/workflows/dockerfiles/Dockerfile.lint'
+      - 'requirements-lint.txt'
+      - 'requirements-dev.txt'
+      - 'requirements.txt'
 
 # only cancel in-progress runs of the same workflow
 concurrency:
@@ -38,7 +47,7 @@ jobs:
           latest=false
 
     - name: Build - Set up QEMU
-      uses: docker/setup-qemu-action@v3
+      uses: docker/setup-qemu-action@v4
 
     - name: Build - Set up Docker Buildx
       uses: docker/setup-buildx-action@v4

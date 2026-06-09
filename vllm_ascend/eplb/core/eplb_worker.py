@@ -23,13 +23,13 @@ import torch.distributed as dist
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
-from vllm_ascend.eplb.core.policy.policy_factory import DynamicConfig, PolicyFactory
+from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
 
 
 class EplbWorker:
     def __init__(self, shared_dict, policy_type, enable_d2d: bool = True):
         self.policy_type = policy_type
-        self.policy = PolicyFactory.generate_policy(policy_type, DynamicConfig())
+        self.policy = PolicyFactory.generate_policy(policy_type)
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
@@ -70,9 +70,11 @@ class EplbWorker:
             current_mean, current_max = self._compute_imbalance(old_placement, hotness)
             update_mean, update_max = self._compute_imbalance(new_placement, hotness)
             logger.info(
-                "[Expert Hotness] Current: mean={:.3f}, max={:.3f}, Updated: mean={:.3f}, max={:.3f}".format(
-                    current_mean, current_max, update_mean, update_max
-                )
+                "[Expert Hotness] Current: mean=%.3f, max=%.3f, Updated: mean=%.3f, max=%.3f",
+                current_mean,
+                current_max,
+                update_mean,
+                update_max,
             )
 
         if not torch.is_tensor(new_placement):
@@ -96,7 +98,7 @@ class EplbWorker:
         for layer_id in range(num_layers):
             # check if any logical expert is not placed on any rank
             if torch.unique(new_placement[layer_id]).numel() < torch.unique(old_placement[layer_id]).numel():
-                logger.error(f"There exists expert not placed on any rank in layer {layer_id}")
+                logger.error("There exists expert not placed on any rank in layer %s", layer_id)
                 new_placement[layer_id] = old_placement[layer_id]
                 continue
 
@@ -107,8 +109,10 @@ class EplbWorker:
                 # check if same logical experts are placed on the same NPU
                 if new_placement_check.numel() != torch.unique(new_placement_check).numel():
                     logger.error(
-                        "Replicated experts are placed on the same NPU; expert placement on "
-                        f"layer {layer_id}, rank {rank_id} is invalid"
+                        "Replicated experts are placed on the same NPU; "
+                        "expert placement on layer %s, rank %s is invalid",
+                        layer_id,
+                        rank_id,
                     )
                     new_placement[layer_id] = old_placement[layer_id]
                     break
@@ -117,8 +121,9 @@ class EplbWorker:
                 expert_not_move = torch.isin(new_placement_check, old_placement_check)
                 if not torch.equal(new_placement_check[expert_not_move], old_placement_check[expert_not_move]):
                     logger.error(
-                        "There exists expert movement inside NPU; expert placement on "
-                        f"layer {layer_id}, rank {rank_id} is invalid"
+                        "There exists expert movement inside NPU; expert placement on layer %s, rank %s is invalid",
+                        layer_id,
+                        rank_id,
                     )
                     new_placement[layer_id] = old_placement[layer_id]
                     break
@@ -141,6 +146,7 @@ class EplbWorker:
                     updated_expert_maps_this_layer,
                     layer_id,
                 )
+                continue
 
             # Parse expert_ids each rank needs to receive from other ranks
             dst_rank_indices, experts_to_recv = torch.where(
@@ -152,24 +158,26 @@ class EplbWorker:
                 (current_expert_maps_this_layer != -1) & (updated_expert_maps_this_layer == -1)
             )
 
-            for idx in range(len(dst_rank_indices)):
-                dst_rank_id = dst_rank_indices[idx].item()
-                expert_id = experts_to_recv[idx].item()
-                if dst_rank_id not in expert_recv_info_this_layer:
-                    expert_recv_info_this_layer[dst_rank_id] = []
+            send_src_by_expert: dict[int, int] = {}
+            for src_rank_id, expert_id in zip(src_rank_indices.tolist(), experts_to_send.tolist()):
+                send_src_by_expert.setdefault(expert_id, src_rank_id)
 
-                if not torch.isin(torch.tensor(expert_id), experts_to_send).any():
+            holder_src_by_expert: dict[int, int] = {}
+            holder_rank_indices, holder_expert_ids = torch.where(current_expert_maps_this_layer != -1)
+            for src_rank_id, expert_id in zip(holder_rank_indices.tolist(), holder_expert_ids.tolist()):
+                holder_src_by_expert.setdefault(expert_id, src_rank_id)
+
+            for dst_rank_id, expert_id in zip(dst_rank_indices.tolist(), experts_to_recv.tolist()):
+                expert_recv_info_this_layer.setdefault(dst_rank_id, [])
+
+                src_rank_id = send_src_by_expert.get(expert_id)
+                if src_rank_id is None:
                     # if expert_id are not sent out from any npu, it will be copied from one npu holding this expert
-                    candidate_src_rank_indices = torch.where(current_expert_maps_this_layer[:, expert_id] != -1)[0]
-                else:
-                    candidate_src_rank_indices = src_rank_indices[experts_to_send == expert_id]
+                    src_rank_id = holder_src_by_expert[expert_id]
 
                 # TODO: improve selection criterion of NPU sending expert_id,
                 # considering intra-node or inter-node...
-                src_rank_id = candidate_src_rank_indices[0].item()
-                if src_rank_id not in expert_send_info_this_layer:
-                    expert_send_info_this_layer[src_rank_id] = []
-
+                expert_send_info_this_layer.setdefault(src_rank_id, [])
                 expert_send_info_this_layer[src_rank_id].append((dst_rank_id, expert_id))
                 expert_recv_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
 
@@ -245,26 +253,46 @@ class EplbWorker:
         """
         Pack a list of update info tuples for efficient IPC.
         """
+        update_infos = list(update_info_generator)
+        if not update_infos:
+            return []
+
         send_all = []
         recv_all = []
-        maps = []
-        log2phy_all = []
         layer_ids = []
+        rank_maps = []
+        log2phy_maps = []
 
-        for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
+        for send_info, recv_info, new_expert_map, layer_id in update_infos:
             send_info_this_rank = send_info.get(self.rank_id, [])
             recv_info_this_rank = recv_info.get(self.rank_id, [])
             send_all.append(send_info_this_rank)
             recv_all.append(recv_info_this_rank)
 
-            maps.append(new_expert_map[self.rank_id].numpy().tolist())
+            rank_maps.append(new_expert_map[self.rank_id])
 
             log2phy_map = generate_log2phy_map(new_expert_map, self.rank_id)
-            log2phy_all.append(log2phy_map.numpy().tolist())
+            log2phy_maps.append(log2phy_map)
 
             layer_ids.append(layer_id)
 
+        maps = self._batch_tensor_to_list(rank_maps)
+        log2phy_all = self._batch_tensor_to_list(log2phy_maps)
+
         return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids))
+
+    @staticmethod
+    def _batch_tensor_to_list(tensors: list[torch.Tensor]) -> list:
+        first_tensor = tensors[0]
+        if all(
+            tensor.shape == first_tensor.shape
+            and tensor.dtype == first_tensor.dtype
+            and tensor.device == first_tensor.device
+            for tensor in tensors
+        ):
+            return torch.stack(tensors).tolist()
+
+        return [tensor.tolist() for tensor in tensors]
 
     @staticmethod
     def _compute_imbalance(deployment_all_layer, hotness_all_layer: np.ndarray):
@@ -319,6 +347,15 @@ class EplbProcess:
         Subprocess entry: bind to specified NPU, loop waiting for planner_q to wake up,
         call do_update, then notify main process update is complete.
         """
+        try:
+            from ms_service_metric.adapters.vllm.adapter import get_vllm_adapter, initialize_vllm_metric  # type: ignore
+
+            initialize_vllm_metric()
+            adapter = get_vllm_adapter()
+            logger.info("[EPLB metrics] The adapter initialized: %s", adapter.is_initialized())
+        except Exception as e:
+            logger.warning("[EPLB metrics] Failed to initialize metrics: %s", e)
+
         if self.policy_type == 3:
             from vllm_ascend.eplb.core.policy.policy_flashlb import warm_up
 
@@ -337,7 +374,8 @@ class EplbProcess:
 
             except Exception as e:
                 logger.warning(
-                    f"[EPLB subprocess exiting due to error: {e}]",
+                    "[EPLB subprocess exiting due to error: %s]",
+                    e,
                     exc_info=True,
                 )
                 break

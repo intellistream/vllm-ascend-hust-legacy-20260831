@@ -13,6 +13,11 @@ VLLM_HUST_REPO="${VLLM_HUST_REPO:-${WORKSPACE_ROOT}/vllm-hust}"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/hust_ascend_manager_helper.sh"
 
+PYTHON_BIN="$(hust_resolve_python_bin 2>/dev/null)" || {
+  echo "[ERROR] Could not locate python3/python for latency benchmark" >&2
+  exit 1
+}
+
 hust_apply_default_hf_mirror
 
 ASCEND_ROOT="${1:-${ASCEND_ROOT:-}}"
@@ -39,7 +44,7 @@ hust_ascend_manager_run runtime check \
 
 cd "${ASCEND_REPO_ROOT}"
 
-python - <<'PY'
+"${PYTHON_BIN}" - <<'PY'
 import argparse
 import json
 import tempfile
@@ -53,7 +58,7 @@ dummy_gpt2_config = {
   "vocab_size": 50257,
   "n_positions": 1024,
   "n_ctx": 1024,
-  "n_embd": 64,
+  "n_embd": 128,
   "n_layer": 2,
   "n_head": 2,
   "bos_token_id": 50256,

@@ -35,6 +35,41 @@ if [[ -n "${HUST_ATB_SET_ENV:-}" && -f "${HUST_ATB_SET_ENV}" ]]; then
   set -u
 fi
 
+normalize_visible_devices() {
+  local raw_value="${1:-}"
+  local device
+  local -a devices=()
+
+  IFS=',' read -r -a raw_devices <<< "${raw_value}"
+  for device in "${raw_devices[@]}"; do
+    device="${device//[[:space:]]/}"
+    if [[ -n "${device}" ]]; then
+      devices+=("${device}")
+    fi
+  done
+
+  if [[ "${#devices[@]}" -eq 0 ]]; then
+    return 1
+  fi
+
+  local normalized_devices
+  normalized_devices="$(IFS=','; echo "${devices[*]}")"
+  printf '%s\n' "${normalized_devices}"
+}
+
+resolved_visible_devices="$(normalize_visible_devices "${ASCEND_VISIBLE_DEVICES:-}" 2>/dev/null || true)"
+resolved_rt_visible_devices="$(normalize_visible_devices "${ASCEND_RT_VISIBLE_DEVICES:-}" 2>/dev/null || true)"
+
+if [[ -z "${resolved_rt_visible_devices}" && -n "${resolved_visible_devices}" ]]; then
+  export ASCEND_RT_VISIBLE_DEVICES="${resolved_visible_devices}"
+  echo "[INFO] Derived ASCEND_RT_VISIBLE_DEVICES from ASCEND_VISIBLE_DEVICES: ${ASCEND_RT_VISIBLE_DEVICES}"
+elif [[ -n "${resolved_rt_visible_devices}" ]]; then
+  export ASCEND_RT_VISIBLE_DEVICES="${resolved_rt_visible_devices}"
+elif [[ -n "${ASCEND_RT_VISIBLE_DEVICES+x}" ]]; then
+  unset ASCEND_RT_VISIBLE_DEVICES
+  echo "[WARN] Ignoring empty ASCEND_RT_VISIBLE_DEVICES from parent environment"
+fi
+
 if [[ "${HUST_ASCEND_HAS_STREAM_ATTR:-0}" != "1" ]]; then
   echo "[WARN] Current Ascend runtime does not export aclrtSetStreamAttribute"
   echo "[WARN] npugraph_ex requires a newer CANN runtime. vllm-ascend currently recommends CANN 8.5.1."
@@ -48,6 +83,44 @@ fi
 if [[ "${HUST_REQUIRE_NPUGRAPH:-0}" == "1" && "${HUST_ASCEND_HAS_STREAM_ATTR:-0}" != "1" ]]; then
   echo "[ERROR] HUST_REQUIRE_NPUGRAPH=1 but current runtime cannot support npugraph_ex"
   return 1
+fi
+
+if [[ -n "${VLLM_ASCEND_HUST_REPO:-}" && -d "${VLLM_ASCEND_HUST_REPO}" ]]; then
+  expected_repo="$(cd "${VLLM_ASCEND_HUST_REPO}" && pwd -P)"
+  sanitized_pythonpath=""
+
+  IFS=':' read -r -a pythonpath_entries <<< "${PYTHONPATH:-}"
+  for entry in "${pythonpath_entries[@]}"; do
+    if [[ -z "${entry}" ]]; then
+      continue
+    fi
+
+    resolved_entry="$entry"
+    if [[ -d "${entry}" ]]; then
+      resolved_entry="$(cd "${entry}" && pwd -P)"
+    fi
+
+    if [[ "${resolved_entry}" != "${expected_repo}" && (
+      "${resolved_entry}" == */vllm-ascend-hust ||
+      -d "${resolved_entry}/vllm_ascend"
+    ) ]]; then
+      continue
+    fi
+
+    if [[ -n "${sanitized_pythonpath}" ]]; then
+      sanitized_pythonpath+=":${resolved_entry}"
+    else
+      sanitized_pythonpath="${resolved_entry}"
+    fi
+  done
+
+  if [[ -n "${sanitized_pythonpath}" ]]; then
+    export PYTHONPATH="${expected_repo}:${sanitized_pythonpath}"
+  else
+    export PYTHONPATH="${expected_repo}"
+  fi
+
+  echo "[INFO] PYTHONPATH prioritized for vllm-ascend-hust: ${expected_repo}"
 fi
 
 echo "[OK] Single Ascend runtime is configured"

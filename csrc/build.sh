@@ -29,6 +29,7 @@ else
 fi
 
 CUSTOM_OPTION="-DBUILD_OPEN_PROJECT=ON"
+PYTHON_EXECUTABLE=${PYTHON_EXECUTABLE:-}
 
 function help_info() {
     echo "Usage: $0 [options]"
@@ -153,6 +154,10 @@ fi
 
 if [ -n "${ascend_op_name}" ];then
     CUSTOM_OPTION="${CUSTOM_OPTION} -DASCEND_OP_NAME=${ascend_op_name}"
+fi
+
+if [ -n "${PYTHON_EXECUTABLE}" ];then
+    CUSTOM_OPTION="${CUSTOM_OPTION} -DPython3_EXECUTABLE=${PYTHON_EXECUTABLE}"
 fi
 
 if [ -n "${ASCEND_HOME_PATH}" ];then

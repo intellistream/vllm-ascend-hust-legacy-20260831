@@ -15,13 +15,14 @@
 
 
 import inspect
+import os
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
-from unittest.mock import MagicMock, patch, PropertyMock
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, YaRNScalingRotaryEmbedding
 
-from vllm.model_executor.layers.rotary_embedding import (YaRNScalingRotaryEmbedding, RotaryEmbedding)
-from vllm_ascend.ops.rotary_embedding import (AscendYaRNRotaryEmbedding, AscendRotaryEmbedding)
-
+from vllm_ascend.ops.rotary_embedding import AscendRotaryEmbedding, AscendYaRNRotaryEmbedding
 
 HEAD_SIZE = 64
 ROTARY_DIM = 64
@@ -46,7 +47,7 @@ def check_parent_init_signature_has_not_changed(parent_func, child_func):
     child_sig = inspect.signature(child_func)
     child_params = set(child_sig.parameters) - {"self"}
 
-    added   = parent_params - child_params
+    added = parent_params - child_params
     removed = child_params - parent_params
 
     assert not added, (
@@ -95,9 +96,7 @@ def make_embedding(patch_init_side_effects):
             emb.is_neox_style = is_neox_style
             emb.cos_sin_cache = torch.zeros(MAX_POS, ROTARY_DIM)
             # Call __init__ to exercise our code path
-            AscendRotaryEmbedding.__init__(
-                emb, HEAD_SIZE, ROTARY_DIM, MAX_POS, BASE, is_neox_style, DTYPE
-            )
+            AscendRotaryEmbedding.__init__(emb, HEAD_SIZE, ROTARY_DIM, MAX_POS, BASE, is_neox_style, DTYPE)
         return emb
 
     return _factory
@@ -109,6 +108,7 @@ def make_yarn_embedding(patch_init_side_effects):
     Factory for AscendYaRNRotaryEmbedding with parent __init__ suppressed.
     patch_init_side_effects is the same autouse fixture as before.
     """
+
     def _factory(is_neox_style: bool = True):
         with patch("vllm_ascend.ops.rotary_embedding.YaRNScalingRotaryEmbedding.__init__") as mock_parent_init:
             mock_parent_init.return_value = None
@@ -135,6 +135,21 @@ def make_yarn_embedding(patch_init_side_effects):
 
 
 class TestAscendEmbeddingForwardOOT:
+    def test_qwen2_native_fallback_disabled_by_default(self, patch_init_side_effects, make_embedding):
+        patch_init_side_effects.return_value.model_config.architectures = ["Qwen2ForCausalLM"]
+
+        with patch.dict(os.environ, {}, clear=True):
+            emb = make_embedding()
+
+        assert emb.force_native_qwen2_rope is False
+
+    def test_qwen2_native_fallback_requires_explicit_opt_in(self, patch_init_side_effects, make_embedding):
+        patch_init_side_effects.return_value.model_config.architectures = ["Qwen2ForCausalLM"]
+
+        with patch.dict(os.environ, {"VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE": "1"}, clear=True):
+            emb = make_embedding()
+
+        assert emb.force_native_qwen2_rope is True
 
     @patch("torch.ops.vllm.npu_rotary_embedding")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
@@ -152,8 +167,13 @@ class TestAscendEmbeddingForwardOOT:
         result = emb.forward_oot(positions, query, key)
 
         mock_npu_op.assert_called_once_with(
-            positions, query, key, emb.cos_sin_cache,
-            HEAD_SIZE, ROTARY_DIM, emb.is_neox_style,
+            positions,
+            query,
+            key,
+            emb.cos_sin_cache,
+            HEAD_SIZE,
+            ROTARY_DIM,
+            emb.is_neox_style,
         )
         assert result is expected_output
 
@@ -233,17 +253,26 @@ class TestAscendEmbeddingForwardOOT:
         # npu op should receive the gathered positions, not the originals
         assert mock_npu_op.call_args[0][0] is gathered_positions
 
-    @pytest.mark.parametrize("is_draft_model,flash_comm,use_mtp", [
-        (False, True,  True),   # not draft
-        (True,  False, True),   # flash_comm disabled
-        (True,  True,  False),  # use_mtp disabled
-    ])
+    @pytest.mark.parametrize(
+        "is_draft_model,flash_comm,use_mtp",
+        [
+            (False, True, True),  # not draft
+            (True, False, True),  # flash_comm disabled
+            (True, True, False),  # use_mtp disabled
+        ],
+    )
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("torch.ops.vllm.npu_rotary_embedding")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_gather_unpad_skipped_unless_all_conditions_met(
-        self, mock_get_forward_context, mock_npu_op, mock_gather,
-        is_draft_model, flash_comm, use_mtp, make_embedding,
+        self,
+        mock_get_forward_context,
+        mock_npu_op,
+        mock_gather,
+        is_draft_model,
+        flash_comm,
+        use_mtp,
+        make_embedding,
     ):
         """gather/unpad must NOT fire if any one of the three conditions is False."""
         mock_get_forward_context.return_value = MagicMock()
@@ -259,21 +288,17 @@ class TestAscendEmbeddingForwardOOT:
         mock_gather.assert_not_called()
         # Original positions tensor is passed through untouched
         assert mock_npu_op.call_args[0][0] is positions
-    
+
     def test_parent_init_signature_has_not_changed(self):
         """
         Fail loudly if RotaryEmbedding.__init__ adds, removes, or
         renames parameters, so a developer knows to update AscendRotaryEmbedding
         accordingly.
         """
-        check_parent_init_signature_has_not_changed(
-            RotaryEmbedding.__init__,
-            AscendRotaryEmbedding.__init__
-        )
+        check_parent_init_signature_has_not_changed(RotaryEmbedding.__init__, AscendRotaryEmbedding.__init__)
 
 
 class TestAscendYaRNRotaryEmbeddingForwardOOT:
-
     @patch("vllm_ascend.ops.rotary_embedding.AscendRotaryEmbedding.forward_oot")
     def test_delegates_to_ascend_rotary_forward_oot(self, mock_delegate, make_yarn_embedding):
         """forward_oot must delegate to AscendRotaryEmbedding.forward_oot."""
@@ -335,6 +360,5 @@ class TestAscendYaRNRotaryEmbeddingForwardOOT:
         accordingly.
         """
         check_parent_init_signature_has_not_changed(
-            YaRNScalingRotaryEmbedding.__init__,
-            AscendYaRNRotaryEmbedding.__init__
+            YaRNScalingRotaryEmbedding.__init__, AscendYaRNRotaryEmbedding.__init__
         )

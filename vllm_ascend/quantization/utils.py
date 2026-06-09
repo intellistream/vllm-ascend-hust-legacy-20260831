@@ -23,8 +23,6 @@ from vllm.logger import logger
 
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
-from .constants import MODELSLIM_CONFIG_FILENAME
-
 
 def get_model_file(
     model: str | Path,
@@ -72,7 +70,7 @@ def get_model_file(
             )
             return Path(downloaded_path)
     except Exception as e:
-        logger.debug(f"Could not download {filename} from {model}: {e}")
+        logger.debug("Could not download %s from %s: %s", filename, model, e)
         return None
 
 
@@ -105,6 +103,8 @@ def detect_quantization_method(model: str, revision: str | None = None) -> str |
         ``"compressed-tensors"`` for LLM-Compressor models,
         or ``None`` if no quantization signature is found.
     """
+    from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
+
     # Case 1: ModelSlim — look for quant_model_description.json
     modelslim_path = get_model_file(model, MODELSLIM_CONFIG_FILENAME, revision=revision)
     if modelslim_path is not None:
@@ -197,3 +197,12 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
     from vllm.config import VllmConfig as _VllmConfig
 
     vllm_config.quant_config = _VllmConfig._get_quantization_config(model_config, vllm_config.load_config)
+
+
+def enable_fa_quant(vllm_config, layer_name=None) -> bool:
+    if vllm_config.quant_config is not None and getattr(vllm_config.quant_config, "enable_fa_quant", False):
+        if layer_name is not None:
+            return vllm_config.quant_config.enabling_fa_quant(vllm_config, layer_name)
+        else:
+            return True
+    return False
