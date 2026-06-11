@@ -236,10 +236,9 @@
 \end{columns}
 
 \vspace{0.35em}
-\tagbox{block body}{\textbf{实测证据：} 通用预取把常驻权重从约 56.9GB 降到约 43.4GB，但在生成前进入 \src{npu_grouped_matmul} 时失败，原因是权重在 CPU、激活在 NPU。}
 \end{frame}
 
-\begin{frame}[t]{第五步：结果还原已经太晚}
+\begin{frame}[t]{第五步：结果还原太晚}
 \footnotesize
 \vspace{-0.35em}
 
@@ -286,7 +285,6 @@ KV 缓存 CPU 卸载 &
 \renewcommand{\arraystretch}{1.0}
 
 \vspace{0.35em}
-\tagbox{block body}{\textbf{判断标准：} 只要没有 CPU 专家仓库、NPU 固定专家槽位、缺失专家搬运和 MLP 前等待协议，就不能算 MoE 专家权重卸载。}
 \end{frame}
 
 \begin{frame}[t]{vLLM 通用权重卸载为什么接不上}
