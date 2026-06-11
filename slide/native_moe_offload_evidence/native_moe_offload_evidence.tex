@@ -49,33 +49,33 @@
 \begin{frame}
   \titlepage
   \vspace{-1.1em}
-  \begin{beamercolorbox}[wd=\linewidth,sep=0.75em,rounded=true]{block body}
-  \centering
-  \keypoint{一句话结论：} 原生 vLLM-Ascend 能跑 MoE，也有专家并行、负载均衡、KV 缓存卸载和权重预取；但它没有“根据本轮路由结果，把缺失专家权重从 CPU 搬到 NPU 固定槽位，再交给分组矩阵乘执行”的完整机制。
-  \end{beamercolorbox}
+  % \begin{beamercolorbox}[wd=\linewidth,sep=0.75em,rounded=true]{block body}
+  % \centering
+  % \keypoint{一句话结论：} 原生 vLLM-Ascend 能跑 MoE，也有专家并行、负载均衡、KV 缓存卸载和权重预取；但它没有“根据本轮路由结果，把缺失专家权重从 CPU 搬到 NPU 固定槽位，再交给分组矩阵乘执行”的完整机制。
+  % \end{beamercolorbox}
 \end{frame}
 
-\begin{frame}[t]{这份材料证明什么}
-\footnotesize
-\vspace{-0.35em}
+% \begin{frame}[t]{这份材料证明什么}
+% \footnotesize
+% \vspace{-0.35em}
 
-\begin{block}{证明对象}
-\begin{itemize}
-  \item “原生”指官方参考仓库 \src{/workspace/reference-repos/vllm-ascend} 的 \src{main} 分支，检查点为 \src{7c4ec8e5}。
-  \item 当前本地 \src{research} 分支已经有 MoE 卸载原型；它说明这个能力正在被补上，但不能反过来证明官方原生已经支持。
-  \item 这里讨论的是 \keypoint{MoE 专家权重卸载}，不是 KV 缓存卸载，也不是把已经在 NPU 上的权重预取到 L2 缓存。
-\end{itemize}
-\end{block}
+% \begin{block}{证明对象}
+% \begin{itemize}
+%   \item “原生”指官方参考仓库 \src{/workspace/reference-repos/vllm-ascend} 的 \src{main} 分支，检查点为 \src{7c4ec8e5}。
+%   \item 当前本地 \src{research} 分支已经有 MoE 卸载原型；它说明这个能力正在被补上，但不能反过来证明官方原生已经支持。
+%   \item 这里讨论的是 \keypoint{MoE 专家权重卸载}，不是 KV 缓存卸载，也不是把已经在 NPU 上的权重预取到 L2 缓存。
+% \end{itemize}
+% \end{block}
 
-\begin{block}{判断标准}
-\begin{itemize}
-  \item 能看到本轮路由选中的专家。
-  \item 能判断这些专家权重是否已经在 NPU 上。
-  \item 能把缺失专家从 CPU 侧搬入 NPU 侧稳定槽位。
-  \item 能保证分组矩阵乘拿到的权重已经在 NPU 上，并且形状、布局和地址稳定。
-\end{itemize}
-\end{block}
-\end{frame}
+% \begin{block}{判断标准}
+% \begin{itemize}
+%   \item 能看到本轮路由选中的专家。
+%   \item 能判断这些专家权重是否已经在 NPU 上。
+%   \item 能把缺失专家从 CPU 侧搬入 NPU 侧稳定槽位。
+%   \item 能保证分组矩阵乘拿到的权重已经在 NPU 上，并且形状、布局和地址稳定。
+% \end{itemize}
+% \end{block}
+% \end{frame}
 
 \begin{frame}[t]{MoE 推理的关键流程}
 \footnotesize
@@ -320,7 +320,7 @@ KV 缓存 CPU 卸载 &
 \tagbox{block body}{\textbf{根因：} 通用权重卸载的最小单位是“层或参数”；MoE 专家权重卸载的最小单位是“某一层中本轮被路由到的专家集合”。调度粒度不对，后面一定接不上分组矩阵乘。}
 \end{frame}
 
-\begin{frame}[t]{UVA 路径在 Ascend 上不可用}
+\begin{frame}[t]{1.UVA 路径在 Ascend 上不可用}
 \footnotesize
 \vspace{-0.35em}
 
@@ -343,7 +343,7 @@ KV 缓存 CPU 卸载 &
 \tagbox{block body}{\textbf{结论：} UVA 不能作为 Ascend MoE 专家权重卸载的原生方案；即便抽象上成立，也不等价于让 Ascend 分组矩阵乘使用稳定的 NPU 专家槽位。}
 \end{frame}
 
-\begin{frame}[t]{预取路径能省显存，但仍不能正确执行}
+\begin{frame}[t]{2.预取路径仍不能正确执行}
 \footnotesize
 \vspace{-0.35em}
 
@@ -374,59 +374,28 @@ KV 缓存 CPU 卸载 &
 \tagbox{block body}{\textbf{症状：} 预取后常驻权重确实下降，但专家 MLP 边界仍可能拿到 CPU 权重或错误同步；问题不是“有没有省显存”，而是“分组矩阵乘前专家权重是否已按正确协议就绪”。}
 \end{frame}
 
-\begin{frame}[t]{为什么必须在 MoE 执行边界解决}
-\footnotesize
-\vspace{-0.35em}
+% \begin{frame}[t]{为什么必须在 MoE 执行边界解决}
+% \footnotesize
+% \vspace{-0.35em}
 
-\begin{block}{这个位置刚好能看到所有关键信息}
-\begin{itemize}
-  \item \src{topk_ids/topk_weights}：本轮路由到了哪些专家。
-  \item \src{layer_id}：当前是第几层，可以判断加载截止时间。
-  \item \src{w13_weight/w2_weight}：后处理后的专家权重对象。
-  \item \src{expert_map/log2phy/global_redundant_expert_num}：专家并行和负载均衡映射。
-  \item \src{moe_comm_type}：当前 MoE 通信路径。
-\end{itemize}
-\end{block}
+% \begin{block}{这个位置刚好能看到所有关键信息}
+% \begin{itemize}
+%   \item \src{topk_ids/topk_weights}：本轮路由到了哪些专家。
+%   \item \src{layer_id}：当前是第几层，可以判断加载截止时间。
+%   \item \src{w13_weight/w2_weight}：后处理后的专家权重对象。
+%   \item \src{expert_map/log2phy/global_redundant_expert_num}：专家并行和负载均衡映射。
+%   \item \src{moe_comm_type}：当前 MoE 通信路径。
+% \end{itemize}
+% \end{block}
 
-\begin{block}{太早或太晚都不行}
-\begin{itemize}
-  \item 太早：还不知道本轮到底会用到哪些专家。
-  \item 太晚：专家 MLP 已经要求权重就绪，结果还原阶段已经无法补救。
-  \item 因此运行时应在 \src{select_experts -> build_fused_experts_input -> fused_experts} 之间介入。
-\end{itemize}
-\end{block}
-\end{frame}
-
-\begin{frame}[t]{图执行还要求权重入口稳定}
-\footnotesize
-\vspace{-0.35em}
-
-\begin{columns}[T,onlytextwidth]
-\begin{column}{0.49\textwidth}
-\begin{block}{原生高性能路径的假设}
-\begin{itemize}
-  \item 权重张量地址稳定。
-  \item 权重布局稳定。
-  \item 分组矩阵乘的输入签名稳定。
-  \item 事件和图执行能把分发、MLP、还原串起来。
-\end{itemize}
-\end{block}
-\end{column}
-\begin{column}{0.49\textwidth}
-\begin{block}{动态专家缓存的问题}
-\begin{itemize}
-  \item 缺失时临时分配权重，地址会变。
-  \item 每轮专家集合不同，算子输入对象会变。
-  \item CPU 决策路径不能被图捕获。
-  \item 因此需要固定 NPU 槽位，让图只看槽位张量，运行时只更新专家到槽位的映射。
-\end{itemize}
-\end{block}
-\end{column}
-\end{columns}
-
-\vspace{0.25em}
-\tagbox{block body}{\textbf{旁证：} 本地 \src{research} 分支的 README 明确要求原型使用 \src{--enforce-eager}，因为图捕获无法记录卸载调度器的运行时 CPU 决策路径。}
-\end{frame}
+% \begin{block}{太早或太晚都不行}
+% \begin{itemize}
+%   \item 太早：还不知道本轮到底会用到哪些专家。
+%   \item 太晚：专家 MLP 已经要求权重就绪，结果还原阶段已经无法补救。
+%   \item 因此运行时应在 \src{select_experts -> build_fused_experts_input -> fused_experts} 之间介入。
+% \end{itemize}
+% \end{block}
+% \end{frame}
 
 \begin{frame}[t]{按流程汇总卡点}
 \scriptsize
@@ -472,43 +441,43 @@ CPU 专家仓库、NPU 固定槽位 &
 \renewcommand{\arraystretch}{1.0}
 \end{frame}
 
-\begin{frame}[t]{如果要支持，需要补哪些机制}
-\footnotesize
-\vspace{-0.35em}
+% \begin{frame}[t]{如果要支持，需要补哪些机制}
+% \footnotesize
+% \vspace{-0.35em}
 
-\begin{block}{必须补齐的四件事}
-\begin{itemize}
-  \item \textbf{CPU 专家仓库：} 保存后处理后的专家权重，而不是原始检查点权重。
-  \item \textbf{NPU 固定专家槽位：} 分组矩阵乘看到的是稳定槽位张量，而不是临时权重对象。
-  \item \textbf{专家驻留管理：} 根据 \src{topk_ids} 判断命中和缺失，并维护专家到槽位的映射。
-  \item \textbf{搬运与执行调度：} 在专家 MLP 前等待必要槽位；进一步可以先算已驻留专家，再补算刚加载专家。
-\end{itemize}
-\end{block}
+% \begin{block}{必须补齐的四件事}
+% \begin{itemize}
+%   \item \textbf{CPU 专家仓库：} 保存后处理后的专家权重，而不是原始检查点权重。
+%   \item \textbf{NPU 固定专家槽位：} 分组矩阵乘看到的是稳定槽位张量，而不是临时权重对象。
+%   \item \textbf{专家驻留管理：} 根据 \src{topk_ids} 判断命中和缺失，并维护专家到槽位的映射。
+%   \item \textbf{搬运与执行调度：} 在专家 MLP 前等待必要槽位；进一步可以先算已驻留专家，再补算刚加载专家。
+% \end{itemize}
+% \end{block}
 
-\tagbox{block body}{\textbf{最终判断：} 原生 vLLM-Ascend 缺少的不是某一个开关，而是一整套围绕 MoE 执行边界的专家权重驻留、搬运、等待和分阶段执行协议。}
-\end{frame}
+% \tagbox{block body}{\textbf{最终判断：} 原生 vLLM-Ascend 缺少的不是某一个开关，而是一整套围绕 MoE 执行边界的专家权重驻留、搬运、等待和分阶段执行协议。}
+% \end{frame}
 
-\begin{frame}[t]{证据索引}
-\scriptsize
-\vspace{-0.45em}
-\begin{block}{本地源码}
-\begin{itemize}
-  \item 官方参考：\src{/workspace/reference-repos/vllm-ascend@7c4ec8e5 main}
-  \item 当前研究分支：\src{/workspace/vllm-ascend-hust@a02ed84a1 research}
-  \item vLLM-HUST：\src{/workspace/vllm-hust}
-  \item MoE 主链路：\src{vllm_ascend/ops/fused_moe/fused_moe.py}、\src{moe_comm_method.py}、\src{token_dispatcher.py}、\src{moe_mlp.py}
-  \item 通用卸载：\src{vllm/config/offload.py}、\src{vllm/model_executor/offloader/prefetch.py}、\src{uva.py}
-  \item 实测记录：\src{docs/sew-offload/05-existing-offload-baseline.md}、\src{08-ascend-moe-offload-architecture.md}
-\end{itemize}
-\end{block}
+% \begin{frame}[t]{证据索引}
+% \scriptsize
+% \vspace{-0.45em}
+% \begin{block}{本地源码}
+% \begin{itemize}
+%   \item 官方参考：\src{/workspace/reference-repos/vllm-ascend@7c4ec8e5 main}
+%   \item 当前研究分支：\src{/workspace/vllm-ascend-hust@a02ed84a1 research}
+%   \item vLLM-HUST：\src{/workspace/vllm-hust}
+%   \item MoE 主链路：\src{vllm_ascend/ops/fused_moe/fused_moe.py}、\src{moe_comm_method.py}、\src{token_dispatcher.py}、\src{moe_mlp.py}
+%   \item 通用卸载：\src{vllm/config/offload.py}、\src{vllm/model_executor/offloader/prefetch.py}、\src{uva.py}
+%   \item 实测记录：\src{docs/sew-offload/05-existing-offload-baseline.md}、\src{08-ascend-moe-offload-architecture.md}
+% \end{itemize}
+% \end{block}
 
-\begin{block}{官方文档}
-\begin{itemize}
-  \item vLLM-Ascend 权重预取指南：\url{https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/weight_prefetch.html}
-  \item vLLM-Ascend KV 缓存 CPU 卸载指南：\url{https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_cpu_offload.html}
-  \item vLLM Fused MoE Modular Kernel：\url{https://docs.vllm.ai/en/latest/design/fused_moe_modular_kernel/}
-\end{itemize}
-\end{block}
-\end{frame}
+% \begin{block}{官方文档}
+% \begin{itemize}
+%   \item vLLM-Ascend 权重预取指南：\url{https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/weight_prefetch.html}
+%   \item vLLM-Ascend KV 缓存 CPU 卸载指南：\url{https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_cpu_offload.html}
+%   \item vLLM Fused MoE Modular Kernel：\url{https://docs.vllm.ai/en/latest/design/fused_moe_modular_kernel/}
+% \end{itemize}
+% \end{block}
+% \end{frame}
 
 \end{document}
