@@ -42,7 +42,7 @@
 \title{vLLM-Ascend 原生不支持 MoE Expert Offload 推理}
 \subtitle{按 MoE 推理执行流程拆解证据与卡点}
 \author{}
-\date{\today}
+\date{}
 
 \begin{document}
 
@@ -54,38 +54,6 @@
   \keypoint{结论先行：} 官方/原生 vLLM-Ascend 支持 MoE 推理、EP/EPLB、KV cache CPU offload 和 cache/L2 weight prefetch，
   但不提供 ``按当前 routed experts 从 CPU/host 侧加载 expert 权重到 NPU 固定槽位再执行'' 的 MoE expert offload runtime。
   \end{beamercolorbox}
-\end{frame}
-
-\begin{frame}[t]{范围界定}
-\footnotesize
-\vspace{-0.35em}
-
-\begin{columns}[T,onlytextwidth]
-\begin{column}{0.49\textwidth}
-\begin{block}{本文讨论的 ``MoE offload''}
-\begin{itemize}
-  \item Expert 权重不全量常驻 HBM。
-  \item 每轮根据 \src{topk_ids} 得到 routed expert working set。
-  \item 缺失 expert 从 CPU/host store 搬到 NPU resident slot。
-  \item \src{npu_grouped_matmul} 只看到 device-resident、layout-compatible 的权重。
-  \item 需要命中/缺失、替换、预取、同步和执行分阶段。
-\end{itemize}
-\end{block}
-\end{column}
-\begin{column}{0.49\textwidth}
-\begin{block}{容易混淆但不是它}
-\begin{itemize}
-  \item \textbf{KV cache CPU offload：} 搬 KV blocks，不搬模型 expert 权重。
-  \item \textbf{Ascend weight prefetch：} 把已在设备侧的权重预取到 L2/cache，不是 host-to-HBM。
-  \item \textbf{vLLM 通用 prefetch offload：} 按 layer/parameter hook，不感知 MoE routed expert 集合。
-  \item \textbf{research 分支原型：} 是为补这个缺口而加的实验能力，不代表官方原生能力。
-\end{itemize}
-\end{block}
-\end{column}
-\end{columns}
-
-\vspace{0.35em}
-\tagbox{block body}{\textbf{对照基线：} 官方参考仓库 \src{/workspace/reference-repos/vllm-ascend@7c4ec8e5 main} 中未检索到 \src{ascend-moe-offload}、\src{fixed_slot}、\src{moe_offload_runtime} 等原生入口；本地 \src{research@a02ed84a1} 已出现这些原型代码。}
 \end{frame}
 
 \begin{frame}[t]{MoE 推理流程总览}
@@ -394,38 +362,6 @@ Weight Prefetch &
 \tagbox{block body}{\textbf{症状：} generic prefetch 可以降低常驻权重，但没有把 \src{w13_weight/w2_weight} 替换成 ``已就绪的 NPU slot-backed weights''，所以到 MLP GMM 边界仍会暴露 CPU tensor 或错误同步。}
 \end{frame}
 
-\begin{frame}[t]{实测基线：能省显存，但不能生成}
-\footnotesize
-\vspace{-0.4em}
-
-\setlength{\tabcolsep}{4pt}
-\renewcommand{\arraystretch}{1.14}
-\begin{tabularx}{\linewidth}{L{0.24\linewidth}L{0.20\linewidth}L{0.22\linewidth}Y}
-\toprule
-\textbf{Case} & \textbf{resident weight log} & \textbf{结果} & \textbf{关键信号} \\
-\midrule
-No offload &
-56.9001 GB &
-成功 &
-Qwen3-30B-A3B 在 64GB 910B3 上仅小上下文勉强可跑，峰值约 63.9GB。 \\
-\midrule
-UVA expert offload &
-未进入加载 &
-失败 &
-UVA accelerator view 不支持 \src{npu}。 \\
-\midrule
-Prefetch expert-only &
-43.4001 GB &
-失败 &
-显存下降约 13.5GB，但 \src{npu_grouped_matmul} 看到 weight 在 CPU、activation 在 NPU。 \\
-\bottomrule
-\end{tabularx}
-\setlength{\tabcolsep}{6pt}
-\renewcommand{\arraystretch}{1.0}
-
-\vspace{0.35em}
-\tagbox{block body}{\textbf{解释：} 这不是 ``不需要 offload''，恰恰相反：显存节省真实存在；问题是原生/通用 offload 没有 MoE execution boundary 的专家驻留协议。}
-\end{frame}
 
 \begin{frame}[t]{为什么必须在 MoE Boundary 解决}
 \footnotesize
@@ -547,37 +483,6 @@ expert-aware scheduling &
 \end{tabularx}
 \setlength{\tabcolsep}{6pt}
 \renewcommand{\arraystretch}{1.0}
-\end{frame}
-
-\begin{frame}[t]{要变成原生支持，需要补哪些件}
-\footnotesize
-\vspace{-0.35em}
-
-\begin{columns}[T,onlytextwidth]
-\begin{column}{0.49\textwidth}
-\begin{block}{数据面}
-\begin{itemize}
-  \item 后处理后的 CPU expert store。
-  \item 每层固定 NPU expert slots。
-  \item slot tensor 保持 dtype、shape、stride、NZ/ND layout。
-  \item \src{expert_id -> slot_id} 映射与版本号。
-\end{itemize}
-\end{block}
-\end{column}
-\begin{column}{0.49\textwidth}
-\begin{block}{控制面}
-\begin{itemize}
-  \item 从 \src{topk_ids/group_list} 得到 miss set 与 token impact。
-  \item native \src{torch.npu} stream/event H2D 调度。
-  \item deadline-aware prefetch 与 replacement。
-  \item hit-first phased execution 或同步 slot prototype。
-\end{itemize}
-\end{block}
-\end{column}
-\end{columns}
-
-\vspace{0.25em}
-\tagbox{block body}{\textbf{最小正确性要求：} grouped matmul 调用点看到的永远是 NPU-resident slot weights，而不是 CPU 参数、临时 device tensor 或 layout 未后处理的权重。}
 \end{frame}
 
 \begin{frame}[t]{证据索引}
