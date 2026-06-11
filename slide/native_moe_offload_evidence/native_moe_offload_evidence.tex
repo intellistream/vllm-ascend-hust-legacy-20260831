@@ -1,0 +1,606 @@
+\documentclass[aspectratio=169,10pt]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{default}
+
+\usepackage[UTF8,fontset=none]{ctex}
+\setCJKmainfont{Noto Serif CJK SC}
+\setCJKsansfont{Noto Sans CJK SC}
+\setCJKmonofont{Noto Sans Mono CJK SC}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{hyperref}
+\usetikzlibrary{positioning,arrows.meta,fit,calc}
+
+\definecolor{MainBlue}{RGB}{40,82,145}
+\definecolor{AccentRed}{RGB}{178,56,46}
+\definecolor{SoftGray}{RGB}{245,247,250}
+\definecolor{DarkGray}{RGB}{70,76,86}
+\definecolor{SoftGreen}{RGB}{232,246,238}
+\definecolor{SoftYellow}{RGB}{255,247,222}
+\definecolor{SoftRed}{RGB}{252,235,232}
+
+\setbeamercolor{title}{fg=white}
+\setbeamercolor{frametitle}{fg=white,bg=MainBlue}
+\setbeamercolor{block title}{bg=MainBlue,fg=white}
+\setbeamercolor{block body}{bg=SoftGray,fg=black}
+\setbeamercolor{alerted text}{fg=AccentRed}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}{}
+\setbeamertemplate{headline}{}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\keypoint}[1]{\textbf{\textcolor{AccentRed}{#1}}}
+\newcommand{\bluepoint}[1]{\textbf{\textcolor{MainBlue}{#1}}}
+\newcommand{\src}[1]{\texttt{\scriptsize\detokenize{#1}}}
+\newcommand{\tagbox}[2]{\begin{beamercolorbox}[wd=\linewidth,sep=0.45em,rounded=true]{#1}\footnotesize #2\end{beamercolorbox}}
+
+\title{vLLM-Ascend 原生不支持 MoE Expert Offload 推理}
+\subtitle{按 MoE 推理执行流程拆解证据与卡点}
+\author{}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+  \vspace{-1.1em}
+  \begin{beamercolorbox}[wd=\linewidth,sep=0.75em,rounded=true]{block body}
+  \centering
+  \keypoint{结论先行：} 官方/原生 vLLM-Ascend 支持 MoE 推理、EP/EPLB、KV cache CPU offload 和 cache/L2 weight prefetch，
+  但不提供 ``按当前 routed experts 从 CPU/host 侧加载 expert 权重到 NPU 固定槽位再执行'' 的 MoE expert offload runtime。
+  \end{beamercolorbox}
+\end{frame}
+
+\begin{frame}[t]{范围界定}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{本文讨论的 ``MoE offload''}
+\begin{itemize}
+  \item Expert 权重不全量常驻 HBM。
+  \item 每轮根据 \src{topk_ids} 得到 routed expert working set。
+  \item 缺失 expert 从 CPU/host store 搬到 NPU resident slot。
+  \item \src{npu_grouped_matmul} 只看到 device-resident、layout-compatible 的权重。
+  \item 需要命中/缺失、替换、预取、同步和执行分阶段。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.49\textwidth}
+\begin{block}{容易混淆但不是它}
+\begin{itemize}
+  \item \textbf{KV cache CPU offload：} 搬 KV blocks，不搬模型 expert 权重。
+  \item \textbf{Ascend weight prefetch：} 把已在设备侧的权重预取到 L2/cache，不是 host-to-HBM。
+  \item \textbf{vLLM 通用 prefetch offload：} 按 layer/parameter hook，不感知 MoE routed expert 集合。
+  \item \textbf{research 分支原型：} 是为补这个缺口而加的实验能力，不代表官方原生能力。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.35em}
+\tagbox{block body}{\textbf{对照基线：} 官方参考仓库 \src{/workspace/reference-repos/vllm-ascend@7c4ec8e5 main} 中未检索到 \src{ascend-moe-offload}、\src{fixed_slot}、\src{moe_offload_runtime} 等原生入口；本地 \src{research@a02ed84a1} 已出现这些原型代码。}
+\end{frame}
+
+\begin{frame}[t]{MoE 推理流程总览}
+\footnotesize
+\vspace{-0.4em}
+\begin{center}
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=0.55cm,
+  stage/.style={draw=MainBlue, fill=SoftGray, rounded corners=2pt, minimum width=2.65cm, minimum height=0.9cm, align=center, font=\footnotesize},
+  miss/.style={draw=AccentRed, fill=SoftRed, rounded corners=2pt, minimum width=2.8cm, minimum height=0.85cm, align=center, font=\scriptsize},
+  arrow/.style={-{Latex[length=2.2mm]}, thick, color=MainBlue}
+]
+\node[stage] (load) {权重加载/后处理\\\src{process_weights_after_loading}};
+\node[stage, right=of load] (router) {Router + TopK\\\src{select_experts}};
+\node[stage, right=of router] (dispatch) {Token Dispatch\\\src{token_dispatch}};
+\node[stage, right=of dispatch] (mlp) {Expert MLP\\GMM1/SwiGLU/GMM2};
+\node[stage, right=of mlp] (combine) {Token Combine\\输出还原};
+\draw[arrow] (load) -- (router);
+\draw[arrow] (router) -- (dispatch);
+\draw[arrow] (dispatch) -- (mlp);
+\draw[arrow] (mlp) -- (combine);
+
+\node[miss, below=0.85cm of load] (m0) {假设全量 expert\\已在 NPU};
+\node[miss, below=0.85cm of router] (m1) {只产出 expert id\\不查 residency};
+\node[miss, below=0.85cm of dispatch] (m2) {只按 id 分发 token\\不触发权重搬运};
+\node[miss, below=0.85cm of mlp] (m3) {\src{npu_grouped_matmul}\\要求权重已就绪};
+\node[miss, below=0.85cm of combine] (m4) {combine 只还原 token\\无 miss 补救窗口};
+\draw[arrow, color=AccentRed] (m0) -- (load);
+\draw[arrow, color=AccentRed] (m1) -- (router);
+\draw[arrow, color=AccentRed] (m2) -- (dispatch);
+\draw[arrow, color=AccentRed] (m3) -- (mlp);
+\draw[arrow, color=AccentRed] (m4) -- (combine);
+\end{tikzpicture}}
+\end{center}
+
+\vspace{-0.2em}
+\tagbox{block body}{\textbf{核心断点：} 原生流程中，唯一真正消耗 expert 权重的是 MLP grouped matmul；在此之前的 routing/dispatch 有 expert id 和 token 计数，却没有 ``CPU store $\rightarrow$ NPU slot'' 的状态机。}
+\end{frame}
+
+\begin{frame}[t]{Step 0: 权重加载与后处理}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.47\textwidth}
+\begin{block}{源码证据}
+\begin{itemize}
+  \item \src{official: vllm_ascend/ops/fused_moe/fused_moe.py:107-127}
+  \item \src{w13_weight/w2_weight} 在加载后被 pad、transpose、contiguous。
+  \item 按配置转成 Ascend 需要的 NZ/ND 格式。
+  \item 处理结果重新赋给 \src{layer.w13_weight} 和 \src{layer.w2_weight}。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.50\textwidth}
+\begin{block}{为什么这里卡 offload}
+\begin{itemize}
+  \item 原生后处理默认 ``完整 expert tensor 已经存在''。
+  \item 后续 GMM 依赖后处理后的 shape、stride、dtype、layout。
+  \item 如果 generic offload 把参数留在 CPU，MLP 阶段拿到的就是 CPU tensor。
+  \item 如果运行时动态新分配 device tensor，地址/layout 又不稳定，图重放和静态 kernel 不友好。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.25em}
+\tagbox{block body}{\textbf{所需但缺失：} CPU expert store 必须保存 ``后处理后'' 的 expert 权重；NPU 侧还要有固定 slot tensor，不能让 grouped matmul 直接消费普通 CPU 参数对象。}
+\end{frame}
+
+\begin{frame}[t]{Step 1: Router / TopK}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{block}{原生做了什么}
+\begin{itemize}
+  \item \src{official: fused_moe.py:159-180}
+  \item \src{select_experts(hidden_states=x, router_logits=..., top_k=...)}
+  \item 输出 \src{topk_weights, topk_ids}，即每个 token 选中的 expert 与权重。
+  \item 这一步只定义语义上的路由结果。
+\end{itemize}
+\end{block}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{offload 需要的额外状态}
+\begin{itemize}
+  \item 当前 layer 的 expert residency。
+  \item \src{expert_id -> slot_id} 映射。
+  \item miss expert 的 host 位置、copy 事件、deadline。
+  \item 按 token count 判断 miss 影响面。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.49\textwidth}
+\begin{block}{原生缺口}
+\begin{itemize}
+  \item 官方 \src{MoEFusedExpertsInput} 没有 offload 字段。
+  \item \src{topk_ids} 直接进入 dispatch，不经过 residency manager。
+  \item \src{enable_return_routed_experts} 只是捕获路由结果，不负责搬权重。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}[t]{Step 2: Token Dispatch / Group List}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{block}{源码证据}
+\begin{itemize}
+  \item \src{official: moe_comm_method.py:138-153}
+  \item 先记录 NPU event，再把 \src{topk_ids} 交给 \src{token_dispatcher.token_dispatch(...)}。
+  \item \src{official: token_dispatcher.py:230-260} 在 MC2 路径调用 \src{npu_moe_distribute_dispatch}，返回 \src{expand_x} 和 \src{expert_token_nums/group_list}。
+\end{itemize}
+\end{block}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{dispatch 的边界}
+\begin{itemize}
+  \item 它处理 token 到 expert 的排列、通信和计数。
+  \item 它不检查 expert 权重是否在 NPU。
+  \item 它不产生 host-to-HBM copy task。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.49\textwidth}
+\begin{block}{为什么不能在这里自然补上}
+\begin{itemize}
+  \item dispatch 输出的是激活和 token metadata，不是权重对象。
+  \item 搬权重必须知道后续 GMM 的权重 layout 与 slot 张量。
+  \item 如果这里只按 \src{topk_ids} 异步搬，MLP 前仍缺少 ``等待哪些 slot'' 的执行协议。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}[t]{Step 3: Expert MLP / Grouped Matmul}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.48\textwidth}
+\begin{block}{源码证据}
+\begin{itemize}
+  \item \src{official: moe_mlp.py:362-389}
+  \item 非量化路径直接调用两次 \src{torch_npu.npu_grouped_matmul}。
+  \item \src{x=[hidden_states]} 与 \src{weight=[w1]/[w2]} 同时进入 NPU op。
+  \item 量化路径也在 \src{moe_mlp.py:176-217, 298-340} 消费 \src{w1/w2}。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.50\textwidth}
+\begin{block}{根因}
+\begin{itemize}
+  \item grouped matmul 是真正的 expert 权重消费点。
+  \item 输入激活在 NPU；权重如果还在 CPU，会出现 device mismatch。
+  \item grouped op 按 \src{group_list} 批量算 expert，不接受 ``这个 expert 先去加载'' 的回调。
+  \item 原生路径没有把 miss expert 拆成 phase 0/phase 1。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.35em}
+\tagbox{block body}{\textbf{实测断点：} 通用 prefetch expert-only 已能把 resident weight 从约 56.9GB 降到约 43.4GB，但 profile/generate 前在 \src{npu_grouped_matmul} 处报 CPU/NPU tensor mixing。}
+\end{frame}
+
+\begin{frame}[t]{Step 4: Combine / 输出还原}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{block}{源码证据}
+\begin{itemize}
+  \item \src{official: moe_comm_method.py:155-171}
+  \item MLP 完成后记录 \src{before_combine_evt}。
+  \item \src{token_dispatcher.token_combine(hidden_states=mlp_output, combine_metadata=...)}
+  \item 返回 \src{FusedExpertsResult(routed_out=..., expert_tokens=group_list)}
+\end{itemize}
+\end{block}
+
+\begin{block}{为什么 combine 阶段救不了 offload}
+\begin{itemize}
+  \item combine 只消费 MLP 输出，语义上已经过了 expert 计算点。
+  \item 如果某些 expert 权重未加载，MLP 根本无法完整产生对应 token 输出。
+  \item offload 的等待、补算、分阶段执行必须发生在 MLP 前或 MLP 内部，而不是 combine 后。
+\end{itemize}
+\end{block}
+\end{frame}
+
+\begin{frame}[t]{原生支持了什么，但不是 Expert Offload}
+\footnotesize
+\vspace{-0.45em}
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\linewidth}{L{0.22\linewidth}L{0.31\linewidth}Y}
+\toprule
+\textbf{能力} & \textbf{证据} & \textbf{为什么不是 MoE expert offload} \\
+\midrule
+MoE 推理 / EP / EPLB &
+\src{fused_moe.py}、\src{token_dispatcher.py}、release notes 多处 MoE/EP 支持 &
+假设 local experts 已经放在当前 rank/NPU 上；解决 routing、dispatch、combine 和负载均衡，不解决 CPU expert store 与 slot miss。 \\
+\midrule
+KV Cache CPU Offload &
+官方文档说明 offload inactive KV cache blocks，并用 \src{NPUOffloadingSpec} 做 NPU/CPU 异步传输 &
+对象是 KV cache block，不是模型参数；触发条件是 prefix/cache block 命中缺失，不是 routed expert 集合。 \\
+\midrule
+Weight Prefetch &
+官方文档说明把权重预加载到 L2/cache，利用 MoE gating top-k、RMSNorm、SwiGLU 等 vector 计算隐藏 CMO &
+前提是权重已经 device-resident；代码中取 \src{mlp.experts.w13_weight} 做 cache prefetch，不是 host-to-HBM 加载。 \\
+\bottomrule
+\end{tabularx}
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.0}
+
+\vspace{0.35em}
+\tagbox{block body}{\textbf{外部文档证据：} Weight Prefetch Guide 明确写的是预加载到 L2 cache；KV Cache CPU Offload Guide 明确写的是 KV cache blocks。两者都没有 expert 权重驻留/替换/slot 语义。}
+\end{frame}
+
+\begin{frame}[t]{vLLM 通用 Weight Offload 也接不上}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{配置层证据}
+\begin{itemize}
+  \item \src{vllm/config/offload.py:12-89}
+  \item backend 只有 \src{auto, uva, prefetch}。
+  \item \src{prefetch} 配置是 group size、group 内 offload 数、prefetch step 和参数白名单。
+  \item 文档/注释写的是 group-based layer offloading。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.49\textwidth}
+\begin{block}{执行层证据}
+\begin{itemize}
+  \item \src{prefetch.py:175-205} 按 module index 选择层。
+  \item \src{prefetch.py:213-233} hook module forward，插入 wait/start prefetch。
+  \item \src{prefetch.py:338-365} 分配 static buffer pool 后按 layer 顺序预取。
+  \item 没有 \src{topk_ids}、expert token count、slot miss、replacement policy。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.25em}
+\tagbox{block body}{\textbf{根因：} 通用 offload 的最小调度单元是 ``层/参数''；MoE expert offload 的最小调度单元是 ``某 layer 的某 expert working set''。调度粒度错了，哪怕省了 HBM，也无法保证 grouped matmul 前 expert 已就绪。}
+\end{frame}
+
+\begin{frame}[t]{UVA 路径为什么不成立}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{block}{源码证据}
+\begin{itemize}
+  \item \src{vllm/model_executor/offloader/uva.py:21-35} 描述为 UVA zero-copy。
+  \item \src{uva.py:97-105} 将参数放 CPU，再调用 \src{get_accelerator_view_from_cpu_tensor(cpu_data)}。
+  \item \src{vllm/utils/torch_utils.py:759-773} 对不支持的平台抛出 ``not supported in: <device>''。
+\end{itemize}
+\end{block}
+
+\begin{block}{实测证据}
+\begin{itemize}
+  \item \src{docs/sew-offload/05-existing-offload-baseline.md}
+  \item Qwen3-30B-A3B 单 910B3，UVA expert offload 在加载前失败。
+  \item 报错：\src{get_accelerator_view_from_cpu_tensor is currently not supported in: npu}
+\end{itemize}
+\end{block}
+
+\tagbox{block body}{\textbf{结论：} UVA 不是 Ascend MoE expert offload 的可用 baseline；即使可用，也会让 NPU grouped matmul 跨 CPU memory 取权重，和 Ascend 高性能执行路径不匹配。}
+\end{frame}
+
+\begin{frame}[t]{Prefetch 路径为什么仍然会断}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{CUDA-shaped}
+\begin{itemize}
+  \item \src{prefetch.py:156} 使用 \src{torch.cuda.Stream()}。
+  \item \src{prefetch.py:256-273} 使用 \src{torch.cuda.is_current_stream_capturing()}、\src{current_stream().wait_event}。
+  \item \src{prefetch.py:517-543} 用 CUDA event/stream 管理 copy。
+  \item Ascend 生产路径应显式使用 \src{torch.npu} stream/event。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.49\textwidth}
+\begin{block}{MoE-unaware}
+\begin{itemize}
+  \item 只知道层序号和参数名 whitelist。
+  \item 不知道本轮 routed expert id。
+  \item 不知道哪些 expert resident、哪些 miss。
+  \item 不知道 \src{group_list} 中每个 expert 的 token 数和截止时间。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.25em}
+\tagbox{block body}{\textbf{症状：} generic prefetch 可以降低常驻权重，但没有把 \src{w13_weight/w2_weight} 替换成 ``已就绪的 NPU slot-backed weights''，所以到 MLP GMM 边界仍会暴露 CPU tensor 或错误同步。}
+\end{frame}
+
+\begin{frame}[t]{实测基线：能省显存，但不能生成}
+\footnotesize
+\vspace{-0.4em}
+
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.14}
+\begin{tabularx}{\linewidth}{L{0.24\linewidth}L{0.20\linewidth}L{0.22\linewidth}Y}
+\toprule
+\textbf{Case} & \textbf{resident weight log} & \textbf{结果} & \textbf{关键信号} \\
+\midrule
+No offload &
+56.9001 GB &
+成功 &
+Qwen3-30B-A3B 在 64GB 910B3 上仅小上下文勉强可跑，峰值约 63.9GB。 \\
+\midrule
+UVA expert offload &
+未进入加载 &
+失败 &
+UVA accelerator view 不支持 \src{npu}。 \\
+\midrule
+Prefetch expert-only &
+43.4001 GB &
+失败 &
+显存下降约 13.5GB，但 \src{npu_grouped_matmul} 看到 weight 在 CPU、activation 在 NPU。 \\
+\bottomrule
+\end{tabularx}
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.0}
+
+\vspace{0.35em}
+\tagbox{block body}{\textbf{解释：} 这不是 ``不需要 offload''，恰恰相反：显存节省真实存在；问题是原生/通用 offload 没有 MoE execution boundary 的专家驻留协议。}
+\end{frame}
+
+\begin{frame}[t]{为什么必须在 MoE Boundary 解决}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{block}{这个 boundary 能看到的信息}
+\begin{itemize}
+  \item \src{topk_ids/topk_weights}：本轮 routed experts。
+  \item \src{layer_id}：当前 layer deadline。
+  \item \src{w13_weight/w2_weight}：后处理后的 expert 权重对象。
+  \item \src{expert_map/log2phy/global_redundant_expert_num}：EP/EPLB 映射。
+  \item \src{moe_comm_type}：AllGather、MC2、Fused MC2 等通信路径。
+\end{itemize}
+\end{block}
+
+\begin{block}{在这个 boundary 之前/之后都不合适}
+\begin{itemize}
+  \item 之前：不知道当前 routed working set，也无法精确判断 miss。
+  \item 之后：MLP 已经要求权重就绪，combine 阶段太晚。
+  \item 因此 offload runtime 必须在 \src{select_experts -> build_fused_experts_input -> fused_experts} 之间介入。
+\end{itemize}
+\end{block}
+\end{frame}
+
+\begin{frame}[t]{图模式与稳定地址的额外约束}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{官方/原生路径的隐含假设}
+\begin{itemize}
+  \item 权重 tensor 地址和 layout 稳定。
+  \item grouped matmul 的输入签名稳定。
+  \item dispatch/MLP/combine 可以被事件和图执行串起来。
+  \item \src{process_weights_after_loading} 后权重就地参与后续执行。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.49\textwidth}
+\begin{block}{动态 expert cache 会破坏什么}
+\begin{itemize}
+  \item miss 时临时分配 tensor，地址不稳定。
+  \item 每轮 expert 集合变化，kernel 输入权重对象变化。
+  \item CPU 决策路径无法被图捕获。
+  \item 需要固定 slots，让图只看到 slot tensor，运行时只改 \src{expert_id -> slot_id}。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.25em}
+\tagbox{block body}{\textbf{research 分支旁证：} README 明确说 MoE offload 原型需要 \src{--enforce-eager}，因为 graph capture 不能记录 offload scheduler 的 runtime CPU decision path。}
+\end{frame}
+
+\begin{frame}[t]{Research 分支为什么是 ``补缺口'' 的证据}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{block}{新增内容与官方 main 的差异}
+\begin{itemize}
+  \item \src{research README: --ascend-moe-offload-gb 14}
+  \item \src{research fused_moe.py:222-335} 增加 \src{moe_offload_runtime.trace_routing}、fixed slot plan、offload params。
+  \item \src{research moe_runtime_args.py:149-189} 增加 \src{MoEOffloadParams}。
+  \item 官方 main 对应文件没有这些字段，\src{MoEFusedExpertsInput} 只包含 hidden/topk/weights/routing/quant。
+\end{itemize}
+\end{block}
+
+\begin{block}{原型自身暴露的未覆盖面}
+\begin{itemize}
+  \item fixed slots 当前限制 AllGather。
+  \item 不支持 \src{expert_map}、redundant experts、expert bias、zero expert path。
+  \item 当前走 eager path。
+\end{itemize}
+\end{block}
+
+\tagbox{block body}{\textbf{含义：} 如果官方原生已经支持 MoE expert offload，就不需要在 research 分支额外引入 runtime、slot 注册、routing trace 和 offload args。}
+\end{frame}
+
+\begin{frame}[t]{按执行步骤汇总卡点}
+\scriptsize
+\vspace{-0.45em}
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\linewidth}{L{0.15\linewidth}L{0.23\linewidth}L{0.27\linewidth}Y}
+\toprule
+\textbf{步骤} & \textbf{原生证据} & \textbf{缺失能力} & \textbf{根因} \\
+\midrule
+权重后处理 &
+\src{fused_moe.py:107-127} &
+CPU expert store + NPU fixed slots &
+后处理默认全量 expert tensor 已在设备侧；offload 必须保存后处理 layout。 \\
+\midrule
+Router/TopK &
+\src{fused_moe.py:159-180} &
+residency lookup、miss set、deadline &
+\src{topk_ids} 只表示语义路由，不绑定设备驻留。 \\
+\midrule
+Dispatch &
+\src{moe_comm_method.py:138-153}；\src{token_dispatcher.py:230-260} &
+copy task 生成、slot wait 协议 &
+dispatch 只处理 token permutation/communication/group list，不处理权重。 \\
+\midrule
+MLP GMM &
+\src{moe_mlp.py:362-389} &
+slot-backed \src{w1/w2}、phase execution &
+\src{npu_grouped_matmul} 一次性消费权重；CPU/NPU 混用直接失败。 \\
+\midrule
+Combine &
+\src{moe_comm_method.py:155-171} &
+无 &
+combine 太晚，只还原 MLP 输出，无法补救未计算的 expert。 \\
+\midrule
+通用 offload &
+\src{offload.py:12-89}；\src{prefetch.py:175-233} &
+expert-aware scheduling &
+粒度是 layer/parameter，不是 routed expert working set。 \\
+\bottomrule
+\end{tabularx}
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.0}
+\end{frame}
+
+\begin{frame}[t]{要变成原生支持，需要补哪些件}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{数据面}
+\begin{itemize}
+  \item 后处理后的 CPU expert store。
+  \item 每层固定 NPU expert slots。
+  \item slot tensor 保持 dtype、shape、stride、NZ/ND layout。
+  \item \src{expert_id -> slot_id} 映射与版本号。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.49\textwidth}
+\begin{block}{控制面}
+\begin{itemize}
+  \item 从 \src{topk_ids/group_list} 得到 miss set 与 token impact。
+  \item native \src{torch.npu} stream/event H2D 调度。
+  \item deadline-aware prefetch 与 replacement。
+  \item hit-first phased execution 或同步 slot prototype。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.25em}
+\tagbox{block body}{\textbf{最小正确性要求：} grouped matmul 调用点看到的永远是 NPU-resident slot weights，而不是 CPU 参数、临时 device tensor 或 layout 未后处理的权重。}
+\end{frame}
+
+\begin{frame}[t]{证据索引}
+\scriptsize
+\vspace{-0.45em}
+\begin{block}{本地源码}
+\begin{itemize}
+  \item 官方参考：\src{/workspace/reference-repos/vllm-ascend@7c4ec8e5 main}
+  \item 当前研究分支：\src{/workspace/vllm-ascend-hust@a02ed84a1 research}
+  \item vLLM-HUST：\src{/workspace/vllm-hust}
+  \item MoE 主链路：\src{vllm_ascend/ops/fused_moe/fused_moe.py}、\src{moe_comm_method.py}、\src{token_dispatcher.py}、\src{moe_mlp.py}
+  \item 通用 offload：\src{vllm/config/offload.py}、\src{vllm/model_executor/offloader/prefetch.py}、\src{uva.py}
+  \item 实测记录：\src{docs/sew-offload/05-existing-offload-baseline.md}、\src{08-ascend-moe-offload-architecture.md}
+\end{itemize}
+\end{block}
+
+\begin{block}{官方文档}
+\begin{itemize}
+  \item vLLM-Ascend Weight Prefetch Guide：\url{https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/weight_prefetch.html}
+  \item vLLM-Ascend KV Cache CPU Offload Guide：\url{https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_cpu_offload.html}
+  \item vLLM Fused MoE Modular Kernel：\url{https://docs.vllm.ai/en/latest/design/fused_moe_modular_kernel/}
+\end{itemize}
+\end{block}
+\end{frame}
+
+\end{document}
