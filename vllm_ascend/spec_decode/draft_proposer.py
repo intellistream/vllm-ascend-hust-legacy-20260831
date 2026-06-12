@@ -1,4 +1,6 @@
 import torch
+from torch import nn
+from typing_extensions import override
 from vllm.config import VllmConfig
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 

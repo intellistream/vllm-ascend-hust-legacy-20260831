@@ -928,18 +928,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         torch.npu.synchronize()
         _t1 = time.time()
 
-        if not hasattr(self, "_draft_forward_count"):
-            self._draft_forward_count = 0
-
-        self._draft_forward_count += 1
-
-        if self._draft_forward_count % 50 == 0:
-            print(
-                f"[DRAFT_FORWARD] "
-                f"{(_t1 - _t0)*1000:.3f} ms "
-                f"tokens={num_input_tokens} "
-                f"batch={batch_size}"
-            )
         if not self.model_returns_tuple():
             last_hidden_states = ret_hidden_states
             hidden_states = last_hidden_states
