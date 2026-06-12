@@ -5,14 +5,25 @@ from collections.abc import Sequence
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (
+    BlockHashList,
+    BlockHashListWithBlockSize,
+    KVCacheBlock,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SingleTypeKVCacheManager,
-    spec_manager_map,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.request import Request
+
+from vllm_ascend.utils import vllm_version_is
 
 
 class CompressAttentionManager(FullAttentionManager):
@@ -143,7 +154,12 @@ class CompressAttentionManager(FullAttentionManager):
             req_blocks.extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+    ) -> None:
         """
         Cache the blocks for the request.
 
@@ -151,10 +167,23 @@ class CompressAttentionManager(FullAttentionManager):
             request: The request.
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
+            retention_interval: Prefix-cache retention interval.
         """
-        num_tokens //= self.compress_ratio
+        num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
+        num_full_blocks = num_tokens // (self.block_size * self.compress_ratio)
 
-        return super().cache_blocks(request, num_tokens)
+        if num_cached_blocks >= num_full_blocks:
+            return
+
+        self.block_pool.cache_full_blocks(
+            request=request,
+            blocks=self.req_to_blocks[request.request_id],
+            num_cached_blocks=num_cached_blocks,
+            num_full_blocks=num_full_blocks,
+            block_size=self.block_size * self.compress_ratio,
+            kv_cache_group_id=self.kv_cache_group_id,
+        )
+        self.num_cached_block[request.request_id] = num_full_blocks
 
     @classmethod
     def find_longest_cache_hit(
@@ -164,11 +193,14 @@ class CompressAttentionManager(FullAttentionManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        use_eagle: bool = False,
+        drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...]:
+        # vLLM B renamed ``use_eagle`` to ``drop_eagle_block``; accept both.
+        eagle_drop = use_eagle if vllm_version_is("0.21.0") else drop_eagle_block
         # assert isinstance(
         #     kv_cache_spec, Compress4AttentionSpec | Compress128AttentionSpec | C4IndexerSpec
         # ), (
@@ -178,8 +210,10 @@ class CompressAttentionManager(FullAttentionManager):
         block_size = kv_cache_spec.block_size
         if dcp_world_size * pcp_world_size > 1:
             block_size *= dcp_world_size * pcp_world_size
-        max_num_blocks = max_length // block_size
-        for block_hash in itertools.islice(block_hashes, max_num_blocks):
+        logical_block_size = block_size * kv_cache_spec.compress_ratio
+        logical_block_hashes = BlockHashListWithBlockSize(block_hashes, block_size, logical_block_size)
+        max_num_blocks = max_length // logical_block_size
+        for block_hash in itertools.islice(logical_block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
@@ -188,25 +222,72 @@ class CompressAttentionManager(FullAttentionManager):
                     computed.append(cached)
             else:
                 break
-        if use_eagle and computed_blocks[0]:
+        if eagle_drop and computed_blocks[0]:
             # Need to drop the last matched block if eagle is enabled.
             for computed in computed_blocks:
                 computed.pop()
 
-        # NOTE: Div the compress ratio when finding the longest cache hit token length.
-        alignment_tokens = cdiv(alignment_tokens, kv_cache_spec.compress_ratio)
         while (
-            block_size != alignment_tokens  # Faster for common case.
-            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+            logical_block_size != alignment_tokens  # Faster for common case.
+            and len(computed_blocks[0]) * logical_block_size % alignment_tokens != 0
         ):
             for computed in computed_blocks:
                 computed.pop()
         return computed_blocks
 
 
-def get_manager_for_kv_cache_spec(kv_cache_spec: KVCacheSpec, **kwargs) -> SingleTypeKVCacheManager:
-    manager_class = spec_manager_map[type(kv_cache_spec)]
+def get_manager_for_kv_cache_spec(
+    kv_cache_spec: KVCacheSpec,
+    max_num_batched_tokens: int | None = None,
+    max_model_len: int | None = None,
+    **kwargs,
+) -> SingleTypeKVCacheManager:
+    """Build the per-spec KV cache manager.
+
+    For DSv4 / DSA path (``MLAAttentionSpec`` with ``compress_ratio>1``), align
+    the runtime admission gate with the startup pool-sizing bound the same way
+    vLLM PR #40946 does for ``SlidingWindowSpec`` / ``ChunkedLocalAttentionSpec``.
+    Without this cap, an admitted request can demand more blocks than the pool
+    was sized to back, and ``allocate_slots`` silently returns ``None`` from
+    the ``full_sequence_must_fit`` branch, leaving long-input requests stuck
+    in the waiting queue (see vLLM issue #40863, observed on DSv4 + MTP with
+    cc>=1 and prompt>=32K).
+
+    The compressed-MLA peak per request is bounded by
+    ``cdiv(max_model_len // compress_ratio, block_size)`` (it does not shrink
+    via recycling like SWA, but neither does it ever exceed this). Capping at
+    this value matches the pool sizer and makes admission consistent with the
+    block budget actually held.
+    """
+    if vllm_version_is("0.21.0"):
+        from vllm.v1.core.single_type_kv_cache_manager import spec_manager_map  # type: ignore[import-not-found]
+
+        manager_class = spec_manager_map[type(kv_cache_spec)]
+    else:
+        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
+
+        manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+        assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
     if isinstance(kv_cache_spec, MLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
+        if max_model_len is not None:
+            # Compressed-MLA peak in blocks: ceil(max_model_len/compress/block).
+            compress_ratio = kv_cache_spec.compress_ratio
+            block_size = kv_cache_spec.block_size
+            max_compressed_tokens = max_model_len // compress_ratio
+            kwargs["max_admission_blocks_per_request"] = cdiv(max_compressed_tokens, block_size) + 1
+    elif isinstance(kv_cache_spec, (SlidingWindowSpec, ChunkedLocalAttentionSpec)):
+        # Replicate the upstream PR #40946 cap setting for recycling specs.
+        # We override the vLLM factory above, so the upstream block that does
+        # this lives in dead code (never reached); without re-applying it here
+        # SlidingWindowMLASpec / ChunkedLocalAttentionSpec groups have no cap
+        # and ``full_sequence_must_fit`` admission reserves the full
+        # ``max_model_len`` worth of blocks per request, exhausting the pool
+        # at cc>=2 on DSv4 (see vLLM issue #40863).
+        if max_num_batched_tokens is not None and max_model_len is not None:
+            kwargs["max_admission_blocks_per_request"] = kv_cache_spec.max_admission_blocks_per_request(
+                max_num_batched_tokens=max_num_batched_tokens,
+                max_model_len=max_model_len,
+            )
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager
