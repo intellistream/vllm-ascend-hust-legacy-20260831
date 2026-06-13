@@ -444,6 +444,89 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         assert output.shape == (10, 8, 64)
 
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
+    def test_builder_mixed_batch_metadata_drives_attention_forward(
+        self,
+        mock_reshape_and_cache,
+        mock_fused_infer_attention_score,
+        mock_get_forward_context,
+    ):
+        original_pin_memory = torch.Tensor.pin_memory
+        torch.Tensor.pin_memory = lambda tensor: tensor
+        try:
+            self.mock_vllm_config.speculative_config = None
+            self.mock_vllm_config.kv_transfer_config = None
+            self.mock_vllm_config.quant_config = None
+            self.mock_vllm_config.model_config.max_model_len = 128
+            self.mock_vllm_config.model_config.hf_text_config.sliding_window = None
+            self.mock_vllm_config.model_config.runner_type = "generate"
+            self.mock_vllm_config.cache_config.block_size = 128
+            self.mock_vllm_config.compilation_config.cudagraph_mode = None
+            self.mock_vllm_config.scheduler_config.enable_chunked_prefill = False
+            self.mock_vllm_config.scheduler_config.max_num_seqs = 8
+            self.mock_vllm_config.scheduler_config.decode_max_num_seqs = 8
+            mock_get_forward_context.return_value = MagicMock(capturing=False)
+
+            self.impl.vllm_config = self.mock_vllm_config
+            self.impl.is_kv_producer = False
+            self.impl.enable_hamming_sparse = False
+
+            builder = AscendAttentionMetadataBuilder(
+                None,
+                None,
+                self.mock_vllm_config,
+                "cpu",
+            )
+
+            common_attn_metadata = AscendCommonAttentionMetadata(
+                query_start_loc=torch.tensor([0, 1, 2, 6], dtype=torch.int32),
+                query_start_loc_cpu=torch.tensor([0, 1, 2, 6], dtype=torch.int32),
+                seq_lens=torch.tensor([8, 8, 12], dtype=torch.int32),
+                seq_lens_cpu=torch.tensor([8, 8, 12], dtype=torch.int32),
+                num_reqs=3,
+                num_actual_tokens=6,
+                max_query_len=4,
+                decode_token_per_req=torch.ones(3, dtype=torch.int32),
+                block_table_tensor=torch.zeros((3, 1), dtype=torch.int32),
+                slot_mapping=torch.arange(6, dtype=torch.int32),
+                actual_seq_lengths_q=torch.arange(6, dtype=torch.int32),
+                positions=torch.arange(6, dtype=torch.int32),
+                attn_state=AscendAttentionState.ChunkedPrefill,
+                num_computed_tokens_cpu=None,
+                max_seq_len=12,
+            )
+
+            attn_metadata = builder.build(0, common_attn_metadata)
+
+            assert attn_metadata.num_decodes == 2
+            assert attn_metadata.num_prefills == 1
+            assert attn_metadata.num_decode_tokens == 2
+            assert attn_metadata.actual_seq_lengths_q == [1, 2, 6]
+
+            query = torch.randn(6, 8, 64)
+            key = torch.randn(6, 8, 64)
+            value = torch.randn(6, 8, 64)
+            kv_cache = torch.empty(2, 1, 128, 8, 64)
+            output = torch.empty_like(query)
+            expected_output = torch.full_like(query, 3.0)
+            layer = self.layer_no_quant
+            mock_fused_infer_attention_score.return_value = (expected_output, torch.empty(1))
+
+            result = self.impl.forward(layer, query, key, value, kv_cache, attn_metadata, output)
+
+            mock_reshape_and_cache.assert_called_once()
+            mock_fused_infer_attention_score.assert_called_once()
+            call_kwargs = mock_fused_infer_attention_score.call_args.kwargs
+            assert call_kwargs["query"].shape == (6, 8, 64)
+            assert call_kwargs["actual_seq_lengths"] == [1, 2, 6]
+            assert call_kwargs["actual_seq_lengths_kv"] == [8, 8, 12]
+            assert call_kwargs["block_table"].shape == (3, 1)
+            assert torch.equal(result, expected_output)
+        finally:
+            torch.Tensor.pin_memory = original_pin_memory
+
     def test_get_kvcomp_params_early_exit(self):
         """
         Test that get_kvcomp_decode_params returns original values
