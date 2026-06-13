@@ -360,17 +360,10 @@ def _split_decode_prefill_boundary(
 
     first_prefill = _first_true_index(is_prefill)
     num_reqs_t = first_prefill.new_tensor(num_reqs)
-    num_tokens_t = torch.tensor(
-        num_tokens, dtype=torch.int64, device=query_start_loc.device
-    )
     num_decodes = first_prefill
     num_prefills = num_reqs_t - num_decodes
-    num_decode_tokens = torch.where(
-        first_prefill < num_reqs_t,
-        query_start_loc[first_prefill].to(torch.int64),
-        num_tokens_t,
-    )
-    num_prefill_tokens = num_tokens_t - num_decode_tokens
+    num_decode_tokens = query_start_loc[first_prefill].to(torch.int64)
+    num_prefill_tokens = first_prefill.new_tensor(num_tokens) - num_decode_tokens
 
     result = torch.stack(
         [
