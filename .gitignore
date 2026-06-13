@@ -12,6 +12,9 @@ vllm_ascend_hust.egg-info/
 actionlint
 shellcheck*/
 
+# Local agent/brainstorming state
+.superpowers/
+
 
 # Python gitignore
 ## Adapted from:

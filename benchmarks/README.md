@@ -142,6 +142,65 @@ Once the script completes, you can find the results in the benchmarks/results fo
 
 These files contain detailed benchmarking results for further analysis.
 
+#### Generate MoE offload dashboard
+
+For research-only MoE offload comparisons, place the non-offloading upper-bound
+result and the `--ascend-moe-offload-gb 14` baseline result in
+`benchmarks/results/`, then generate a static HTML dashboard:
+
+```shell
+python3 benchmarks/scripts/generate_moe_offload_dashboard.py \
+  --results-dir benchmarks/results \
+  --upper-label non-offload \
+  --baseline-label offload-14GB
+```
+
+The script reads `benchmarks/results/*.json` and writes
+`benchmarks/results/moe_offload_dashboard.html` by default. It compares
+throughput, TTFT, and TPOT with the non-offloading run treated as the upper
+bound and the offload 14GB run treated as the baseline.
+
+#### Profile Qwen3 MoE prefill and decode with Ascend PyTorch Profiler
+
+For single-card non-offloading Qwen3-30B-A3B analysis, start vLLM with the
+torch profiler enabled and do not pass any MoE offload argument:
+
+```shell
+vllm serve /data/shared-models/Qwen3-30B-A3B \
+  --served-model-name qwen3-30b-a3b \
+  --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}'
+```
+
+Then run the three-window profiling suite. It opens and closes Ascend PyTorch
+Profiler around a mixed ShareGPT window, a long-prefill window, and a
+long-decode window, calls `torch_npu.profiler.profiler.analyse()`, and writes
+phase-specific optimization reports.
+
+```shell
+python3 benchmarks/scripts/run_ascend_moe_profile_suite.py \
+  --base-url http://127.0.0.1:8005 \
+  --profile-url http://127.0.0.1:8005 \
+  --profiler-dir ./vllm_profile \
+  --output-dir benchmarks/results/qwen3_30b_a3b_nonoffload_ascend_pt
+```
+
+The main outputs are:
+
+- `profile_suite_manifest.json`: profiler windows, benchmark commands, and generated profiler directories
+- `ascend_moe_profile_report.md`: TTFT/TPOT-oriented prefill and decode optimization notes
+- `ascend_moe_profile_report.json`: machine-readable hotspot and recommendation data
+
+If profiler output already exists, analyze it directly:
+
+```shell
+python3 benchmarks/scripts/analyze_ascend_moe_profile.py \
+  --phase mixed:/path/to/mixed/ASCEND_PROFILER_OUTPUT:/path/to/mixed.json \
+  --phase prefill:/path/to/prefill/ASCEND_PROFILER_OUTPUT:/path/to/prefill.json \
+  --phase decode:/path/to/decode/ASCEND_PROFILER_OUTPUT:/path/to/decode.json \
+  --markdown-output /tmp/ascend_moe_profile_report.md \
+  --json-output /tmp/ascend_moe_profile_report.json
+```
+
 #### Use benchmark cli
 
 For more flexible and customized use, benchmark cli is also provided to run online/offline benchmarks

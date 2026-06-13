@@ -1,0 +1,17 @@
+{
+  "folders": [
+    {
+      "name": "vllm-ascend-hust",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "git.openRepositoryInParentFolders": "never",
+    "git.autoRepositoryDetection": "openEditors",
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/.pytest_cache": true,
+      "**/artifacts": false
+    }
+  }
+}
