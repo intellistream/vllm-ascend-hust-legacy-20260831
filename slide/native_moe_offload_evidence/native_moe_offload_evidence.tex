@@ -1,0 +1,481 @@
+\documentclass[aspectratio=169,10pt]{beamer}
+
+\usetheme{Madrid}
+\usecolortheme{default}
+
+\usepackage[UTF8,fontset=none]{ctex}
+\setCJKmainfont{Noto Serif CJK SC}
+\setCJKsansfont{Noto Sans CJK SC}
+\setCJKmonofont{Noto Sans Mono CJK SC}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{hyperref}
+\usetikzlibrary{positioning,arrows.meta,fit,calc}
+
+\definecolor{MainBlue}{RGB}{40,82,145}
+\definecolor{AccentRed}{RGB}{178,56,46}
+\definecolor{SoftGray}{RGB}{245,247,250}
+\definecolor{DarkGray}{RGB}{70,76,86}
+\definecolor{SoftGreen}{RGB}{232,246,238}
+\definecolor{SoftYellow}{RGB}{255,247,222}
+\definecolor{SoftRed}{RGB}{252,235,232}
+
+\setbeamercolor{title}{fg=white}
+\setbeamercolor{frametitle}{fg=white,bg=MainBlue}
+\setbeamercolor{block title}{bg=MainBlue,fg=white}
+\setbeamercolor{block body}{bg=SoftGray,fg=black}
+\setbeamercolor{alerted text}{fg=AccentRed}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}{}
+\setbeamertemplate{headline}{}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\keypoint}[1]{\textbf{\textcolor{AccentRed}{#1}}}
+\newcommand{\bluepoint}[1]{\textbf{\textcolor{MainBlue}{#1}}}
+\newcommand{\src}[1]{\texttt{\scriptsize\detokenize{#1}}}
+\newcommand{\tagbox}[2]{\begin{beamercolorbox}[wd=\linewidth,sep=0.45em,rounded=true]{#1}\footnotesize #2\end{beamercolorbox}}
+
+\title{vLLM-Ascend 原生不支持 MoE 专家权重卸载推理}
+\subtitle{按 MoE 推理流程梳理证据与根因}
+\author{}
+\date{}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+  \vspace{-1.1em}
+  % \begin{beamercolorbox}[wd=\linewidth,sep=0.75em,rounded=true]{block body}
+  % \centering
+  % \keypoint{一句话结论：} 原生 vLLM-Ascend 能跑 MoE，也有专家并行、负载均衡、KV 缓存卸载和权重预取；但它没有“根据本轮路由结果，把缺失专家权重从 CPU 搬到 NPU 固定槽位，再交给分组矩阵乘执行”的完整机制。
+  % \end{beamercolorbox}
+\end{frame}
+
+% \begin{frame}[t]{这份材料证明什么}
+% \footnotesize
+% \vspace{-0.35em}
+
+% \begin{block}{证明对象}
+% \begin{itemize}
+%   \item “原生”指官方参考仓库 \src{/workspace/reference-repos/vllm-ascend} 的 \src{main} 分支，检查点为 \src{7c4ec8e5}。
+%   \item 当前本地 \src{research} 分支已经有 MoE 卸载原型；它说明这个能力正在被补上，但不能反过来证明官方原生已经支持。
+%   \item 这里讨论的是 \keypoint{MoE 专家权重卸载}，不是 KV 缓存卸载，也不是把已经在 NPU 上的权重预取到 L2 缓存。
+% \end{itemize}
+% \end{block}
+
+% \begin{block}{判断标准}
+% \begin{itemize}
+%   \item 能看到本轮路由选中的专家。
+%   \item 能判断这些专家权重是否已经在 NPU 上。
+%   \item 能把缺失专家从 CPU 侧搬入 NPU 侧稳定槽位。
+%   \item 能保证分组矩阵乘拿到的权重已经在 NPU 上，并且形状、布局和地址稳定。
+% \end{itemize}
+% \end{block}
+% \end{frame}
+
+\begin{frame}[t]{MoE 推理的关键流程}
+\footnotesize
+\vspace{-0.4em}
+\begin{center}
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+  node distance=0.55cm,
+  stage/.style={draw=MainBlue, fill=SoftGray, rounded corners=2pt, minimum width=2.72cm, minimum height=0.9cm, align=center, font=\footnotesize},
+  miss/.style={draw=AccentRed, fill=SoftRed, rounded corners=2pt, minimum width=2.9cm, minimum height=0.85cm, align=center, font=\scriptsize},
+  arrow/.style={-{Latex[length=2.2mm]}, thick, color=MainBlue}
+]
+\node[stage] (load) {权重加载与后处理\\\src{process_weights_after_loading}};
+\node[stage, right=of load] (router) {路由选专家\\\src{select_experts}};
+\node[stage, right=of router] (dispatch) {按专家重排词元\\\src{token_dispatch}};
+\node[stage, right=of dispatch] (mlp) {专家 MLP 计算\\分组矩阵乘};
+\node[stage, right=of mlp] (combine) {结果还原\\\src{token_combine}};
+\draw[arrow] (load) -- (router);
+\draw[arrow] (router) -- (dispatch);
+\draw[arrow] (dispatch) -- (mlp);
+\draw[arrow] (mlp) -- (combine);
+
+\node[miss, below=0.85cm of load] {默认专家权重\\已全量就绪};
+\node[miss, below=0.85cm of router] {只给专家编号\\不查是否驻留};
+\node[miss, below=0.85cm of dispatch] {只搬词元\\不搬专家权重};
+\node[miss, below=0.85cm of mlp] {真正消费权重\\必须已在 NPU};
+\node[miss, below=0.85cm of combine] {已经太晚\\无法补救缺失权重};
+\end{tikzpicture}}
+\end{center}
+
+\vspace{-0.2em}
+\tagbox{block body}{\textbf{核心断点：} 原生流程在进入专家 MLP 之前没有“专家权重驻留状态机”。路由和重排阶段知道要算哪些专家，却没有负责把缺失专家权重从 CPU 搬到 NPU。}
+\end{frame}
+
+\begin{frame}[t]{第一步：权重后处理默认专家已经在设备上}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.48\textwidth}
+\begin{block}{源码证据}
+\begin{itemize}
+  \item 位置：\src{vllm_ascend/ops/fused_moe/fused_moe.py:107-127}
+  \item \src{w13_weight} 和 \src{w2_weight} 会被补齐、转置，并转成 Ascend 需要的权重格式。
+  \item 处理后的结果直接写回 \src{layer.w13_weight} 和 \src{layer.w2_weight}。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.49\textwidth}
+\begin{block}{为什么这里会卡住卸载}
+\begin{itemize}
+  \item 后续计算依赖后处理后的形状、步长、数据类型和布局。
+  \item 如果通用卸载把参数留在 CPU，专家 MLP 阶段拿到的就不是 NPU 权重。
+  \item 如果临时重新分配 NPU 权重，地址和布局又不稳定，不利于图重放和静态算子复用。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.25em}
+\tagbox{block body}{\textbf{缺失能力：} 需要保存“后处理后”的 CPU 专家权重副本，并在 NPU 上预留固定专家槽位。原生路径没有这套 CPU 专家仓库和 NPU 槽位协议。}
+\end{frame}
+
+\begin{frame}[t]{第二步：路由只给出专家编号，不负责搬权重}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{block}{源码证据}
+\begin{itemize}
+  \item 位置：\src{vllm_ascend/ops/fused_moe/fused_moe.py:159-180}
+  \item \src{select_experts(...)} 根据路由分数选出每个词元对应的专家。
+  \item 输出为 \src{topk_ids} 和 \src{topk_weights}，表示“该算哪些专家”和“各专家权重是多少”。
+\end{itemize}
+\end{block}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{卸载需要知道的状态}
+\begin{itemize}
+  \item 当前层哪些专家已经在 NPU。
+  \item 哪些专家缺失，需要从 CPU 搬入。
+  \item 专家编号到 NPU 固定槽位的映射。
+  \item 每个缺失专家影响多少词元，是否来得及隐藏搬运开销。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.49\textwidth}
+\begin{block}{原生缺口}
+\begin{itemize}
+  \item 官方 \src{MoEFusedExpertsInput} 没有卸载相关字段。
+  \item \src{topk_ids} 直接进入后续分发流程。
+  \item \src{enable_return_routed_experts} 只是记录路由结果，不负责专家权重驻留。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}[t]{第三步：词元分发只处理激活，不处理权重}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{block}{源码证据}
+\begin{itemize}
+  \item 位置：\src{vllm_ascend/ops/fused_moe/moe_comm_method.py:138-153}
+  \item 先把专家编号交给 \src{token_dispatcher.token_dispatch(...)}。
+  \item MC2 路径在 \src{token_dispatcher.py:230-260} 调用 \src{npu_moe_distribute_dispatch}，返回重排后的激活和每个专家的词元数。
+\end{itemize}
+\end{block}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{这一阶段做了什么}
+\begin{itemize}
+  \item 把词元按专家重排。
+  \item 做专家并行需要的通信。
+  \item 统计每个专家要处理多少词元。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.49\textwidth}
+\begin{block}{这一阶段没做什么}
+\begin{itemize}
+  \item 不检查专家权重是否在 NPU。
+  \item 不产生 CPU 到 NPU 的权重搬运任务。
+  \item 不告诉后续计算应该等待哪个专家槽位。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+\end{frame}
+
+\begin{frame}[t]{第四步：专家 MLP 是真正的断点}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.48\textwidth}
+\begin{block}{源码证据}
+\begin{itemize}
+  \item 位置：\src{vllm_ascend/ops/fused_moe/moe_mlp.py:362-389}
+  \item 非量化路径连续调用两次 \src{torch_npu.npu_grouped_matmul}。
+  \item 输入激活和专家权重同时传入 NPU 算子。
+  \item 量化路径也在 \src{moe_mlp.py:176-217, 298-340} 消费专家权重。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.50\textwidth}
+\begin{block}{为什么这里会直接失败}
+\begin{itemize}
+  \item 输入激活已经在 NPU 上。
+  \item 如果专家权重仍在 CPU，就会出现 CPU/NPU 张量混用。
+  \item 分组矩阵乘只接受已经准备好的权重，不会回调运行时去加载某个专家。
+  \item 原生路径没有“先算已驻留专家，再补算刚加载专家”的分阶段执行。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.35em}
+\end{frame}
+
+\begin{frame}[t]{第五步：结果还原太晚}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{block}{源码证据}
+\begin{itemize}
+  \item 位置：\src{vllm_ascend/ops/fused_moe/moe_comm_method.py:155-171}
+  \item 专家 MLP 完成后，才调用 \src{token_dispatcher.token_combine(...)}。
+  \item 返回结果中包含 \src{routed_out} 和专家词元统计。
+\end{itemize}
+\end{block}
+
+\begin{block}{为什么不能在这里补救}
+\begin{itemize}
+  \item 结果还原只处理 MLP 已经算出的输出。
+  \item 如果某些专家权重没有加载，对应词元的 MLP 输出根本不存在。
+  \item 因此专家权重卸载的等待、补算和调度必须发生在专家 MLP 之前或内部。
+\end{itemize}
+\end{block}
+\end{frame}
+
+\begin{frame}[t]{容易混淆的三个能力}
+\footnotesize
+\vspace{-0.45em}
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\linewidth}{L{0.22\linewidth}L{0.31\linewidth}Y}
+\toprule
+\textbf{能力} & \textbf{已有证据} & \textbf{为什么不是专家权重卸载} \\
+\midrule
+MoE 推理、专家并行、负载均衡 &
+\src{fused_moe.py}、\src{token_dispatcher.py} 以及发布说明中多处 MoE/EP 支持 &
+它们假设本地专家已经在当前进程或当前 NPU 上，解决的是路由、通信和负载均衡，不解决专家权重从 CPU 到 NPU 的按需加载。 \\
+\midrule
+KV 缓存 CPU 卸载 &
+官方文档说明卸载的是不活跃 KV 缓存块，并使用 \src{NPUOffloadingSpec} 做 NPU/CPU 异步传输 &
+对象是 KV 缓存块，不是模型参数；触发条件是前缀缓存缺失，不是本轮路由选中的专家集合。 \\
+\midrule
+权重预取 &
+官方文档说明把权重预加载到 L2 缓存，利用路由、归一化、激活函数等向量计算隐藏开销 &
+前提是权重已经在 NPU 上；代码中预取的是 \src{mlp.experts.w13_weight} 的缓存访问，不是从 CPU 加载缺失专家。 \\
+\bottomrule
+\end{tabularx}
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.0}
+
+\vspace{0.35em}
+\end{frame}
+
+\begin{frame}[t]{vLLM 通用权重卸载为什么接不上}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{配置层证据}
+\begin{itemize}
+  \item 位置：\src{vllm/config/offload.py:12-89}
+  \item 后端只有 \src{auto}、\src{uva}、\src{prefetch}。
+  \item 预取配置按层分组、组内卸载数量、提前预取步数和参数白名单工作。
+  \item 注释里写明这是按层分组的权重卸载。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.49\textwidth}
+\begin{block}{执行层证据}
+\begin{itemize}
+  \item \src{prefetch.py:175-205} 按模块序号选择要卸载的层。
+  \item \src{prefetch.py:213-233} 在模块前向中插入等待和启动预取。
+  \item \src{prefetch.py:338-365} 分配静态缓冲区后按层序预取。
+  \item 没有本轮专家编号、专家词元数、缺失专家集合和替换策略。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.25em}
+\tagbox{block body}{\textbf{根因：} 通用权重卸载的最小单位是“层或参数”；MoE 专家权重卸载的最小单位是“某一层中本轮被路由到的专家集合”。调度粒度不对，后面一定接不上分组矩阵乘。}
+\end{frame}
+
+\begin{frame}[t]{1.UVA 路径在 Ascend 上不可用}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{block}{源码证据}
+\begin{itemize}
+  \item \src{vllm/model_executor/offloader/uva.py:21-35} 描述的是统一虚拟地址零拷贝。
+  \item \src{uva.py:97-105} 将参数放到 CPU 后，调用 \src{get_accelerator_view_from_cpu_tensor(cpu_data)}。
+  \item \src{vllm/utils/torch_utils.py:759-773} 对不支持的平台抛出错误。
+\end{itemize}
+\end{block}
+
+\begin{block}{实测证据}
+\begin{itemize}
+  \item 记录位置：\src{docs/sew-offload/05-existing-offload-baseline.md}
+  \item Qwen3-30B-A3B 单 910B3 上，UVA 专家卸载在加载前失败。
+  \item 报错：\src{get_accelerator_view_from_cpu_tensor is currently not supported in: npu}
+\end{itemize}
+\end{block}
+
+\tagbox{block body}{\textbf{结论：} UVA 不能作为 Ascend MoE 专家权重卸载的原生方案；即便抽象上成立，也不等价于让 Ascend 分组矩阵乘使用稳定的 NPU 专家槽位。}
+\end{frame}
+
+\begin{frame}[t]{2.预取路径仍不能正确执行}
+\footnotesize
+\vspace{-0.35em}
+
+\begin{columns}[T,onlytextwidth]
+\begin{column}{0.49\textwidth}
+\begin{block}{平台形态不匹配}
+\begin{itemize}
+  \item \src{prefetch.py:156} 使用 \src{torch.cuda.Stream()}。
+  \item \src{prefetch.py:256-273} 使用 CUDA 图捕获和 CUDA 事件等待。
+  \item \src{prefetch.py:517-543} 继续用 CUDA 事件和流管理拷贝。
+  \item Ascend 生产路径应显式使用 \src{torch.npu} 流和事件。
+\end{itemize}
+\end{block}
+\end{column}
+\begin{column}{0.49\textwidth}
+\begin{block}{MoE 语义不匹配}
+\begin{itemize}
+  \item 只知道层序号和参数名白名单。
+  \item 不知道本轮路由到了哪些专家。
+  \item 不知道哪些专家已经在 NPU，哪些专家缺失。
+  \item 不知道每个缺失专家影响多少词元，也就无法按截止时间调度。
+\end{itemize}
+\end{block}
+\end{column}
+\end{columns}
+
+\vspace{0.25em}
+\tagbox{block body}{\textbf{症状：} 预取后常驻权重确实下降，但专家 MLP 边界仍可能拿到 CPU 权重或错误同步；问题不是“有没有省显存”，而是“分组矩阵乘前专家权重是否已按正确协议就绪”。}
+\end{frame}
+
+% \begin{frame}[t]{为什么必须在 MoE 执行边界解决}
+% \footnotesize
+% \vspace{-0.35em}
+
+% \begin{block}{这个位置刚好能看到所有关键信息}
+% \begin{itemize}
+%   \item \src{topk_ids/topk_weights}：本轮路由到了哪些专家。
+%   \item \src{layer_id}：当前是第几层，可以判断加载截止时间。
+%   \item \src{w13_weight/w2_weight}：后处理后的专家权重对象。
+%   \item \src{expert_map/log2phy/global_redundant_expert_num}：专家并行和负载均衡映射。
+%   \item \src{moe_comm_type}：当前 MoE 通信路径。
+% \end{itemize}
+% \end{block}
+
+% \begin{block}{太早或太晚都不行}
+% \begin{itemize}
+%   \item 太早：还不知道本轮到底会用到哪些专家。
+%   \item 太晚：专家 MLP 已经要求权重就绪，结果还原阶段已经无法补救。
+%   \item 因此运行时应在 \src{select_experts -> build_fused_experts_input -> fused_experts} 之间介入。
+% \end{itemize}
+% \end{block}
+% \end{frame}
+
+\begin{frame}[t]{按流程汇总卡点}
+\scriptsize
+\vspace{-0.45em}
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\linewidth}{L{0.15\linewidth}L{0.24\linewidth}L{0.27\linewidth}Y}
+\toprule
+\textbf{步骤} & \textbf{原生证据} & \textbf{缺失能力} & \textbf{根因} \\
+\midrule
+权重后处理 &
+\src{fused_moe.py:107-127} &
+CPU 专家仓库、NPU 固定槽位 &
+后处理默认完整专家已经在设备侧；卸载必须保存后处理后的布局。 \\
+\midrule
+路由选专家 &
+\src{fused_moe.py:159-180} &
+驻留查询、缺失集合、加载截止时间 &
+\src{topk_ids} 只表示语义路由，不绑定设备驻留。 \\
+\midrule
+词元分发 &
+\src{moe_comm_method.py:138-153}；\src{token_dispatcher.py:230-260} &
+权重搬运任务、槽位等待协议 &
+分发只处理词元重排、通信和专家词元数，不处理权重。 \\
+\midrule
+专家 MLP &
+\src{moe_mlp.py:362-389} &
+已就绪的 NPU 槽位权重、分阶段执行 &
+\src{npu_grouped_matmul} 一次性消费权重；CPU/NPU 混用直接失败。 \\
+\midrule
+结果还原 &
+\src{moe_comm_method.py:155-171} &
+无 &
+已经过了专家计算点，无法补救未完成的专家输出。 \\
+\midrule
+通用卸载 &
+\src{offload.py:12-89}；\src{prefetch.py:175-233} &
+专家感知调度 &
+调度粒度是层/参数，不是本轮路由专家集合。 \\
+\bottomrule
+\end{tabularx}
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.0}
+\end{frame}
+
+% \begin{frame}[t]{如果要支持，需要补哪些机制}
+% \footnotesize
+% \vspace{-0.35em}
+
+% \begin{block}{必须补齐的四件事}
+% \begin{itemize}
+%   \item \textbf{CPU 专家仓库：} 保存后处理后的专家权重，而不是原始检查点权重。
+%   \item \textbf{NPU 固定专家槽位：} 分组矩阵乘看到的是稳定槽位张量，而不是临时权重对象。
+%   \item \textbf{专家驻留管理：} 根据 \src{topk_ids} 判断命中和缺失，并维护专家到槽位的映射。
+%   \item \textbf{搬运与执行调度：} 在专家 MLP 前等待必要槽位；进一步可以先算已驻留专家，再补算刚加载专家。
+% \end{itemize}
+% \end{block}
+
+% \tagbox{block body}{\textbf{最终判断：} 原生 vLLM-Ascend 缺少的不是某一个开关，而是一整套围绕 MoE 执行边界的专家权重驻留、搬运、等待和分阶段执行协议。}
+% \end{frame}
+
+% \begin{frame}[t]{证据索引}
+% \scriptsize
+% \vspace{-0.45em}
+% \begin{block}{本地源码}
+% \begin{itemize}
+%   \item 官方参考：\src{/workspace/reference-repos/vllm-ascend@7c4ec8e5 main}
+%   \item 当前研究分支：\src{/workspace/vllm-ascend-hust@a02ed84a1 research}
+%   \item vLLM-HUST：\src{/workspace/vllm-hust}
+%   \item MoE 主链路：\src{vllm_ascend/ops/fused_moe/fused_moe.py}、\src{moe_comm_method.py}、\src{token_dispatcher.py}、\src{moe_mlp.py}
+%   \item 通用卸载：\src{vllm/config/offload.py}、\src{vllm/model_executor/offloader/prefetch.py}、\src{uva.py}
+%   \item 实测记录：\src{docs/sew-offload/05-existing-offload-baseline.md}、\src{08-ascend-moe-offload-architecture.md}
+% \end{itemize}
+% \end{block}
+
+% \begin{block}{官方文档}
+% \begin{itemize}
+%   \item vLLM-Ascend 权重预取指南：\url{https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/weight_prefetch.html}
+%   \item vLLM-Ascend KV 缓存 CPU 卸载指南：\url{https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_cache_cpu_offload.html}
+%   \item vLLM Fused MoE Modular Kernel：\url{https://docs.vllm.ai/en/latest/design/fused_moe_modular_kernel/}
+% \end{itemize}
+% \end{block}
+% \end{frame}
+
+\end{document}
