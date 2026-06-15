@@ -258,6 +258,43 @@
 ## 2026-05-31 再核实：当前确实不支持 Ascend MoE expert offloading 服务
 
 - 代码层面确认 `vllm-hust` 的 weight offloading 只有 `auto`、`uva`、`prefetch` 三类，配置入口是 `cpu_offload_gb/cpu_offload_params` 与 `offload_group_size/offload_num_in_group/offload_prefetch_step/offload_params`；它们是通用参数/层级 offload，不读取当前 MoE 层 `topk_ids`、per-expert token counts、slot hit/miss 或 expert deadline。
+
+## 2026-06-15 Expert 搬运分解与流水线发现
+
+- 详细文档已落在 `docs/sew-offload/11-expert-transfer-breakdown-and-pipeline.md`。
+- 当前 miss expert load 的真实行为已经代码复核确认：
+  - `MoECommMethod.fused_experts()` 先执行 `_maybe_apply_moe_offload_plan()`，然后才 token dispatch，再 MLP compute。
+  - `MoeOffloadRuntime.prepare_fixed_slot_plan()` 对 `unique_active_experts` 逐个处理 miss expert。
+  - `TransferEngine.load_sync()` 对每个 miss expert 做两次同步 copy：`w13.copy_` + `w2.copy_`。
+- 因此当前路径是：
+  - **先搬后算**
+  - **逐 expert 同步搬**
+  - **没有 transfer/compute overlap**
+  - **不是 batch 搬运**
+- 当前真实路径更接近 **no-pin**，不是 pinned/UVA：
+  - `HostExpertStore.register_layer()` 使用 `detach().cpu().clone()`。
+  - `patch_v2/patch_uva.py` 明确说明 Ascend NPU 不支持真正 UVA；当前 wrapper 是 CPU tensor + NPU mirror。
+  - 本轮 `--pin-memory` 只能当 PyTorch CPU allocator flag 的控制实验，不能解读为 Ascend 官方 pinned DMA path。
+- no-pin 当前真实路径的两层分解：
+  - **size sweep 拟合**：单 expert 约 `1.034 ms`，其中 size-dependent payload 项约 `0.571 ms`，fixed+residual 约 `0.464 ms`。
+  - **CANN timeline**：`two_tensor_current` 的 `record_function` 窗口约 `0.898 ms/expert`，其中 `aclrtMemcpy` span 约 `0.778 ms`，`aclrtSynchronizeStream` 约 `0.030 ms`，host other 约 `0.089 ms`。
+- 上述两组分解不矛盾：
+  - fit 分解切的是 `size-dependent payload` vs `fixed/residual`
+  - profiler 分解切的是 `record window` 内部的 `aclrtMemcpy/sync/host-other`
+  - 这说明 `aclrtMemcpy` runtime span 内部本身包含了相当多 size-insensitive 成分，不等于纯 PCIe wire payload time。
+- 三种 copy 模式对照（no-pin）：
+  - `single_contiguous_expert`：`0.770 ms/expert` window，`0.699 ms` memcpy。
+  - `two_tensor_current`：`0.898 ms/expert` window，`0.778 ms` memcpy。
+  - `batched_contiguous_experts`（8 experts/batch）：折算 `0.478 ms/expert` window，`0.452 ms/expert` memcpy。
+- 直接含义：
+  - 把一个 expert 拆成两次 copy 确实有固定开销。
+  - 多个 miss expert 打成 batch 后，链路利用率和每 expert 时间都显著改善。
+  - 后续优化重点不应只盯 PCIe 峰值，而应同时减少 copy 次数、做 batch、并把 miss 搬运藏到 hit compute 下面。
+- 已冻结的 MVP-E 优先级：
+  1. `load_sync -> load_async`
+  2. D.11 phase split 真正变成 hit-first overlap
+  3. miss experts 按 tensor 类型或 packed layout 做 batched copy
+  4. 新增 overlap 指标：`miss_transfer_ms`、`hit_phase_compute_ms`、`exposed_stall_ms`
 - 官方文档交叉验证：vLLM `OffloadConfig` 文档同样描述 `auto/uva/prefetch` 三类 weight offload；vLLM Ascend KV Cache CPU Offload 文档是针对 KV cache block 的 `NPUOffloadingSpec`；vLLM Ascend Weight Prefetch 文档是将已在设备侧的权重预取到 L2/cache，不是 host-to-HBM expert weight offload。
 - `PrefetchOffloader` 通过 module forward hook 插入 `wait_prefetch/start_prefetch`，按静态层组和参数名选择 offload 对象；内部使用 `torch.cuda.Stream/Event/current_stream/is_current_stream_capturing/stream`。即使被 Ascend wrapper 部分兼容，它仍不是 Ascend-native MoE expert working-set runtime。
 - `UVAOffloader` 依赖 `get_accelerator_view_from_cpu_tensor(cpu_data)`；本地 Qwen3-30B-A3B 实测明确失败：`ValueError: get_accelerator_view_from_cpu_tensor is currently not supported in: npu`。

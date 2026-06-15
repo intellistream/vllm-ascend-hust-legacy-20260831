@@ -10,7 +10,22 @@
 
 ## 当前阶段
 
-阶段 13：**MVP-D.10**（dynamic-count layered runtime 原型）已收口；MVP-D.9 的分段打点、小范围 release=1 NPU smoke、no-offload 对照、真实 trace JSONL、resident/slot/global sweep、prefill/resident-aware 离线策略验证与 Static Expert Window 源码复核均已完成。D.10 已完成默认关闭的在线 path selector 与 `MoECommMethod.fused_experts` 边界内生化代码/UT，且 2026-06-02 NPU 6 资源窗口恢复后补跑的 post-downsink 真实 smoke 全部通过：1-token 与 8-token candidate 均 status ok，与 no-offload baseline strict token-id 对照全部一致，fused boundary path decision 在真实 NPU 上验证正确。阶段 14：**MVP-D.11**（dispatch 后 phase split 语义原型）已完成任务规划，且 D.10 post-downsink 1-token/8-token strict compare 门禁已满足，可进入实现。
+阶段 15：**MVP-E**（async transfer + hit-first overlap + batched miss copy）
+已完成问题复核和 expert transfer breakdown 实验，进入方案冻结与实现规划阶段。
+当前已确认：
+
+- miss expert load 在 `fused_experts()` 中发生于 Stage T，位于 token dispatch 和 MLP compute 之前；
+- 当前路径按 miss expert 逐个同步搬运，每个 expert 两次 `copy_`，没有 transfer/compute overlap；
+- no-pin 真实路径下，单 expert miss load 的 size sweep 拟合为
+  `1.034 ms = 0.571 ms size-dependent payload + 0.464 ms fixed/residual`；
+- CANN timeline 下，当前 `two_tensor_current` 窗口约 `0.898 ms/expert`，
+  其中 `aclrtMemcpy` span 约 `0.778 ms`；
+- `single_contiguous_expert` 与 `batched_contiguous_experts` 对照进一步表明：
+  当前两次 copy 的拆分成本明确存在，而 batched contiguous copy 可把每 expert
+  窗口时间降到约 `0.478 ms`。
+
+因此下一阶段主线不是继续做语义脚手架，而是把 D.11 相位切分和异步搬运真正接成
+overlap pipeline。
 
 ## 阶段 12：MVP-D.9 任务表
 
@@ -62,6 +77,20 @@
 | NPU semantic smoke | complete | 2026-06-05 NPU 2：1-token strict compare **status=ok**（baseline `[26288]` vs candidate `[26288]`）；8-token strict compare **status=ok**（baseline `[26288,102064,104949,9370,104034,20074,89161,102021]` vs candidate 完全一致）；throughput 1-token 2.16 tok/s（vs baseline 2.29）、8-token 4.71 tok/s（vs baseline 5.60） |
 | D.11 复盘门禁 | complete | Python 多 phase 开销确认：phase_split=1 下每层每 token 触发 phase plan（96 事件/1-token，432 事件/8-token），8-token throughput 下降约 16%（4.71 vs 5.60 tok/s）。记录为语义脚手架；MVP-E async 前保留 single-phase fallback 作为 correctness 底座 |
 
+## 阶段 15：MVP-E 任务表
+
+| 子任务 | 状态 | 说明 |
+| --- | --- | --- |
+| transfer breakdown 结论冻结 | complete | 已形成 `docs/sew-offload/11-expert-transfer-breakdown-and-pipeline.md`：当前是先搬后算、逐 expert 两次 sync copy、无 overlap |
+| 证据边界澄清 | complete | Ascend 当前不提供真正 UVA；`--pin-memory` 只作控制实验，当前实现分析以 no-pin 为准 |
+| `load_async` 设计 | pending | `TransferEngine` 增加 dedicated transfer stream + ready event；runtime 返回 miss readiness，而不是同步等待 miss 全到齐 |
+| hit-first overlap 接线 | pending | 把 D.11 phase split 从语义脚手架升级为真正的 hit phase / miss phase pipeline；计算 stream 只在 miss phase 前等待对应 ready event |
+| batched miss copy 设计 | pending | 优先做按 tensor 类型的 batch copy（`w13` 一次、`w2` 一次）；后续再评估 packed expert layout |
+| slot allocator for batch | pending | 研究让同轮 miss expert 尽量落到连续 slot，服务大块 copy，而不是只做 LRU victim 选择 |
+| overlap observability | pending | 新增 `miss_transfer_ms`、`hit_phase_compute_ms`、`exposed_stall_ms`、`copies_per_miss_batch`、`bytes_per_copy` |
+| NPU overlap smoke | pending | 单 expert miss / 多 expert miss / all-hit / all-miss 四类场景分别做 strict token-id compare + timeline artifact |
+| batch-vs-sync 对照 | pending | 固定 num_slots 和 active expert fanout，比较 `2*num_miss` copy、2-copy batch、packed batch 三组 |
+
 ## 阶段清单
 
 | 阶段 | 状态 | 目标产物 |
@@ -81,6 +110,7 @@
 | 11. MoE Offload 支持核实与总体架构 | complete | `docs/sew-offload/08-ascend-moe-offload-architecture.md`：不支持证据链、系统架构、控制/数据面图、路线图 |
 | 12. Dynamic-count layered runtime | complete | MVP-D.10 path selector 与 fused_experts 下沉代码/UT 完成；post-downsink 1-token/8-token 真实 NPU smoke 与 strict compare 全部通过 |
 | 13. Dispatch 后 phase split | complete | MVP-D.11 代码/UT/smoke 全部完成：1-token & 8-token strict compare **ok**；复盘确认 Python 多 phase 16% 开销，记录为语义脚手架 |
+| 14. Expert transfer overlap pipeline | in_progress | 当前问题已量化：先搬后算、逐 expert 两次 sync copy、无 overlap；下一步进入 `load_async`、hit-first overlap、batched miss copy |
 
 ## 当前 MVP-A 状态
 
@@ -224,6 +254,7 @@
 | `docs/sew-offload/07-native-offload-benchmark-results.md` | complete | 最小 benchmark runner、native prefetch offload 失败结果、no-offload throughput/TTFT/TPOT sanity |
 | `docs/sew-offload/08-ascend-moe-offload-architecture.md` | complete | 再次核实现有能力缺口，并给出 Ascend NPU MoE Offloading 整体架构设计与 Mermaid 架构图 |
 | `docs/sew-offload/09-next-steps-after-mvp-a.md` | complete | MVP-A 之后的 MVP-B 到 MVP-G 实施计划、文件计划、测试门禁和两周排期 |
+| `docs/sew-offload/11-expert-transfer-breakdown-and-pipeline.md` | complete | 当前 expert miss 搬运分解、CANN profiler 证据、three-pattern 对照、MVP-E overlap 优化方向 |
 
 ## 未决问题
 
