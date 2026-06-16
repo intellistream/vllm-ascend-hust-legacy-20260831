@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 from itertools import count
 import json
+import os
 from pathlib import Path
 from time import perf_counter
 
@@ -26,6 +27,11 @@ import torch
 
 from vllm_ascend import envs
 from vllm_ascend.moe_offload.config import MoeOffloadConfig
+from vllm_ascend.moe_offload.compute_bucket import (
+    ComputeBucketClassifier,
+    ComputeBucketDecision,
+    load_compute_bucket_classifier,
+)
 from vllm_ascend.moe_offload.expert_key import ExpertKey
 from vllm_ascend.moe_offload.host_store import HostExpertStore
 from vllm_ascend.moe_offload.slot_bank import ExpertSlotBank, SlotState
@@ -126,12 +132,20 @@ class MoeOffloadRuntime:
         self.config = config if config is not None else MoeOffloadConfig.from_env()
         self.trace_collector = TraceCollector(max_records=self.config.trace_max_records)
         self._step_counter = count()
+        self._pending_trace_step_by_layer: dict[int, int] = {}
         self._host_store = HostExpertStore()
         self._slot_banks: dict[int, ExpertSlotBank] = {}
         self._original_expert_weight_bytes_by_layer: dict[int, int] = {}
         self._released_original_weight_layers: set[int] = set()
+        # Option-2 (graph-compatible offload): persistent per-layer log2phy buffer.
+        # Fixed address, allocated once at register time, updated in-place by the
+        # eager staging step. The captured graph reads this stable buffer, so the
+        # data-dependent decision never enters the captured op stream.
+        self._log2phy_buffers: dict[int, torch.Tensor] = {}
         self._transfer_engine = TransferEngine()
         self._profile_events: list[MoeOffloadProfileEvent] = []
+        self._compute_bucket_classifier: ComputeBucketClassifier | None = None
+        self._compute_bucket_classifier_loaded = False
 
     def trace_routing(
         self,
@@ -142,16 +156,118 @@ class MoeOffloadRuntime:
         num_experts: int,
         mode: str = "unknown",
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.trace_logical_active_experts(
+            layer_id=layer_id,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            num_logical_experts=num_experts,
+            mode=mode,
+        )
+
+    def trace_logical_active_experts(
+        self,
+        *,
+        layer_id: int,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        num_logical_experts: int,
+        mode: str = "unknown",
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.config.should_trace:
-            record = self.trace_collector.record(
-                layer_id=layer_id,
-                step_id=next(self._step_counter),
+            normalized_layer_id = int(layer_id)
+            step_id = next(self._step_counter)
+            self._pending_trace_step_by_layer[normalized_layer_id] = int(step_id)
+            record = self.trace_collector.record_logical(
+                layer_id=normalized_layer_id,
+                step_id=step_id,
                 topk_ids=topk_ids,
-                num_experts=num_experts,
+                num_logical_experts=num_logical_experts,
                 mode=mode,
             )
             self._append_trace_record_jsonl(record)
         return topk_ids, topk_weights
+
+    def trace_grouped_active_experts(
+        self,
+        *,
+        layer_id: int,
+        group_list: torch.Tensor | None,
+        group_list_type: int | None,
+        physical_expert_count: int | None = None,
+        mode: str = "unknown",
+    ) -> torch.Tensor | None:
+        if not self.config.should_trace_gmm or group_list is None or group_list_type is None:
+            return group_list
+        if _is_current_graph_capturing():
+            return group_list
+
+        normalized_layer_id = int(layer_id)
+        step_id = self._pending_trace_step_by_layer.pop(normalized_layer_id, None)
+        if step_id is None:
+            step_id = next(self._step_counter)
+        record = self.trace_collector.record_grouped(
+            layer_id=normalized_layer_id,
+            step_id=step_id,
+            group_list=group_list,
+            group_list_type=group_list_type,
+            physical_expert_count=physical_expert_count,
+            mode=mode,
+        )
+        self._append_trace_record_jsonl(record)
+        return group_list
+
+    def classify_grouped_compute_bucket(
+        self,
+        *,
+        layer_id: int,
+        group_list: torch.Tensor | None,
+        group_list_type: int | None,
+        phase: str = "unknown",
+    ) -> ComputeBucketDecision | None:
+        if _is_current_graph_capturing():
+            return None
+        classifier = self._get_compute_bucket_classifier()
+        if classifier is None or not classifier.enabled:
+            return None
+        start = perf_counter()
+        decision = classifier.classify(
+            group_list=group_list,
+            group_list_type=group_list_type,
+            phase=phase,
+        )
+        self._record_profile_event(
+            "compute_bucket_decision",
+            layer_id=int(layer_id),
+            start=start,
+            payload=decision.to_jsonable(),
+        )
+        return decision
+
+    def record_compute_bucket_fast_path_gate(
+        self,
+        *,
+        layer_id: int | None,
+        enabled: bool,
+        reason: str,
+        bucket_id: int | None = None,
+        signature: str = "",
+        original_expert_count: int = 0,
+        compact_expert_count: int = 0,
+    ) -> None:
+        start = perf_counter()
+        self._record_profile_event(
+            "compute_bucket_fast_path_gate",
+            layer_id=layer_id,
+            start=start,
+            payload={
+                "enabled": bool(enabled),
+                "reason": str(reason),
+                "bucket_id": bucket_id,
+                "signature": str(signature),
+                "original_expert_count": int(original_expert_count),
+                "compact_expert_count": int(compact_expert_count),
+            },
+        )
 
     def export_trace(self, path: str | Path) -> int:
         return self.trace_collector.write_jsonl(path)
@@ -185,6 +301,15 @@ class MoeOffloadRuntime:
             tuple(int(dim) for dim in w13_weight.shape[1:]),
             tuple(int(dim) for dim in w2_weight.shape[1:]),
             dtype=w13_weight.dtype,
+            device=device,
+        )
+        # Option-2: allocate the persistent log2phy buffer once, fixed address.
+        # Size = num_logical_experts (from the original weight's expert dim).
+        num_logical_experts = int(w13_weight.shape[0])
+        self._log2phy_buffers[layer_id] = torch.full(
+            (num_logical_experts,),
+            fill_value=-1,
+            dtype=torch.int32,
             device=device,
         )
         self._record_profile_event(
@@ -421,6 +546,87 @@ class MoeOffloadRuntime:
         )
         return PreparedSlotWeights.from_slot_bank(slot_bank=slot_bank, mapping=mapping)
 
+    # --- Option 2: graph-compatible offload via decision/execution decoupling ---
+
+    def log2phy_buffer(self, layer_id: int) -> torch.Tensor | None:
+        """Return the persistent (fixed-address) log2phy buffer for a layer.
+
+        The captured graph reads this stable tensor; only its *contents* change
+        between replays, written in-place by ``stage_fixed_slot_plan``.
+        """
+        return self._log2phy_buffers.get(int(layer_id))
+
+    def stage_fixed_slot_plan(
+        self,
+        *,
+        layer_id: int,
+        active_experts: tuple[int, ...],
+        num_logical_experts: int,
+    ) -> "PreparedSlotWeights":
+        """Eager pre-replay staging: host decision + H2D + in-place log2phy write.
+
+        This is the data-dependent / host-sync work hoisted OUT of the captured
+        region. It must run eager (outside stream capture). It (1) decides which
+        experts occupy which slots, (2) synchronously loads miss experts into the
+        fixed slot tensors, and (3) writes the logical->physical mapping in-place
+        into the persistent ``log2phy`` buffer (fixed address). The captured graph
+        then only reads fixed slot tensors + the fixed log2phy buffer.
+
+        Returns a ``PreparedSlotWeights`` whose ``log2phy`` IS the persistent
+        buffer (not a fresh allocation), so the address is stable across steps.
+        """
+        if _is_current_graph_capturing():
+            raise RuntimeError(
+                "stage_fixed_slot_plan must run eager (outside graph capture); "
+                "it performs host decision + H2D staging"
+            )
+        # Reuse the validated planning path for decision + sync H2D staging.
+        prepared = self.prepare_fixed_slot_plan(
+            layer_id=int(layer_id),
+            active_experts=active_experts,
+            num_logical_experts=int(num_logical_experts),
+            device=self._log2phy_buffers[int(layer_id)].device,
+        )
+        # Write the freshly computed mapping in-place into the persistent buffer
+        # (fixed address) instead of handing back the fresh allocation.
+        buf = self._log2phy_buffers[int(layer_id)]
+        buf.copy_(prepared.log2phy)
+        return PreparedSlotWeights(
+            w1=prepared.w1,
+            w2=prepared.w2,
+            log2phy=buf,
+            physical_expert_count=prepared.physical_expert_count,
+            mapping=prepared.mapping,
+        )
+
+    def capture_safe_slot_weights(self, *, layer_id: int) -> "PreparedSlotWeights | None":
+        """Capture-path plan: fixed slot tensors + fixed log2phy buffer, NO host sync.
+
+        Used during graph capture (dummy run) where the real routing decision is
+        irrelevant — capture only records the op sequence against fixed addresses.
+        Performs zero device->host sync and zero conditional H2D, so the captured
+        stream contains no forbidden synchronize/memcpy. Returns ``None`` if the
+        layer is not registered for fixed-slot execution.
+        """
+        layer_id = int(layer_id)
+        slot_bank = self._slot_banks.get(layer_id)
+        buf = self._log2phy_buffers.get(layer_id)
+        if slot_bank is None or buf is None:
+            return None
+        from vllm_ascend.moe_offload.slot_mapping import ExpertSlotMapping
+
+        mapping = ExpertSlotMapping(
+            layer_id=layer_id,
+            active_experts=(),
+            logical_to_physical=buf,
+            slot_to_expert=tuple(
+                int(slot.expert_key.expert_id) if slot.expert_key is not None else None
+                for slot in slot_bank.slots
+            ),
+            active_slot_ids=(),
+        )
+        return PreparedSlotWeights.from_slot_bank(slot_bank=slot_bank, mapping=mapping)
+
     def prepare_weights_for_execution(
         self,
         *,
@@ -434,6 +640,28 @@ class MoeOffloadRuntime:
             "fixed-slot execution requires num_logical_experts and backend wiring; "
             "use prepare_fixed_slot_plan() for the current safe planning path"
         )
+
+    def _get_compute_bucket_classifier(self) -> ComputeBucketClassifier | None:
+        if self._compute_bucket_classifier_loaded:
+            return self._compute_bucket_classifier
+        self._compute_bucket_classifier_loaded = True
+        plan_path = self.config.compute_bucket_plan_path
+        if not plan_path:
+            return None
+        try:
+            self._compute_bucket_classifier = load_compute_bucket_classifier(plan_path)
+        except Exception as exc:
+            self._record_profile_event(
+                "compute_bucket_plan_load_failed",
+                layer_id=None,
+                start=perf_counter(),
+                payload={
+                    "plan_path": str(plan_path),
+                    "reason": str(exc),
+                },
+            )
+            self._compute_bucket_classifier = None
+        return self._compute_bucket_classifier
 
     def _record_profile_event(
         self,
@@ -453,9 +681,12 @@ class MoeOffloadRuntime:
         self._profile_events.append(event)
         self._append_profile_event_jsonl(event)
 
-    @staticmethod
-    def _append_profile_event_jsonl(event: MoeOffloadProfileEvent) -> None:
-        profile_path = envs.VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH
+    def _append_profile_event_jsonl(self, event: MoeOffloadProfileEvent) -> None:
+        profile_path = (
+            self.config.gmm_profile_path
+            or os.getenv("VLLM_ASCEND_MOE_GMM_PROFILE_PATH", envs.VLLM_ASCEND_MOE_GMM_PROFILE_PATH)
+            or os.getenv("VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH", envs.VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH)
+        )
         if not profile_path:
             return
         path = Path(profile_path)
@@ -463,9 +694,12 @@ class MoeOffloadRuntime:
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event.to_jsonable(), sort_keys=True) + "\n")
 
-    @staticmethod
-    def _append_trace_record_jsonl(record: TraceRecord) -> None:
-        trace_path = envs.VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH
+    def _append_trace_record_jsonl(self, record: TraceRecord) -> None:
+        trace_path = (
+            self.config.gmm_trace_path
+            or os.getenv("VLLM_ASCEND_MOE_GMM_TRACE_PATH", envs.VLLM_ASCEND_MOE_GMM_TRACE_PATH)
+            or os.getenv("VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH", envs.VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH)
+        )
         if not trace_path:
             return
         path = Path(trace_path)
@@ -476,6 +710,20 @@ class MoeOffloadRuntime:
 
 def _tensor_nbytes(tensor: torch.Tensor) -> int:
     return int(tensor.numel()) * int(tensor.element_size())
+
+
+def _is_current_graph_capturing() -> bool:
+    try:
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
+        if bool(getattr(_EXTRA_CTX, "capturing", False)):
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(torch.npu.is_current_stream_capturing())
+    except Exception:
+        return False
 
 
 _runtime: MoeOffloadRuntime | None = None

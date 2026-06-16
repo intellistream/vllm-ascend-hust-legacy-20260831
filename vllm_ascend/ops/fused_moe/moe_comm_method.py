@@ -33,7 +33,11 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     build_mlp_compute_input,
     build_token_dispatch_input,
 )
-from vllm_ascend.moe_offload.runtime import MoeOffloadDecisionPath, get_moe_offload_runtime
+from vllm_ascend.moe_offload.runtime import (
+    MoeOffloadDecisionPath,
+    _is_current_graph_capturing,
+    get_moe_offload_runtime,
+)
 from vllm_ascend.moe_offload.pipeline import get_moe_pipeline_profiler
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalize,
@@ -149,6 +153,19 @@ class MoECommMethod(ABC):
             topk_ids=routed_topk_ids,
         )
         token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+        runtime = get_moe_offload_runtime()
+        runtime.trace_grouped_active_experts(
+            layer_id=fused_experts_input.trace_layer_id,
+            group_list=token_dispatch_output.group_list,
+            group_list_type=token_dispatch_output.group_list_type,
+            physical_expert_count=fused_experts_input.routing.physical_expert_count,
+        )
+        compute_bucket_decision = runtime.classify_grouped_compute_bucket(
+            layer_id=fused_experts_input.trace_layer_id,
+            group_list=token_dispatch_output.group_list,
+            group_list_type=token_dispatch_output.group_list_type,
+            phase="decode" if fused_experts_input.hidden_states.shape[0] <= 1 else "prefill",
+        )
 
         if do_pipe_profile:
             e2 = pipeline_profiler.record()  # after Stage R, before Stage C
@@ -157,6 +174,7 @@ class MoECommMethod(ABC):
             fused_experts_input=fused_experts_input,
             token_dispatch_output=token_dispatch_output,
             use_fusion_ops=self.use_fusion_ops,
+            compute_bucket_decision=compute_bucket_decision,
         )
 
         # --- MVP-D.11: post-dispatch phase split (default off) ---
@@ -310,6 +328,21 @@ class MoECommMethod(ABC):
             return fused_experts_input
 
         runtime = get_moe_offload_runtime()
+
+        # Option 2 (graph-compatible offload): during graph capture, the
+        # data-dependent host decision (torch.unique(...).cpu()) is FORBIDDEN on a
+        # captured stream (Ascend: "synchronized memcpy not supported in capture
+        # mode"). Use the capture-safe path: point routing at the fixed slot
+        # tensors + the persistent (fixed-address) log2phy buffer with zero host
+        # sync. The real decision + H2D staging is hoisted to the eager
+        # stage_fixed_slot_plan() call before replay. Default offload behavior
+        # (eager, no capture) is unchanged.
+        if runtime.config.graph_compatible_offload and _is_current_graph_capturing():
+            capture_weights = runtime.capture_safe_slot_weights(layer_id=offload.layer_id)
+            if capture_weights is not None:
+                return self._with_prepared_slot_weights(fused_experts_input, capture_weights)
+            return fused_experts_input
+
         active_experts = tuple(
             int(expert_id) for expert_id in torch.unique(fused_experts_input.topk_ids.detach().cpu()).tolist()
         )
@@ -336,6 +369,14 @@ class MoECommMethod(ABC):
             device=fused_experts_input.topk_ids.device,
         )
         prepared_weights.validate_backend_ready(expected_device_type=offload.expected_device_type)
+        return self._with_prepared_slot_weights(fused_experts_input, prepared_weights)
+
+    def _with_prepared_slot_weights(self, fused_experts_input, prepared_weights):
+        """Build a MoEFusedExpertsInput that points w1/w2/log2phy at slot tensors.
+
+        Shared by the eager plan path and the Option-2 capture-safe path so both
+        wire the (fixed-address) slot weights + log2phy buffer identically.
+        """
         return MoEFusedExpertsInput(
             hidden_states=fused_experts_input.hidden_states,
             topk_weights=fused_experts_input.topk_weights,
@@ -366,6 +407,8 @@ class MoECommMethod(ABC):
             need_trans=fused_experts_input.need_trans,
             dynamic_eplb=fused_experts_input.dynamic_eplb,
             offload=fused_experts_input.offload,
+            trace_layer_id=fused_experts_input.trace_layer_id,
+            trace_num_logical_experts=fused_experts_input.trace_num_logical_experts,
         )
 
     @abstractmethod

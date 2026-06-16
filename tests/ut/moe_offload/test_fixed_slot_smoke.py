@@ -163,6 +163,7 @@ def test_run_fixed_slot_smoke_sets_env_and_writes_summary(tmp_path, monkeypatch)
         offload_num_in_group=1,
         offload_prefetch_step=1,
         offload_params="experts",
+        with_native_offload_backend=True,
     )
     generated = MagicMock()
     generated.request_id = "short_chat_0000"
@@ -245,6 +246,27 @@ def test_configure_sew_offload_env_supports_default_and_trace_only_modes(tmp_pat
     assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH"].endswith("moe_offload_profile.jsonl")
 
 
+def test_configure_sew_offload_env_supports_compute_bucket_fast_path(tmp_path, monkeypatch):
+    plan_path = tmp_path / "sew_moe_p1_plan.json"
+    monkeypatch.setenv("VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH", str(plan_path))
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS", "99")
+
+    configure_sew_offload_env("compute_bucket_fast_path", num_slots=0)
+
+    assert "VLLM_ASCEND_MOE_OFFLOAD_ENABLED" not in os.environ
+    assert "VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY" not in os.environ
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS"] == "0"
+    assert "VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH" not in os.environ
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH"].endswith("moe_offload_profile.jsonl")
+
+    configure_sew_offload_env(
+        "compute_bucket_fast_path",
+        num_slots=0,
+        compute_bucket_plan_path=str(plan_path),
+    )
+    assert os.environ["VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH"] == str(plan_path)
+
+
 def test_run_no_offload_smoke_omits_native_offload_kwargs_and_writes_outputs(tmp_path):
     output_dir = tmp_path / "smoke"
     args = argparse.Namespace(
@@ -303,6 +325,67 @@ def test_run_no_offload_smoke_omits_native_offload_kwargs_and_writes_outputs(tmp
             "output_tokens": 2,
         }
     ]
+
+
+def test_run_compute_bucket_fast_path_smoke_sets_plan_path_and_summary(tmp_path, monkeypatch):
+    output_dir = tmp_path / "smoke"
+    plan_path = tmp_path / "sew_moe_p1_plan.json"
+    args = argparse.Namespace(
+        mode="compute_bucket_fast_path",
+        model=None,
+        output_dir=str(output_dir),
+        manifest=str(tmp_path / "requests.jsonl"),
+        buckets="short_chat",
+        max_requests=1,
+        max_model_len=512,
+        max_num_seqs=1,
+        max_num_batched_tokens=512,
+        kv_cache_memory_mb=512,
+        gpu_memory_utilization=0.9,
+        enforce_eager=True,
+        ignore_eos=True,
+        num_slots=99,
+        resident_layer_ids="",
+        release_original_expert_weights=False,
+        layered_runtime=False,
+        fanout_threshold=0,
+        compute_bucket_plan_path=str(plan_path),
+        offload_backend="prefetch",
+        offload_group_size=4,
+        offload_num_in_group=1,
+        offload_prefetch_step=1,
+        offload_params="experts",
+    )
+    request = {
+        "request_id": "short_chat_0000",
+        "bucket": "short_chat",
+        "prompt": "hello",
+        "max_output_tokens": 2,
+        "temperature": 0.0,
+        "top_p": 1.0,
+    }
+    generated = MagicMock()
+    generated.request_id = "short_chat_0000"
+    generated.outputs = [MagicMock(token_ids=[7, 8], text="hi")]
+
+    with (
+        patch("tools.sew_offload.run_fixed_slot_smoke.reset_moe_offload_runtime"),
+        patch("tools.sew_offload.run_fixed_slot_smoke.LLM") as mock_llm_cls,
+    ):
+        mock_llm = mock_llm_cls.return_value
+        mock_llm.generate.return_value = [generated]
+
+        summary = run_smoke(args, _config(), [request])
+
+    assert "VLLM_ASCEND_MOE_OFFLOAD_ENABLED" not in os.environ
+    assert os.environ["VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH"] == str(plan_path)
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS"] == "0"
+    assert summary["mode"] == "compute_bucket_fast_path"
+    assert summary["num_slots"] == 0
+    assert summary["compute_bucket_plan_path"] == str(plan_path)
+    assert json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))[
+        "compute_bucket_plan_path"
+    ] == str(plan_path)
 
 
 def test_run_smoke_writes_moe_offload_profile_to_summary(tmp_path):

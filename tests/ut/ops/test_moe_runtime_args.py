@@ -19,6 +19,10 @@ import unittest
 import torch
 
 import vllm_ascend.ops.fused_moe.moe_runtime_args as runtime_args
+from vllm_ascend.moe_offload.compute_bucket import (
+    ComputeBucketDecision,
+    ComputeBucketDecisionPath,
+)
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEAllGatherCombineMetadata,
     MoETokenDispatchOutput,
@@ -246,6 +250,43 @@ class TestMoERuntimeArgs(unittest.TestCase):
                 self.assertEqual(mlp_compute_input.quant.mxfp.scale_dtype, torch.float32)
                 self.assertEqual(mlp_compute_input.quant.mxfp.per_token_scale_dtype, torch.float16)
                 self.assertFalse(mlp_compute_input.quant.mxfp.use_bf16)
+
+    def test_build_mlp_compute_input_preserves_compute_bucket_decision(self):
+        fused_experts_input = build_fused_experts_input(
+            hidden_states=torch.randn(2, 8),
+            topk_weights=torch.randn(2, 1),
+            topk_ids=torch.tensor([[0], [1]], dtype=torch.int32),
+            w1=torch.randn(2, 8, 16),
+            w2=torch.randn(2, 16, 8),
+            quant_type=QuantType.NONE,
+            dynamic_eplb=False,
+        )
+        token_dispatch_output = MoETokenDispatchOutput(
+            hidden_states=torch.randn(2, 8),
+            group_list=torch.tensor([1, 1], dtype=torch.int64),
+            group_list_type=1,
+            combine_metadata=MoEAllGatherCombineMetadata(
+                topk_weights=fused_experts_input.topk_weights,
+                expanded_row_idx=torch.arange(2, dtype=torch.int32),
+                restore_shape=torch.Size([2, 8]),
+            ),
+        )
+        decision = ComputeBucketDecision(
+            path=ComputeBucketDecisionPath.BUCKET,
+            signature="counts:1,1",
+            reason="signature_matched",
+            phase="decode",
+            bucket_id=0,
+        )
+
+        mlp_compute_input = build_mlp_compute_input(
+            fused_experts_input=fused_experts_input,
+            token_dispatch_output=token_dispatch_output,
+            use_fusion_ops=False,
+            compute_bucket_decision=decision,
+        )
+
+        self.assertIs(mlp_compute_input.compute_bucket_decision, decision)
 
     def test_build_fused_experts_input_constructs_internal_mxfp_leaf_from_primitives(self):
         for quant_type in (QuantType.MXFP8, QuantType.MXFP4):

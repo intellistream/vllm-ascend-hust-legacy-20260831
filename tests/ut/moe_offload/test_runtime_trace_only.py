@@ -16,10 +16,12 @@
 #
 
 from unittest.mock import MagicMock, patch
+import json
 
 import torch
 
 from vllm_ascend.moe_offload.config import MoeOffloadConfig
+from vllm_ascend.moe_offload.compute_bucket import ComputeBucketDecisionPath
 from vllm_ascend.moe_offload.runtime import MoeOffloadRuntime, get_moe_offload_runtime, reset_moe_offload_runtime
 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 
@@ -29,16 +31,137 @@ def test_trace_only_runtime_records_without_mutating_topk_tensors():
     topk_ids = torch.tensor([[0, 2], [2, 3]], dtype=torch.int32)
     topk_weights = torch.randn(2, 2)
 
-    returned_ids, returned_weights = runtime.trace_routing(
+    returned_ids, returned_weights = runtime.trace_logical_active_experts(
         layer_id=5,
         topk_ids=topk_ids,
         topk_weights=topk_weights,
-        num_experts=4,
+        num_logical_experts=4,
     )
 
     assert returned_ids is topk_ids
     assert returned_weights is topk_weights
     assert runtime.trace_collector.latest_for_layer(5).expert_token_counts == {0: 1, 2: 2, 3: 1}
+
+
+def test_runtime_traces_logical_and_grouped_active_experts_without_mutation():
+    runtime = MoeOffloadRuntime(MoeOffloadConfig(enabled=True, trace_only=True))
+    topk_ids = torch.tensor([[0, 2], [2, 3]], dtype=torch.int32)
+    topk_weights = torch.randn(2, 2)
+    group_list = torch.tensor([1, 2, 0, 1], dtype=torch.int64)
+
+    returned_ids, returned_weights = runtime.trace_logical_active_experts(
+        layer_id=5,
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        num_logical_experts=4,
+        mode="decode",
+    )
+    returned_group_list = runtime.trace_grouped_active_experts(
+        layer_id=5,
+        group_list=group_list,
+        group_list_type=1,
+        physical_expert_count=4,
+        mode="decode",
+    )
+
+    records = runtime.trace_collector.records()
+    assert returned_ids is topk_ids
+    assert returned_weights is topk_weights
+    assert returned_group_list is group_list
+    assert [record.source for record in records] == ["logical_topk", "grouped_dispatch"]
+    assert records[0].step_id == records[1].step_id
+    assert records[0].fanout == 3
+    assert records[1].expert_token_counts == {0: 1, 1: 2, 3: 1}
+
+
+def test_runtime_classifies_grouped_compute_bucket_when_plan_is_configured(tmp_path):
+    plan_path = tmp_path / "sew_moe_p1_plan.json"
+    plan_path.write_text(
+        json.dumps({
+            "version": 1,
+            "plans": [
+                {
+                    "phase": "decode",
+                    "target": "P1-C",
+                    "compute_bucket_plan": {
+                        "version": 1,
+                        "phase": "decode",
+                        "buckets": [
+                            {
+                                "bucket_id": 0,
+                                "signature": "counts:1,2,1",
+                                "sample_count": 8,
+                                "coverage_percent": 80.0,
+                            }
+                        ],
+                    },
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+    runtime = MoeOffloadRuntime(
+        MoeOffloadConfig(
+            enabled=True,
+            trace_only=True,
+            compute_bucket_plan_path=str(plan_path),
+        ))
+    group_list = torch.tensor([1, 2, 1], dtype=torch.int64)
+
+    decision = runtime.classify_grouped_compute_bucket(
+        layer_id=9,
+        group_list=group_list,
+        group_list_type=1,
+        phase="decode",
+    )
+
+    assert decision.path is ComputeBucketDecisionPath.BUCKET
+    assert decision.bucket_id == 0
+    assert decision.signature == "counts:1,2,1"
+    summary = runtime.profiling_summary()
+    assert summary["events"][-1]["name"] == "compute_bucket_decision"
+    assert summary["events"][-1]["payload"]["path"] == "bucket"
+    assert summary["events"][-1]["payload"]["bucket_id"] == 0
+
+
+def test_runtime_compute_bucket_classifier_is_disabled_without_plan():
+    runtime = MoeOffloadRuntime(MoeOffloadConfig(enabled=True, trace_only=True))
+
+    decision = runtime.classify_grouped_compute_bucket(
+        layer_id=9,
+        group_list=torch.tensor([1, 2, 1], dtype=torch.int64),
+        group_list_type=1,
+        phase="decode",
+    )
+
+    assert decision is None
+    assert runtime.profiling_summary()["events"] == []
+
+
+def test_runtime_records_compute_bucket_fast_path_gate():
+    runtime = MoeOffloadRuntime(MoeOffloadConfig(enabled=True, trace_only=True))
+
+    runtime.record_compute_bucket_fast_path_gate(
+        layer_id=9,
+        enabled=True,
+        reason="eligible",
+        bucket_id=3,
+        signature="counts:1,2,1",
+        original_expert_count=3,
+        compact_expert_count=3,
+    )
+
+    event = runtime.profiling_summary()["events"][-1]
+    assert event["name"] == "compute_bucket_fast_path_gate"
+    assert event["layer_id"] == 9
+    assert event["payload"] == {
+        "enabled": True,
+        "reason": "eligible",
+        "bucket_id": 3,
+        "signature": "counts:1,2,1",
+        "original_expert_count": 3,
+        "compact_expert_count": 3,
+    }
 
 
 def test_global_runtime_is_disabled_by_default(monkeypatch):

@@ -31,6 +31,10 @@ def test_default_config_is_disabled(monkeypatch):
         "VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS",
         "VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME",
         "VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD",
+        "VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH",
+        "VLLM_ASCEND_MOE_GMM_TRACE_PATH",
+        "VLLM_ASCEND_MOE_GMM_PROFILE_PATH",
+        "VLLM_ASCEND_MOE_GMM_BUCKET_PLAN_PATH",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -45,6 +49,11 @@ def test_default_config_is_disabled(monkeypatch):
     assert cfg.trace_max_records == 4096
     assert cfg.layered_runtime is False
     assert cfg.fanout_threshold == 0
+    assert cfg.compute_bucket_plan_path == ""
+    assert cfg.gmm_trace_path == ""
+    assert cfg.gmm_profile_path == ""
+    assert cfg.gmm_bucket_plan_path == ""
+    assert cfg.should_trace_gmm is False
 
 
 def test_env_config_parses_values(monkeypatch):
@@ -57,6 +66,10 @@ def test_env_config_parses_values(monkeypatch):
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_TRACE_MAX_RECORDS", "16")
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME", "1")
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD", "4")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH", "/tmp/sew_moe_p1_plan.json")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_GMM_TRACE_PATH", "/tmp/gmm_trace.jsonl")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_GMM_PROFILE_PATH", "/tmp/gmm_profile.jsonl")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_GMM_BUCKET_PLAN_PATH", "/tmp/gmm_bucket_plan.json")
 
     cfg = MoeOffloadConfig.from_env()
 
@@ -69,6 +82,11 @@ def test_env_config_parses_values(monkeypatch):
     assert cfg.trace_max_records == 16
     assert cfg.layered_runtime is True
     assert cfg.fanout_threshold == 4
+    assert cfg.compute_bucket_plan_path == "/tmp/gmm_bucket_plan.json"
+    assert cfg.gmm_trace_path == "/tmp/gmm_trace.jsonl"
+    assert cfg.gmm_profile_path == "/tmp/gmm_profile.jsonl"
+    assert cfg.gmm_bucket_plan_path == "/tmp/gmm_bucket_plan.json"
+    assert cfg.should_trace_gmm is True
 
 
 def test_env_variables_are_registered(monkeypatch):
@@ -76,11 +94,39 @@ def test_env_variables_are_registered(monkeypatch):
 
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_ENABLED", "1")
     monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS", "7")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH", "/tmp/plan.json")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_GMM_TRACE_PATH", "/tmp/gmm_trace.jsonl")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_GMM_PROFILE_PATH", "/tmp/gmm_profile.jsonl")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_GMM_BUCKET_PLAN_PATH", "/tmp/gmm_plan.json")
 
     assert "VLLM_ASCEND_MOE_OFFLOAD_ENABLED" in envs_ascend.env_variables
     assert "VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS" in envs_ascend.env_variables
+    assert "VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH" in envs_ascend.env_variables
+    assert "VLLM_ASCEND_MOE_GMM_TRACE_PATH" in envs_ascend.env_variables
+    assert "VLLM_ASCEND_MOE_GMM_PROFILE_PATH" in envs_ascend.env_variables
+    assert "VLLM_ASCEND_MOE_GMM_BUCKET_PLAN_PATH" in envs_ascend.env_variables
     assert envs_ascend.VLLM_ASCEND_MOE_OFFLOAD_ENABLED is True
     assert envs_ascend.VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS == 7
+    assert envs_ascend.VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH == "/tmp/plan.json"
+    assert envs_ascend.VLLM_ASCEND_MOE_GMM_TRACE_PATH == "/tmp/gmm_trace.jsonl"
+    assert envs_ascend.VLLM_ASCEND_MOE_GMM_PROFILE_PATH == "/tmp/gmm_profile.jsonl"
+    assert envs_ascend.VLLM_ASCEND_MOE_GMM_BUCKET_PLAN_PATH == "/tmp/gmm_plan.json"
 
     os.environ.pop("VLLM_ASCEND_MOE_OFFLOAD_ENABLED", None)
     os.environ.pop("VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS", None)
+    os.environ.pop("VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH", None)
+    os.environ.pop("VLLM_ASCEND_MOE_GMM_TRACE_PATH", None)
+    os.environ.pop("VLLM_ASCEND_MOE_GMM_PROFILE_PATH", None)
+    os.environ.pop("VLLM_ASCEND_MOE_GMM_BUCKET_PLAN_PATH", None)
+
+
+def test_gmm_trace_does_not_require_offload_enabled(tmp_path):
+    trace_path = tmp_path / "gmm_trace.jsonl"
+    cfg = MoeOffloadConfig(
+        enabled=False,
+        trace_only=False,
+        gmm_trace_path=str(trace_path),
+    )
+
+    assert cfg.should_trace is False
+    assert cfg.should_trace_gmm is True

@@ -24,6 +24,7 @@ from tools.sew_offload.collect_moe_trace import (
     csv_set,
     load_manifest,
     prepare_sharegpt_manifest,
+    prepare_synthetic_smoke_manifest,
 )
 from tools.sew_offload.sharegpt_manifest import assert_no_random_dataset
 from vllm_ascend.moe_offload.runtime import get_moe_offload_runtime, reset_moe_offload_runtime
@@ -44,6 +45,7 @@ SEW_OFFLOAD_ENV_VARS = (
     "VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME",
     "VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD",
     "VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH",
+    "VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH",
 )
 
 
@@ -52,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument(
         "--mode",
-        choices=("no_offload", "trace_only", "fixed_slot_sync"),
+        choices=("no_offload", "trace_only", "compute_bucket_fast_path", "fixed_slot_sync"),
         default="fixed_slot_sync",
         help="Single-process smoke mode. Run modes separately for correctness comparison.",
     )
@@ -80,6 +82,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--release-original-expert-weights", action="store_true")
     parser.add_argument("--layered-runtime", action="store_true")
     parser.add_argument("--fanout-threshold", type=int, default=0)
+    parser.add_argument("--compute-bucket-plan-path", default="")
     parser.add_argument("--offload-backend", default="prefetch")
     parser.add_argument("--offload-group-size", type=int, default=4)
     parser.add_argument("--offload-num-in-group", type=int, default=1)
@@ -166,6 +169,7 @@ def configure_sew_offload_env(
     layered_runtime: bool = False,
     fanout_threshold: int = 0,
     trace_path: str = "moe_offload_trace.jsonl",
+    compute_bucket_plan_path: str = "",
 ) -> None:
     if mode == "no_offload":
         for env_name in SEW_OFFLOAD_ENV_VARS:
@@ -176,6 +180,10 @@ def configure_sew_offload_env(
         os.environ["VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY"] = "1"
         os.environ["VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS"] = "0"
         os.environ["VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH"] = trace_path
+    elif mode == "compute_bucket_fast_path":
+        os.environ.pop("VLLM_ASCEND_MOE_OFFLOAD_ENABLED", None)
+        os.environ.pop("VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY", None)
+        os.environ["VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS"] = "0"
     elif mode == "fixed_slot_sync":
         os.environ["VLLM_ASCEND_MOE_OFFLOAD_ENABLED"] = "1"
         os.environ["VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY"] = "0"
@@ -190,6 +198,10 @@ def configure_sew_offload_env(
     )
     os.environ["VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME"] = "1" if layered_runtime else "0"
     os.environ["VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD"] = str(int(fanout_threshold))
+    if compute_bucket_plan_path:
+        os.environ["VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH"] = compute_bucket_plan_path
+    else:
+        os.environ.pop("VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH", None)
     os.environ.setdefault("VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH", "moe_offload_profile.jsonl")
 
 
@@ -354,6 +366,7 @@ def run_smoke(
         layered_runtime=getattr(args, "layered_runtime", False),
         fanout_threshold=getattr(args, "fanout_threshold", 0),
         trace_path=str(trace_jsonl_path),
+        compute_bucket_plan_path=getattr(args, "compute_bucket_plan_path", ""),
     )
     if mode != "no_offload":
         os.environ["VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH"] = str(profile_jsonl_path)
@@ -387,6 +400,7 @@ def run_smoke(
             "num_slots": int(args.num_slots) if mode == "fixed_slot_sync" else 0,
             "layered_runtime": bool(getattr(args, "layered_runtime", False)) if mode == "fixed_slot_sync" else False,
             "fanout_threshold": int(getattr(args, "fanout_threshold", 0)) if mode == "fixed_slot_sync" else 0,
+            "compute_bucket_plan_path": os.environ.get("VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH", ""),
             "load_seconds": load_s,
             "manifest": str(args.manifest),
             "buckets": args.buckets,
@@ -419,12 +433,11 @@ def main() -> None:
     args.manifest = str(manifest_path)
 
     if args.prepare_smoke_manifest:
-        prepare_sharegpt_manifest(
+        prepare_synthetic_smoke_manifest(
             config=config,
             manifest_path=manifest_path,
             requests_per_bucket=args.smoke_requests_per_bucket,
             buckets=selected_buckets,
-            model_path=args.model,
         )
         if args.prepare_only:
             print(f"PREPARE_OK manifest={manifest_path}", flush=True)

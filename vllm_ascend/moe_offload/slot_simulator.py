@@ -45,6 +45,10 @@ class SlotSimulationSummary:
     miss_count: int
     eviction_count: int
     host_to_hbm_bytes: int
+    prefetchable_miss_count: int
+    exposed_miss_count: int
+    prefetchable_host_to_hbm_bytes: int
+    exposed_host_to_hbm_bytes: int
     estimated_load_ms: float
     phase_opportunity_count: int
     num_slots: int
@@ -57,6 +61,10 @@ class SlotSimulationSummary:
             "miss_count": self.miss_count,
             "eviction_count": self.eviction_count,
             "host_to_hbm_bytes": self.host_to_hbm_bytes,
+            "prefetchable_miss_count": self.prefetchable_miss_count,
+            "exposed_miss_count": self.exposed_miss_count,
+            "prefetchable_host_to_hbm_bytes": self.prefetchable_host_to_hbm_bytes,
+            "exposed_host_to_hbm_bytes": self.exposed_host_to_hbm_bytes,
             "estimated_load_ms": self.estimated_load_ms,
             "phase_opportunity_count": self.phase_opportunity_count,
             "num_slots": self.num_slots,
@@ -90,13 +98,17 @@ class SlotSimulator:
         miss_count = 0
         eviction_count = 0
         host_to_hbm_bytes = 0
+        prefetchable_miss_count = 0
+        prefetchable_host_to_hbm_bytes = 0
         phase_opportunity_count = 0
         total_records = 0
+        replay_records = self._select_replay_records(records)
 
-        for total_records, record in enumerate(records, start=1):
+        for total_records, record in enumerate(replay_records, start=1):
             active_keys = self._active_keys(record)
             record_hits = 0
             record_misses = 0
+            record_miss_keys: list[ExpertKey] = []
             for key in active_keys:
                 if key in resident:
                     hit_count += 1
@@ -104,6 +116,7 @@ class SlotSimulator:
                 else:
                     miss_count += 1
                     record_misses += 1
+                    record_miss_keys.append(key)
                     if len(resident) >= num_slots:
                         victim = policy.choose_victim(
                             sorted(resident),
@@ -117,7 +130,14 @@ class SlotSimulator:
                 last_used[key] = total_records
             if record_hits > 0 and record_misses > 0:
                 phase_opportunity_count += 1
+            if total_records > 1 and len(active_keys) <= num_slots:
+                prefetchable_miss_count += len(record_miss_keys)
+                prefetchable_host_to_hbm_bytes += sum(
+                    self.size_table.bytes_for(key) for key in record_miss_keys
+                )
 
+        exposed_miss_count = miss_count - prefetchable_miss_count
+        exposed_host_to_hbm_bytes = host_to_hbm_bytes - prefetchable_host_to_hbm_bytes
         estimated_load_ms = self._estimate_load_ms(host_to_hbm_bytes)
         return SlotSimulationSummary(
             total_records=total_records,
@@ -125,11 +145,32 @@ class SlotSimulator:
             miss_count=miss_count,
             eviction_count=eviction_count,
             host_to_hbm_bytes=host_to_hbm_bytes,
+            prefetchable_miss_count=prefetchable_miss_count,
+            exposed_miss_count=exposed_miss_count,
+            prefetchable_host_to_hbm_bytes=prefetchable_host_to_hbm_bytes,
+            exposed_host_to_hbm_bytes=exposed_host_to_hbm_bytes,
             estimated_load_ms=estimated_load_ms,
             phase_opportunity_count=phase_opportunity_count,
             num_slots=num_slots,
             policy=policy_name,
         )
+
+    @staticmethod
+    def _select_replay_records(records: Iterable[TraceRecord | dict[str, Any]]) -> list[TraceRecord | dict[str, Any]]:
+        materialized = list(records)
+        grouped_records = [
+            record for record in materialized
+            if SlotSimulator._record_source(record) == "grouped_dispatch"
+        ]
+        if grouped_records:
+            return grouped_records
+        return materialized
+
+    @staticmethod
+    def _record_source(record: TraceRecord | dict[str, Any]) -> str:
+        if isinstance(record, TraceRecord):
+            return record.source
+        return str(record.get("source") or "")
 
     @staticmethod
     def _active_keys(record: TraceRecord | dict[str, Any]) -> list[ExpertKey]:

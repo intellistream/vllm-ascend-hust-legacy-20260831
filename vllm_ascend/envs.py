@@ -183,11 +183,30 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MOE_OFFLOAD_PHASE_SPLIT": lambda: bool(
         int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_PHASE_SPLIT", "0"))
     ),
+    # Option 2: graph-compatible offload (decision/execution decoupling). Default
+    # off => current eager-only offload behavior is unchanged.
+    "VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE", "0"))
+    ),
     # MVP-D.9 verification: optional JSONL path for cross-process profiling artifacts.
     "VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH": lambda: os.getenv("VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH", ""),
+    # Non-offload MoE GroupedMatmul trace path. Records grouped dispatch shapes
+    # without requiring VLLM_ASCEND_MOE_OFFLOAD_ENABLED.
+    "VLLM_ASCEND_MOE_GMM_TRACE_PATH": lambda: os.getenv("VLLM_ASCEND_MOE_GMM_TRACE_PATH", ""),
+    # Non-offload MoE GroupedMatmul profile path for fast-path decisions and
+    # shape-plan diagnostics.
+    "VLLM_ASCEND_MOE_GMM_PROFILE_PATH": lambda: os.getenv("VLLM_ASCEND_MOE_GMM_PROFILE_PATH", ""),
+    # Non-offload MoE GroupedMatmul bucket plan path. This path takes
+    # precedence over the older compute bucket plan env when both are set.
+    "VLLM_ASCEND_MOE_GMM_BUCKET_PLAN_PATH": lambda: os.getenv("VLLM_ASCEND_MOE_GMM_BUCKET_PLAN_PATH", ""),
     # Pipeline-level profiling: record Stage T/R/C/M npu.Event elapsed times (trace-only, no overlap changes).
     "VLLM_ASCEND_MOE_PIPELINE_PROFILING": lambda: bool(
         int(os.getenv("VLLM_ASCEND_MOE_PIPELINE_PROFILING", "0"))
+    ),
+    # Optional SEW-MoE P1 plan produced by the profiling suite. When set, runtime can classify
+    # grouped dispatch signatures before the existing grouped matmul fallback.
+    "VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH": lambda: os.getenv(
+        "VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH", ""
     ),
 }
 

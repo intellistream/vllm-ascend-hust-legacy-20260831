@@ -41,6 +41,21 @@ class MoeOffloadConfig:
     fanout_threshold: int = 0
     # MVP-D.11: post-dispatch phase split semantic prototype (default off).
     phase_split_enabled: bool = False
+    # Option 2: graph-compatible offload via decision/execution decoupling.
+    # When on, capture uses the no-host-sync capture-safe slot plan so ACLGraph
+    # can record the MoE region; the data-dependent decision + H2D staging is
+    # done eager before replay. Default off => current eager-only behavior.
+    graph_compatible_offload: bool = False
+    # P1-C scaffold: optional profiling-suite plan for stable grouped compute buckets.
+    compute_bucket_plan_path: str = ""
+    # Non-offload MoE GroupedMatmul diagnostics and plan inputs.
+    gmm_trace_path: str = ""
+    gmm_profile_path: str = ""
+    gmm_bucket_plan_path: str = ""
+
+    def __post_init__(self) -> None:
+        if self.gmm_bucket_plan_path:
+            object.__setattr__(self, "compute_bucket_plan_path", self.gmm_bucket_plan_path)
 
     @classmethod
     def from_env(cls) -> "MoeOffloadConfig":
@@ -59,6 +74,11 @@ class MoeOffloadConfig:
             layered_runtime=envs.VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME,
             fanout_threshold=envs.VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD,
             phase_split_enabled=envs.VLLM_ASCEND_MOE_OFFLOAD_PHASE_SPLIT,
+            graph_compatible_offload=envs.VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE,
+            compute_bucket_plan_path=envs.VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH,
+            gmm_trace_path=envs.VLLM_ASCEND_MOE_GMM_TRACE_PATH,
+            gmm_profile_path=envs.VLLM_ASCEND_MOE_GMM_PROFILE_PATH,
+            gmm_bucket_plan_path=envs.VLLM_ASCEND_MOE_GMM_BUCKET_PLAN_PATH,
         )
 
     @property
@@ -71,6 +91,10 @@ class MoeOffloadConfig:
     @property
     def should_trace(self) -> bool:
         return self.enabled and self.trace_only
+
+    @property
+    def should_trace_gmm(self) -> bool:
+        return bool(self.gmm_trace_path) or self.should_trace
 
     @property
     def effective_fanout_threshold(self) -> int:

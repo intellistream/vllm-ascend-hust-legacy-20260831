@@ -220,11 +220,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             num_experts=num_logical_experts,
         )
         moe_offload_runtime = get_moe_offload_runtime()
-        topk_ids, topk_weights = moe_offload_runtime.trace_routing(
+        topk_ids, topk_weights = moe_offload_runtime.trace_logical_active_experts(
             layer_id=getattr(layer, "layer_id", -1),
             topk_ids=topk_ids,
             topk_weights=topk_weights,
-            num_experts=num_logical_experts,
+            num_logical_experts=num_logical_experts,
         )
         if layer.vllm_config.model_config is not None and layer.vllm_config.model_config.enable_return_routed_experts:
             capturer = RoutedExpertsCapturer.get_instance()
@@ -332,6 +332,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 offload_layer_id=layer_id,
                 offload_num_logical_experts=num_logical_experts,
                 offload_expected_device_type=offload_expected_device_type,
+                trace_layer_id=layer_id,
+                trace_num_logical_experts=num_logical_experts,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:

@@ -305,6 +305,8 @@ class TestMoECommMethod(TestBase):
         )
         runtime = MagicMock()
         runtime.should_use_layered_runtime = False
+        runtime.config.graph_compatible_offload = False
+        runtime.config.phase_split_enabled = False
         runtime.prepare_fixed_slot_plan.return_value = prepared
         runtime.should_use_fixed_slot_plan_for_layer.return_value = True
 
@@ -379,6 +381,8 @@ class TestMoECommMethod(TestBase):
         original_w2 = torch.randn(3, 4, 2)
         runtime = MagicMock()
         runtime.should_use_layered_runtime = True
+        runtime.config.graph_compatible_offload = False
+        runtime.config.phase_split_enabled = False
         runtime.decide_layered_path.return_value = MagicMock(path=MoeOffloadDecisionPath.FULL_WEIGHT_PATH)
 
         with (
@@ -427,6 +431,8 @@ class TestMoECommMethod(TestBase):
         comm_impl = AllGatherCommImpl(self.moe_config)
         runtime = MagicMock()
         runtime.should_use_layered_runtime = True
+        runtime.config.graph_compatible_offload = False
+        runtime.config.phase_split_enabled = False
         runtime.decide_layered_path.return_value = MagicMock(
             path=MoeOffloadDecisionPath.FAIL_CLOSED,
             reason="high_fanout_full_weights_unavailable",

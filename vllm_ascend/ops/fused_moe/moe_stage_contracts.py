@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 import torch
@@ -79,6 +79,8 @@ class MoEFusedExpertsInput:
     need_trans: bool = False
     dynamic_eplb: bool = False
     offload: MoEOffloadParams | None = None
+    trace_layer_id: int = -1
+    trace_num_logical_experts: int = -1
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +152,7 @@ class MoEMlpComputeInput:
     activation: str = "silu"
     need_trans: bool = False
     dynamic_eplb: bool = False
+    compute_bucket_decision: Any | None = None
 
 
 __all__ = [

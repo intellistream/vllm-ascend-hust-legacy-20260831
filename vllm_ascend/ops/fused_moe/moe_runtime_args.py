@@ -150,6 +150,8 @@ def build_fused_experts_input(
     offload_layer_id: int = -1,
     offload_num_logical_experts: int = -1,
     offload_expected_device_type: str = "npu",
+    trace_layer_id: int = -1,
+    trace_num_logical_experts: int = -1,
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
@@ -187,6 +189,8 @@ def build_fused_experts_input(
         )
         if offload_enabled
         else None,
+        trace_layer_id=trace_layer_id,
+        trace_num_logical_experts=trace_num_logical_experts,
         quant=MoEQuantParams(
             quant_type=quant_type,
             comm_quant_mode=comm_quant_mode,
@@ -221,6 +225,7 @@ def build_mlp_compute_input(
     fused_experts_input: MoEFusedExpertsInput,
     token_dispatch_output: MoETokenDispatchOutput[TMoECombineMetadata],
     use_fusion_ops: bool,
+    compute_bucket_decision: object | None = None,
 ) -> MoEMlpComputeInput:
     if fused_experts_input.quant.is_mxfp and fused_experts_input.quant.mxfp is None:
         raise ValueError("fused_experts_input.quant.mxfp is required for MXFP quant types.")
@@ -237,6 +242,7 @@ def build_mlp_compute_input(
         activation=fused_experts_input.activation,
         need_trans=fused_experts_input.need_trans,
         dynamic_eplb=fused_experts_input.dynamic_eplb,
+        compute_bucket_decision=compute_bucket_decision,
     )
 
 

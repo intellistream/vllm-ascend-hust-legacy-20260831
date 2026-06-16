@@ -69,6 +69,56 @@ def _bucket_target_prompt_tokens(bucket: dict[str, Any], index: int) -> int:
     return int(round(low + (high - low) * ratio))
 
 
+def prepare_synthetic_smoke_manifest(
+    *,
+    config: dict[str, Any],
+    manifest_path: Path,
+    requests_per_bucket: int,
+    buckets: set[str] | None,
+) -> None:
+    """Write a deterministic tiny manifest for unit and local smoke tests only."""
+    seed = int(config.get("dataset", {}).get("seed", 0))
+    cap = requests_per_bucket if requests_per_bucket and requests_per_bucket > 0 else None
+
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with manifest_path.open("w", encoding="utf-8") as out:
+        for bucket in config["workload_buckets"]:
+            name = bucket["name"]
+            if buckets is not None and name not in buckets:
+                continue
+            target = int(bucket["num_requests"])
+            if cap is not None:
+                target = min(target, cap)
+            output_tokens = int(bucket["output_tokens"])
+            for index in range(target):
+                target_prompt_tokens = _bucket_target_prompt_tokens(bucket, index)
+                prompt = (
+                    f"SEW-Offload synthetic smoke request {name} {index}. "
+                    f"Target prompt tokens approximately {target_prompt_tokens}. "
+                    "Explain active expert routing and grouped matmul briefly."
+                )
+                record = {
+                    "request_id": f"{name}_{index:04d}",
+                    "bucket": name,
+                    "prompt": prompt,
+                    "prompt_tokens": target_prompt_tokens,
+                    "max_output_tokens": output_tokens,
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "seed": seed,
+                    "dataset": "synthetic_smoke",
+                }
+                out.write(json.dumps(record, ensure_ascii=False) + "\n")
+                written += 1
+
+    if written == 0:
+        raise ValueError(
+            f"no synthetic smoke requests matched selected buckets: {sorted(buckets) if buckets else 'all'}"
+        )
+    print(f"SYNTHETIC_MANIFEST_OK written={written} path={manifest_path}", flush=True)
+
+
 def prepare_sharegpt_manifest(
     *,
     config: dict[str, Any],

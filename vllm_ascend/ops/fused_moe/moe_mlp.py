@@ -15,6 +15,8 @@
 # This file is a part of the vllm-ascend project.
 
 
+from dataclasses import dataclass
+
 import torch
 import torch_npu
 from torch.nn.functional import pad
@@ -25,6 +27,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
+from vllm_ascend.moe_offload.runtime import get_moe_offload_runtime
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.utils import (
@@ -32,6 +35,32 @@ from vllm_ascend.utils import (
     enable_custom_op,
     get_weight_prefetch_method,
 )
+
+
+@dataclass(frozen=True)
+class ComputeBucketFastPathGate:
+    enabled: bool
+    reason: str
+    bucket_id: int | None = None
+    signature: str = ""
+    original_expert_count: int = 0
+    compact_expert_count: int = 0
+
+
+@dataclass(frozen=True)
+class ActiveExpertCompaction:
+    w1: torch.Tensor
+    w2: torch.Tensor
+    group_list: torch.Tensor
+    w1_bias: torch.Tensor | None
+    w2_bias: torch.Tensor | None
+
+
+_PLANNED_COMPACTION_TENSOR_CACHE: dict[tuple[object, ...], tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def clear_active_expert_compaction_cache() -> None:
+    _PLANNED_COMPACTION_TENSOR_CACHE.clear()
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
@@ -78,6 +107,156 @@ def _require_single_tensor_for_swiglu_quant(
             raise ValueError(f"{name} must be a tensor or a single-element list, but got {len(tensor_or_list)}.")
         return tensor_or_list[0]
     return tensor_or_list
+
+
+def maybe_select_compute_bucket_fast_path(mlp_compute_input: MoEMlpComputeInput) -> ComputeBucketFastPathGate:
+    decision = mlp_compute_input.compute_bucket_decision
+    if decision is None:
+        return ComputeBucketFastPathGate(enabled=False, reason="no_bucket_decision")
+    original_expert_count, compact_expert_count = _expert_counts_from_decision(decision)
+    if getattr(decision, "path", None) != "bucket":
+        return ComputeBucketFastPathGate(
+            enabled=False,
+            reason="bucket_decision_fallback",
+            signature=str(getattr(decision, "signature", "")),
+            original_expert_count=original_expert_count,
+            compact_expert_count=compact_expert_count,
+        )
+    if mlp_compute_input.quant.is_quant:
+        return ComputeBucketFastPathGate(
+            enabled=False,
+            reason="requires_unquantized_path",
+            bucket_id=getattr(decision, "bucket_id", None),
+            signature=str(getattr(decision, "signature", "")),
+            original_expert_count=original_expert_count,
+            compact_expert_count=compact_expert_count,
+        )
+    if mlp_compute_input.group_list_type not in (0, 1):
+        return ComputeBucketFastPathGate(
+            enabled=False,
+            reason="unsupported_group_list_type",
+            bucket_id=getattr(decision, "bucket_id", None),
+            signature=str(getattr(decision, "signature", "")),
+            original_expert_count=original_expert_count,
+            compact_expert_count=compact_expert_count,
+        )
+    return ComputeBucketFastPathGate(
+        enabled=True,
+        reason="eligible",
+        bucket_id=getattr(decision, "bucket_id", None),
+        signature=str(getattr(decision, "signature", "")),
+        original_expert_count=original_expert_count,
+        compact_expert_count=compact_expert_count,
+    )
+
+
+def _expert_counts_from_decision(decision: object) -> tuple[int, int]:
+    bucket = getattr(decision, "bucket", None)
+    original_expert_count = int(getattr(bucket, "original_expert_count", 0) or 0)
+    compact_expert_count = int(getattr(bucket, "compact_expert_count", 0) or 0)
+    if original_expert_count > 0 or compact_expert_count > 0:
+        return original_expert_count, compact_expert_count
+
+    signature = str(getattr(decision, "signature", ""))
+    prefix, separator, payload = signature.partition(":")
+    if separator != ":" or prefix != "counts":
+        return 0, 0
+    counts = [int(value) for value in payload.split(",") if value.strip()]
+    return len(counts), sum(1 for count in counts if count > 0)
+
+
+def record_compute_bucket_fast_path_gate(gate: ComputeBucketFastPathGate) -> None:
+    try:
+        get_moe_offload_runtime().record_compute_bucket_fast_path_gate(
+            layer_id=None,
+            enabled=gate.enabled,
+            reason=gate.reason,
+            bucket_id=gate.bucket_id,
+            signature=gate.signature,
+            original_expert_count=gate.original_expert_count,
+            compact_expert_count=gate.compact_expert_count,
+        )
+    except Exception:
+        return
+
+
+def maybe_compact_active_expert_unquant_path(
+    *,
+    gate: ComputeBucketFastPathGate,
+    decision: object | None,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    group_list: torch.Tensor,
+    group_list_type: int,
+    w1_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+) -> ActiveExpertCompaction | None:
+    if not gate.enabled:
+        return None
+    if not isinstance(w1, torch.Tensor) or not isinstance(w2, torch.Tensor):
+        return None
+
+    bucket = getattr(decision, "bucket", None)
+    planned_ids = tuple(getattr(bucket, "active_expert_ids", ()) or ())
+    planned_group_list = tuple(getattr(bucket, "compact_group_list", ()) or ())
+    if planned_ids and planned_group_list:
+        active_expert_ids, compact_group_list = _planned_compaction_tensors(
+            bucket_id=gate.bucket_id,
+            signature=gate.signature,
+            planned_ids=planned_ids,
+            planned_group_list=planned_group_list,
+            id_device=w1.device,
+            group_device=group_list.device,
+            group_dtype=group_list.dtype,
+        )
+    else:
+        if group_list_type != 1:
+            return None
+        active_mask = group_list > 0
+        if bool(torch.all(active_mask)):
+            return None
+        active_expert_ids = torch.nonzero(active_mask, as_tuple=False).reshape(-1)
+        compact_group_list = group_list.index_select(0, active_expert_ids.to(group_list.device))
+    if active_expert_ids.numel() == 0:
+        return None
+    if active_expert_ids.numel() == group_list.numel():
+        return None
+
+    return ActiveExpertCompaction(
+        w1=w1.index_select(0, active_expert_ids),
+        w2=w2.index_select(0, active_expert_ids),
+        group_list=compact_group_list,
+        w1_bias=None if w1_bias is None else w1_bias.index_select(0, active_expert_ids),
+        w2_bias=None if w2_bias is None else w2_bias.index_select(0, active_expert_ids),
+    )
+
+
+def _planned_compaction_tensors(
+    *,
+    bucket_id: int | None,
+    signature: str,
+    planned_ids: tuple[int, ...],
+    planned_group_list: tuple[int, ...],
+    id_device: torch.device,
+    group_device: torch.device,
+    group_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    key = (
+        int(bucket_id) if bucket_id is not None else None,
+        str(signature),
+        tuple(int(value) for value in planned_ids),
+        tuple(int(value) for value in planned_group_list),
+        str(id_device),
+        str(group_device),
+        str(group_dtype),
+    )
+    cached = _PLANNED_COMPACTION_TENSOR_CACHE.get(key)
+    if cached is not None:
+        return cached
+    active_expert_ids = torch.tensor(planned_ids, dtype=torch.long, device=id_device)
+    compact_group_list = torch.tensor(planned_group_list, dtype=group_dtype, device=group_device)
+    _PLANNED_COMPACTION_TENSOR_CACHE[key] = (active_expert_ids, compact_group_list)
+    return active_expert_ids, compact_group_list
 
 
 def quant_apply_mlp(
@@ -393,8 +572,27 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     need_trans = mlp_compute_input.need_trans
     dynamic_eplb = mlp_compute_input.dynamic_eplb
     fusion = mlp_compute_input.fusion
+    compute_bucket_gate = maybe_select_compute_bucket_fast_path(mlp_compute_input)
+    if mlp_compute_input.compute_bucket_decision is not None:
+        record_compute_bucket_fast_path_gate(compute_bucket_gate)
 
     if not mlp_compute_input.quant.is_quant:
+        compaction = maybe_compact_active_expert_unquant_path(
+            gate=compute_bucket_gate,
+            decision=mlp_compute_input.compute_bucket_decision,
+            w1=w1,
+            w2=w2,
+            group_list=group_list,
+            group_list_type=group_list_type,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+        )
+        if compaction is not None:
+            w1 = compaction.w1
+            w2 = compaction.w2
+            group_list = compaction.group_list
+            w1_bias = compaction.w1_bias
+            w2_bias = compaction.w2_bias
         return unquant_apply_mlp(
             hidden_states=hidden_states,
             w1=w1,
