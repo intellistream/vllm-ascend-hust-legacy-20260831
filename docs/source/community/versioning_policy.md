@@ -7,10 +7,6 @@ Starting with vLLM 0.7.x, the vLLM Ascend Plugin ([vllm-project/vllm-ascend](htt
 Each vLLM Ascend release is versioned as `v[major].[minor].[micro][rcN][.postN]` (such as
 `v0.7.3rc1`, `v0.7.3`, `v0.7.3.post1`)
 
-For the `vllm-ascend-hust` fork, we additionally keep an explicit upstream
-anchor tag and explicit runtime upstream metadata so that editable or forked
-installs still preserve the upstream compatibility semantics.
-
 - **Final releases**: Typically scheduled every three months, with careful alignment to the vLLM upstream release cycle and the Ascend software product roadmap.
 - **Pre releases**: Typically issued **on demand**, labeled with rcN to indicate the Nth release candidate. They are intended to support early testing by users ahead of the final release.
 - **Post releases**: Typically issued **on demand** to address minor errors in a final release. Different from [PEP-440 post release note](https://peps.python.org/pep-0440/#post-releases) convention, these versions include actual bug fixes, as the final release version must strictly align with the vLLM final release format (`v[major].[minor].[micro]`). Any post version must be published as a patch version of the final release.
@@ -21,37 +17,13 @@ For example:
 - `v0.7.3rc1`: first pre version of vLLM Ascend.
 - `v0.7.3.post1`: post release for the `v0.7.3` release if it has some minor errors.
 
-## Fork tag and metadata rules
-
-The `vllm-ascend-hust` fork uses two git tag families and one runtime metadata
-family together:
-
-* Upstream anchor tags: `upstream/vX.Y.Z` or `upstream/vX.Y.ZrcN`
-* Fork release tags: `vX.Y.Z.postN`
-* Development builds: `X.Y.Z.postN.devM+gSHA`
-
-The generated package metadata exports:
-
-* `__version__`: full fork version string
-* `__upstream_version__`: upstream compatibility version
-* `__upstream_commit__`: upstream anchor commit hash
-* `__commit_id__`: current fork commit id
-
-For the current maintained fork line:
-
-* Upstream anchor: `upstream/v0.19.1rc1`
-* Current fork release line: `v0.19.1.post1`
-
-Git tags apply only to committed objects. If the worktree is dirty, the build
-version may gain a `.dirty` suffix, but that state cannot be represented by a
-release tag until the changes are committed.
-
 ## Release compatibility matrix
 
 The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM              | Python          | Stable CANN |        PyTorch/torch_npu        |   Triton Ascend   | Mooncake |
 |-------------|-------------------|-----------------|-------------|---------------------------------|-------------------|----------|
+| v0.21.0rc1  | v0.21.0           | >= 3.10, < 3.13 | 9.0.0       | 2.10.0 / 2.10.0                 | 3.2.1             | v0.3.9 |
 | v0.20.2rc1  | v0.20.2           | >= 3.10, < 3.12 | 9.0.0       | 2.10.0 / 2.10.0                 | 3.2.1             |          |
 | v0.19.1rc1  | v0.19.1           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0                  | 3.2.0             |          |
 | v0.18.0     | v0.18.0           | >= 3.10, < 3.12 | 8.5.1       | 2.9.0  / 2.9.0.post1+git4c901a4 | 3.2.0.dev20260322 |  3.9.0   |
@@ -93,7 +65,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  | Triton Ascend |
 |-------------|--------------|------------------|-------------|--------------------|---------------|
-|     main    | {{main_vllm_commit}} | {{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_torch_npu_version}} | {{main_triton_ascend_version}} |
+|     main    | {{main_vllm_commit}}, {{main_vllm_tag}} | {{main_python_version}}   | {{main_cann_version}} | {{main_pytorch_torch_npu_version}} | {{main_triton_ascend_version}} |
 
 ## Release cadence
 
@@ -101,6 +73,7 @@ For main branch of vLLM Ascend, we usually make it compatible with the latest vL
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2026.06.16 | Release candidates, v0.21.0rc1            |
 | 2026.06.03 | Release candidates, v0.20.2rc1            |
 | 2026.04.30 | Release candidates, v0.19.1rc1            |
 | 2026.04.24 | Release candidates, v0.13.0rc3            |
@@ -190,7 +163,6 @@ For main branch, vLLM Ascend should work with vLLM main branch and latest 1 or 2
 
 - Both main branch and target vLLM release, such as the vLLM main branch and vLLM 0.8.4, are tested by Ascend E2E CI.
 - To make sure that code changes are compatible with the latest 1 or 2 vLLM releases, vLLM Ascend introduces a version check mechanism inside the code. It checks the version of the installed vLLM package first to decide which code logic to use. If users hit the `InvalidVersion` error, it may indicate that they have installed a dev or editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use.
-- In `vllm-ascend-hust`, compatibility checks should use the installed vLLM package's `__upstream_version__` when it is available. This keeps fork suffixes such as `.postN`, `.devM`, and `+gSHA` from breaking version-gated code paths. The `VLLM_VERSION` environment variable remains the manual override when needed.
 - Document changes should be compatible with the latest 1 or 2 vLLM releases. Notes should be added if there are any breaking changes.
 
 ## Document branch policy
