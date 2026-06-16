@@ -1,5 +1,16 @@
 {
   "release_version": "0.19.1",
   "upstream_version": "0.19.1rc1",
-  "upstream_commit": "ba074eb4bf095264b2d1280447281633ab66e112"
+  "upstream_commit": "ba074eb4bf095264b2d1280447281633ab66e112",
+  "cherry_picks": [
+    {"pr": 9018, "commit": "12a34900", "desc": "chunk_fwd_o + chunk_gated_delta_rule_fwd_h AscendC ops"},
+    {"pr": 9312, "commit": "911cd865", "desc": "enforce_eager truthy check fix"},
+    {"pr": 9282, "commit": "eef9eba3", "desc": "chunk_gated_delta_rule_fwd_h discontinuous kvcache"},
+    {"pr": 9497, "commit": "b3da374f", "desc": "qwen3-next + qwen3.5 + PCP fix"},
+    {"pr": 9587, "commit": "249465be", "desc": "Route GDN recurrent op through torch binding"},
+    {"pr": 9601, "commit": "4335bd25", "desc": "fused_gdn_gating AscendC custom operator"},
+    {"pr": 9724, "commit": "2672203a", "desc": "hybrid block table out of range fix"},
+    {"pr": 10172, "commit": "2221a9e7", "desc": "qwen3.5+pcp+mtp single batch fix"}
+  ],
+  "latest_cherry_pick_upstream": "2221a9e7"
 }
