@@ -5,7 +5,6 @@
 #include "../op_kernel/kv_cache_block_gather_tiling_key.h"
 #include "log/ops_log.h"
 #include "register/op_impl_kernel_registry.h"
-#include "tiling_base/tiling_templates_registry.h"
 
 namespace optiling {
 
@@ -136,12 +135,12 @@ static ge::graphStatus CheckDtypes(gert::TilingContext* context, ge::DataType& p
 static uint64_t GetTilingKeyByDtype(ge::DataType payloadDtype)
 {
     if (payloadDtype == ge::DT_FLOAT16) {
-        return GET_TPL_TILING_KEY(KV_CACHE_BLOCK_GATHER_FLOAT16_MODE);
+        return KV_CACHE_BLOCK_GATHER_FLOAT16_MODE;
     }
     if (payloadDtype == ge::DT_BF16) {
-        return GET_TPL_TILING_KEY(KV_CACHE_BLOCK_GATHER_BF16_MODE);
+        return KV_CACHE_BLOCK_GATHER_BF16_MODE;
     }
-    return GET_TPL_TILING_KEY(KV_CACHE_BLOCK_GATHER_FLOAT_MODE);
+    return KV_CACHE_BLOCK_GATHER_FLOAT_MODE;
 }
 
 static ge::graphStatus KvCacheBlockGatherTilingFunc(gert::TilingContext* context)
