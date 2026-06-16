@@ -140,6 +140,35 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+
+    # ── Sim-LLM KV reuse ─────────────────────────────────────────
+    # Master enable/disable for Sim-LLM KV reuse. When 0, all Sim-LLM
+    # hooks are no-ops and the engine runs like stock vllm-ascend.
+    "SIMLLM_ENABLED": lambda: bool(int(os.getenv("SIMLLM_ENABLED", "0"))),
+    # Cosine similarity threshold for KV reuse (paper default: 0.8).
+    # Higher → stricter matching, less reuse, better accuracy.
+    "SIMLLM_COSINE_THRESHOLD": lambda: float(os.getenv("SIMLLM_COSINE_THRESHOLD", "0.8")),
+    # Number of random projection bits for SimHash LSH.
+    # Higher → more discriminative hashing, fewer false positives.
+    "SIMLLM_LSH_NUM_BITS": lambda: int(os.getenv("SIMLLM_LSH_NUM_BITS", "64")),
+    # Batch size threshold below which exhaustive cosine comparison is
+    # used instead of LSH bucket lookup.
+    "SIMLLM_LSH_BATCH_THRESHOLD": lambda: int(os.getenv("SIMLLM_LSH_BATCH_THRESHOLD", "8")),
+    # Maximum number of task KV caches stored in KV_Manager.
+    # When exceeded, least-recently-used tasks are evicted.
+    "SIMLLM_KV_CACHE_SIZE": lambda: int(os.getenv("SIMLLM_KV_CACHE_SIZE", "1024")),
+    # Number of bottom layers whose KV is retained (sandwich bottom).
+    "SIMLLM_SANDWICH_BOTTOM": lambda: int(os.getenv("SIMLLM_SANDWICH_BOTTOM", "3")),
+    # Number of top layers whose KV is retained (sandwich top).
+    "SIMLLM_SANDWICH_TOP": lambda: int(os.getenv("SIMLLM_SANDWICH_TOP", "3")),
+    # Pooling strategy for extracting task embeddings from hidden states:
+    # "mean" / "last" / "cls".
+    "SIMLLM_EMBEDDING_POOLING": lambda: os.getenv("SIMLLM_EMBEDDING_POOLING", "mean"),
+    # When match_ratio exceeds this threshold, unmatched tasks are
+    # deferred (re-queued). 0.0 disables deferral.
+    "SIMLLM_DEFERRAL_RATIO": lambda: float(os.getenv("SIMLLM_DEFERRAL_RATIO", "0.5")),
+    # Maximum number of times a task can be deferred before force-processing.
+    "SIMLLM_MAX_DEFERRALS": lambda: int(os.getenv("SIMLLM_MAX_DEFERRALS", "3")),
 }
 
 # end-env-vars-definition
