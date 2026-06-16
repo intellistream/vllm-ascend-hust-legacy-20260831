@@ -3,8 +3,9 @@
 
 #include "../op_kernel/kv_cache_block_gather_tiling_data.h"
 #include "../op_kernel/kv_cache_block_gather_tiling_key.h"
-#include "log/ops_log.h"
+#include "error_log.h"
 #include "register/op_impl_kernel_registry.h"
+#include "tiling/platform/platform_ascendc.h"
 
 namespace optiling {
 
