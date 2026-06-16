@@ -49,11 +49,16 @@ def test_trace_collector_exports_jsonl_records(tmp_path):
         "layer_id": 3,
         "step_id": 11,
         "mode": "decode",
+        "source": "logical_topk",
         "num_tokens": 2,
         "top_k": 2,
-        "num_experts": 128,
+        "num_logical_experts": 128,
+        "fanout": 3,
         "active_experts": [0, 7, 31],
         "expert_token_counts": {"0": 1, "7": 2, "31": 1},
+        "group_list_type": None,
+        "group_list_signature": None,
+        "physical_expert_count": None,
     }
     assert json.loads(lines[1])["expert_token_counts"] == {"2": 2}
 
@@ -102,10 +107,15 @@ def test_runtime_appends_trace_jsonl_when_trace_path_is_set(tmp_path, monkeypatc
             "expert_token_counts": {"1": 1, "7": 2, "8": 1},
             "layer_id": 6,
             "mode": "decode",
-            "num_experts": 16,
+            "source": "logical_topk",
+            "num_logical_experts": 16,
             "num_tokens": 2,
+            "fanout": 3,
             "step_id": 0,
             "top_k": 2,
+            "group_list_type": None,
+            "group_list_signature": None,
+            "physical_expert_count": None,
         }
     ]
 

@@ -252,15 +252,17 @@ done
 对比 slot budget：
 
 ```bash
-for slots in 8 16 32 64; do
-  PYTHON=${PYTHON:-python}
-  $PYTHON tools/sew_offload/simulate_expert_slots.py \
-    --trace artifacts/sew_offload/traces/qwen3_30b_a3b_smoke.jsonl \
-    --num-slots "${slots}" \
-    --policy lru \
-    --output "artifacts/sew_offload/sim/qwen3_30b_a3b_slots${slots}_lru.json"
-done
+PYTHON=${PYTHON:-python}
+$PYTHON tools/sew_offload/simulate_expert_slots.py \
+  --trace artifacts/sew_offload/traces/qwen3_30b_a3b_smoke.jsonl \
+  --slot-range 8:64:8 \
+  --policy lru \
+  --expert-bytes 14680064 \
+  --output artifacts/sew_offload/sim/qwen3_30b_a3b_slot_sweep_lru.json
 ```
+
+`recommended_num_slots` 是达到最低 `host_to_hbm_bytes` / `miss_count` 的最小
+slot 数；`sweep` 数组保留每个 slot budget 的完整 replay summary。
 
 ## 9. NPU runtime 实测
 

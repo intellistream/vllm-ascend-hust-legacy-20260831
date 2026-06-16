@@ -258,6 +258,20 @@
   - `tests/ut/moe_offload/test_transfer_engine.py`
   - `tests/ut/moe_offload/test_runtime_fixed_slot_guard.py`
 - 新增 `vllm_ascend/moe_offload/host_store.py`：
+
+## 2026-06-14 P1 真实数据打穿
+
+- 用户要求停止继续堆模拟，先用真实 Qwen3-30B-A3B 和真实 ShareGPT 数据验证 P1 框架。
+- 已确认 NPU 0 空闲，模型 `/data/shared-models/Qwen3-30B-A3B` 存在，ShareGPT 原始数据 `/data/datasets/ShareGPT_V3_unfiltered_cleaned_split.json` 存在。
+- 已生成真实 ShareGPT smoke manifest：`artifacts/sew_offload/benchmarks/sew_bench_ascend_moe_30b/sharegpt_smoke_2perbucket.jsonl`，共 6 条，覆盖 `short_chat`、`medium_chat`、`decode_heavy`，每条 `dataset=sharegpt`。
+- 记录 SHA256：`docs/sew-offload/benchmark_config.yaml` 为 `54534ee7b50548361842d97164258c2aa84ee2c00492003d15d4a5d82c872e18`；manifest 为 `158d939122b4c02605d56f205cfbabe1bcadce8234849c4e3e5f0e205ca5b0ab`。
+- 第一次 trace 命令使用 `collect_moe_trace.py --override-max-output-tokens 16` 失败，原因是该脚本没有该参数；改用支持输出 token override 的 `run_fixed_slot_smoke.py --mode trace_only`。
+- 真实 trace-only ShareGPT short 1 request / 16 output tokens 已跑通：`artifacts/sew_offload/real_p1_20260614/trace_only_sharegpt_short_1req_16tok`，status ok，1632 条 MoE trace，output throughput `3.518 tok/s`。
+- Trace analyzer 结果：grouped_dispatch 816 条，fanout min/mean/max 为 `8/19.2/128`；top grouped signature concentration 仅 `0.6%`，top-3 compute bucket coverage `1.3%`、fallback `98.7%`；analyzer 推荐 P1-RM，而不是 P1-C。
+- Slot sweep 结果：`artifacts/sew_offload/real_p1_20260614/sharegpt_short_slot_sweep_1req_16tok.json`。8 slots 下 exposed miss `9914`、exposed H2D bytes `145.5GB`；128 slots 才把 exposed miss 降到 `128`，说明真实 prefill fanout 会严重冲击小 slot offload。
+- 真实 compute-only P1-C probe：`artifacts/sew_offload/real_p1_20260614/p1_p1c_probe_baseline_fast_real_sharegpt_1req_16tok`。Baseline `5.177 tok/s`，P1-C fast path `4.259 tok/s`，strict token-id correctness ok；手工解析 profile JSONL 得到 gate total `816`、enabled `11`、enabled_percent `1.35%`，主要 fallback 为 `signature_not_planned` 和 prefill `phase_mismatch`。
+- 注意：`run_p1_experiments.py` 当前 aggregate gate summary 只看父进程 `moe_offload_profile.events`，未正确汇总 `moe_offload_profile_jsonl_events`，因此 summary 中 `total=0` 不可信；真实 gate 数据需读 child process profile JSONL。
+- 真实 fixed-slot recommended offload case 失败：`artifacts/sew_offload/real_p1_20260614/p1_offload3_real_sharegpt_1req_16tok/p1_fixed_slot_recommended`。模型 reported weight 降到 `6.2751GB`，48 层 fixed-slot register 总耗时约 `42.78s`，ledger 显示 host_store `57.98GB`、slot_bank `3.62GB`，但首次真实 prefill 在 `npu_grouped_matmul` 处失败：`weight is on cpu, different from other tensors on npu:0`。说明当前 fixed-slot/offload path 还没有保证进入 GMM 前使用 NPU slot tensor，执行路径未闭合。
   - `ExpertWeightBundle`
   - `HostExpertStore.register_layer(layer)`，按 expert 维 clone post-processed `w13/w2`。
 - 新增 `vllm_ascend/moe_offload/layout.py`：
@@ -916,3 +930,84 @@
 - NPU 资源可用后跑 D.11 NPU semantic smoke：1-token 和 8-token strict compare。
 - 进入 MVP-E：async transfer + overlap metrics。
 - D.11 复盘门禁：若 Python 多 phase 开销过高，记录为语义脚手架并保留 single-phase fallback。
+
+## 2026-06-15 方向重定与 e2e 证伪 + ACLGraph 可行性分析
+
+### custom GMM kernel e2e 证伪
+- 新增 in-situ harness `tools/moe_gmm/e2e_gmm1_insitu.py`：env 门控（`VLLM_ASCEND_GMM1_PROBE_BACKEND/PATH`），只计 GMM1 累计耗时、单后端单进程、带 token-id 对照。
+- 在 `vllm_ascend/ops/fused_moe/moe_mlp.py` 的 `unquant_apply_mlp` 加 env 门控探针（默认关，零行为变化）。
+- baseline（torch_npu，NPU4）：6192 次 GMM1，2191.39ms，per-call 0.32ms，成功。
+- custom 后端（NPU4/6）：**真实 decode 单 token 阶段 AICore 异常崩溃（error 507015）**；prefill/warmup 能过，decode 必崩。
+- 结论：custom GMM1 在真实 decode 形态下不正确，microbench 的 ~4% 在 19-32% 噪声内且不收敛。custom GMM kernel 路线已被 e2e 证伪。
+
+### 真实 profile 算子排名（决定方向）
+- GroupedMatmul 46%、MatMulV2 12%，均 MTE2-bound 92-94%、Cube 仅 12% → 撞 HBM 带宽墙。
+- skill 矩阵交叉验证：prefetch（无安全窗口）、multi-stream（共享带宽）、superkernel（需 A3 硬件）在 memory-bound 下收益被带宽锁死。能移动天花板的只有减字节：量化（减权重）或 fusion（减激活往返）。
+
+### 用户定向：CCF-A 系统论文，重评 offload 主线
+- 量化在 30B 上基本消灭 offload 动机（权重减半→轻松装单卡），offload 真实战场是 122B 等量化后仍装不下的大模型。
+- 用户给出 track 2 题眼：offload 被迫 `--enforce-eager`，因为 graph capture 无法录制 offload scheduler 的 runtime CPU 决策路径。
+
+### ACLGraph 可行性分析（driven by model-infer-graph-mode skill）
+- 落盘 `docs/superpowers/specs/2026-06-15-aclgraph-offload-decision-hoisting-feasibility.md`。
+- 捕获边界（代码确认）：piecewise，`splitting_ops` 只含 attention → 整个 MoE 在捕获图段内；`static_all_moe_layers` 列全 48 层。
+- 阻塞点：`moe_comm_method.py:327` 的 `torch.unique(topk_ids.detach().cpu()).tolist()` + `decide_layered_path` + `prepare_fixed_slot_plan` — 同步/数据依赖/Python 控制流/条件 H2D 四重违反。capturing 防护只在观测路径（runtime.py:196,222），执行路径裸奔。
+- 先例：`acl_graph.py` 的 `update_attn_params` 已为 attention 做控制面/数据面解耦（CPU 算 metadata→固定 buffer→event 排序）；无 MoE 版本。
+- 难点：MoE routing 在 forward 内 gate 产出，决策既数据依赖又产生于捕获区内部，不能像 attn 那样简单上提。
+- 推荐 Option 2：在 routing 点切分 MoE（复刻 attention piecewise），grouped_matmul+combine 保持捕获+固定 slot，仅 staging 走 eager。这是论文核心贡献：图模式兼容的 MoE offload via 控制面/数据面解耦。
+
+## 下一步（2026-06-15）
+
+- 决定性 2×2 baseline（NPU）：no-offload+图 / no-offload+eager / offload+eager / offload+图-attempt，量化 enforce_eager 的损失，作为论文 motivation 表。
+- Option 2 原型：注册 MoE split boundary，验证 grouped_matmul 段在固定 slot 下可捕获。
+- async staging（MVP-E）：load stream/event，量化 exposed-stall 下降。
+
+## 2026-06-15 决定性 2×2 实测：ACLGraph×offload 冲突铁证
+
+- 工具 `run_fixed_slot_smoke.py`，artifacts `benchmarks/results/aclgraph_2x2_20260615/`。
+- **Cell 1 no-offload + ACLGraph**：✅ 捕获成功（"Graph capturing finished"，PIECEWISE，48 层），status ok，TTFT 298ms（1-tok）。8-tok 在 64GB 边缘 OOM（56.9GB 常驻）。证明 ACLGraph 在无 offload 时正常。
+- **Cell 4 offload + ACLGraph（--no-enforce-eager）**：❌ **在 `capture_model()` 阶段硬失败**。根因逐字：
+  - `Not allow to synchronize captured-stream, stream_id=1749` (107027)
+  - `rtMemcpy ... the current capture mode does not support this operation` (107030)
+  - `synchronized memcpy failed, kind = 2`（device↔host），发生于 `model_runner_v1.py:3893`。
+  - `kind=2` 即 `_maybe_apply_moe_offload_plan` 里 `topk_ids.detach().cpu()` 的 D2H 同步拷贝。
+- 结论：offload+图模式不是软 graph-break/重编译，而是 runtime **硬禁止** captured-stream 上的 synchronize/synchronized memcpy。**enforce_eager 是当前 offload 架构的硬约束，不是配置选择**——这是论文 track 2 motivation 的铁证。
+- 证据已写入 `docs/superpowers/specs/2026-06-15-aclgraph-offload-decision-hoisting-feasibility.md` §9。
+- 待测（定量 motivation 表）：no-offload+eager 与 offload+eager 的 TPOT 差（量化 launch 收益损失）；受 no-offload+ACLGraph 多 token OOM 限制，需结合量化或用 122B 多卡取干净 decode 数。
+
+## 下一步（2026-06-15 b）
+
+- 跑 cell 2/3（no-offload+eager、offload+eager）TPOT，补全 motivation 定量表（注意 ACLGraph 上界受 OOM 限制）。
+- 进入 Option 2 原型：在 routing 点切分 MoE，把 D2H 决策+staging 移到 eager split，grouped_matmul 在固定 slot 上保持捕获。
+
+## 2026-06-15 c：A 定量表完成 + B Option 2 原语落地（research 分支）
+
+### A — 2×2 定量 motivation 表（NPU 4/5/7）
+- Cell 1 no-offload+ACLGraph：✅ capture 成功，TTFT **298ms**（1-tok；8-tok 在 56.9GB 边缘 OOM）。
+- Cell 2 no-offload+eager：✅ TTFT **797ms**，TPOT 200ms（8-tok）。
+- Cell 3 offload+eager：✅ 唯一可跑，TTFT 36s/TPOT 5.4s*（*未设 resident-layer-ids，48 层全同步 slot load 的最差情况，已标 caveat）。
+- Cell 4 offload+ACLGraph：❌ capture 硬失败（107027/107030，synchronized memcpy kind=2 forbidden）。
+- 关键 delta：**no-offload 下 ACLGraph TTFT 比 eager 快 2.67×**（298 vs 797），即 offload 被迫 eager 丢掉的 launch 收益。写入可行性文档 §9.1。
+
+### B — Option 2 graph-compatible offload 原语（默认关，零行为变化）
+- `config.py`：新增 `graph_compatible_offload`（默认 False）。
+- `envs.py`：新增 `VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE`（默认 0）。
+- `runtime.py`：
+  - 注册时分配**持久 per-layer log2phy buffer**（固定地址，`_log2phy_buffers`），尺寸=num_logical_experts。
+  - `stage_fixed_slot_plan(...)`：eager 预备阶段（决策+H2D+in-place 写持久 buffer），capture 时拒绝（fail-closed）。
+  - `capture_safe_slot_weights(...)`：capture 路径，指向固定 slot tensors + 固定 log2phy buffer，**零 host sync / 零条件 H2D**；未注册层返回 None。
+  - `log2phy_buffer(layer_id)` 访问器。
+- `moe_comm_method.py`：
+  - `_maybe_apply_moe_offload_plan` 加 capture guard：`graph_compatible_offload and _is_current_graph_capturing()` 时走 capture-safe 路径，绕过被禁的 `torch.unique(...).cpu()`。
+  - 提取 `_with_prepared_slot_weights(...)` helper，capture 路径与 eager 路径共用。
+- 测试：新增 `tests/ut/moe_offload/test_graph_compatible_offload.py`（6 passed）——证明持久 buffer 地址稳定、in-place 更新、capture-safe 零同步、capture 时拒绝 stage。
+- 修复 `test_moe_comm_method.py` 3 个 blanket-MagicMock 污染（2 个预存在 + 1 个我引入），显式设 `graph_compatible_offload=False`/`phase_split_enabled=False`；现 7 passed。
+- 回归：B 相关 47 passed；moe_offload+ops+envs 全套 195 passed（test_envs 的 PROFILE_PATH 偶发失败是跨测试 os.environ 污染，非本次改动，隔离运行 106 subtests 通过）。
+
+### B 的边界（诚实声明）
+- 当前是**原语 + capture guard**，CPU 单测验证。**未做** model_runner 集成（capture 前/replay 前调用 stage_fixed_slot_plan 的生命周期钩子），因此**未在真实 NPU 上验证 offload+ACLGraph 能 capture 通过**。这是下一步。
+- 完整 Option 2 还需：注册 MoE split boundary（custom op），把 stage 钩到 replay 前（类比 update_attn_params），固定 shape group_list（pad-to-capacity 防重编译）。
+
+## 下一步（2026-06-15 c）
+- B 的 NPU 验证：在 model_runner 加 stage_fixed_slot_plan 的 replay-前钩子，开 `VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE=1` 跑 offload+ACLGraph，验证 capture 通过 + token-id 与 eager offload 一致。
+- 若 capture 通过：补 async staging（MVP-E），量化 exposed-stall。

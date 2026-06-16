@@ -163,9 +163,20 @@ bound and the offload 14GB run treated as the baseline.
 #### Profile Qwen3 MoE prefill and decode with Ascend PyTorch Profiler
 
 For single-card non-offloading Qwen3-30B-A3B analysis, start vLLM with the
-torch profiler enabled and do not pass any MoE offload argument:
+torch profiler enabled and do not pass any MoE offload argument. To make the
+report choose a trace-backed SEW-MoE P1 target, also enable trace-only active
+expert and pipeline profiling in the server process:
 
 ```shell
+export VLLM_ASCEND_MOE_OFFLOAD_ENABLED=1
+export VLLM_ASCEND_MOE_OFFLOAD_TRACE_ONLY=1
+export VLLM_ASCEND_MOE_PIPELINE_PROFILING=1
+export VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH=/tmp/sew_moe_trace.jsonl
+export VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH=/tmp/sew_moe_profile.jsonl
+# Optional after a previous suite run: classify stable grouped signatures before
+# the existing grouped matmul fallback.
+export VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH=/path/to/sew_moe_p1_plan.json
+
 vllm serve /data/shared-models/Qwen3-30B-A3B \
   --served-model-name qwen3-30b-a3b \
   --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile", "torch_profiler_with_stack": false}'
@@ -181,7 +192,12 @@ python3 benchmarks/scripts/run_ascend_moe_profile_suite.py \
   --base-url http://127.0.0.1:8005 \
   --profile-url http://127.0.0.1:8005 \
   --profiler-dir ./vllm_profile \
-  --output-dir benchmarks/results/qwen3_30b_a3b_nonoffload_ascend_pt
+  --output-dir benchmarks/results/qwen3_30b_a3b_nonoffload_ascend_pt \
+  --sew-moe-trace-path /tmp/sew_moe_trace.jsonl \
+  --sew-moe-profile-path /tmp/sew_moe_profile.jsonl \
+  --require-sew-moe-artifacts \
+  --run-slot-sweep \
+  --slot-sweep-range 8:64:8
 ```
 
 The main outputs are:
@@ -189,14 +205,52 @@ The main outputs are:
 - `profile_suite_manifest.json`: profiler windows, benchmark commands, and generated profiler directories
 - `ascend_moe_profile_report.md`: TTFT/TPOT-oriented prefill and decode optimization notes
 - `ascend_moe_profile_report.json`: machine-readable hotspot and recommendation data
+- `sew_moe_p1_plan.json`: machine-readable P1-C compute bucket or P1-T slot sweep plan when trace data supports one
+- `<phase>/moe_offload_trace.jsonl`: per-window active expert records for P1-C/RM/T/H decisions
+- `<phase>/sew_moe_profile.jsonl`: per-window Stage T/R/C/M timing records
+- `<phase>/slot_sweep_lru.json`: optional fixed-slot sweep summary when `--run-slot-sweep` is set
+
+To turn the P1 plan into a reproducible benchmark environment matrix:
+
+```shell
+python3 tools/sew_offload/materialize_p1_experiments.py \
+  --plan benchmarks/results/qwen3_30b_a3b_nonoffload_ascend_pt/sew_moe_p1_plan.json \
+  --output benchmarks/results/qwen3_30b_a3b_nonoffload_ascend_pt/sew_moe_p1_experiments.json
+```
+
+Then run each experiment case against the same smoke workload:
+
+```shell
+python3 tools/sew_offload/run_p1_experiments.py \
+  --matrix benchmarks/results/qwen3_30b_a3b_nonoffload_ascend_pt/sew_moe_p1_experiments.json \
+  --output-dir benchmarks/results/qwen3_30b_a3b_nonoffload_ascend_pt/p1_experiment_runs \
+  --inline-prompt "Hello" \
+  --inline-max-output-tokens 16
+```
+
+When the plan contains both a compute bucket plan and a slot sweep result, the
+matrix includes five comparable cases: `baseline`,
+`p1_compute_bucket_trace_only`, `p1_compute_bucket_fast_path`,
+`p1_fixed_slot_recommended`, and `p1_compute_bucket_plus_fixed_slot`.
+The trace-only compute case measures classifier overhead and eligibility while
+leaving math on the fallback path; the fast-path compute case allows
+active-expert compaction without fixed-slot offload. The combined case keeps
+the trace-backed P1-C grouped-shape fast path enabled while also running the
+recommended P1-T fixed-slot offload budget, so NPU runs can measure whether the
+non-offload compute path and offload residency path compose.
+
+The runner writes `p1_experiment_summary.json` with each case's source evidence,
+its smoke summary, and a `relative_to_baseline` throughput delta; the
+`throughput_delta_vs_baseline` table ranks cases by measured improvement over
+the baseline.
 
 If profiler output already exists, analyze it directly:
 
 ```shell
 python3 benchmarks/scripts/analyze_ascend_moe_profile.py \
-  --phase mixed:/path/to/mixed/ASCEND_PROFILER_OUTPUT:/path/to/mixed.json \
-  --phase prefill:/path/to/prefill/ASCEND_PROFILER_OUTPUT:/path/to/prefill.json \
-  --phase decode:/path/to/decode/ASCEND_PROFILER_OUTPUT:/path/to/decode.json \
+  --phase mixed:/path/to/mixed/ASCEND_PROFILER_OUTPUT:/path/to/mixed.json:/path/to/mixed/moe_offload_trace.jsonl:/path/to/mixed/sew_moe_profile.jsonl \
+  --phase prefill:/path/to/prefill/ASCEND_PROFILER_OUTPUT:/path/to/prefill.json:/path/to/prefill/moe_offload_trace.jsonl:/path/to/prefill/sew_moe_profile.jsonl \
+  --phase decode:/path/to/decode/ASCEND_PROFILER_OUTPUT:/path/to/decode.json:/path/to/decode/moe_offload_trace.jsonl:/path/to/decode/sew_moe_profile.jsonl \
   --markdown-output /tmp/ascend_moe_profile_report.md \
   --json-output /tmp/ascend_moe_profile_report.json
 ```

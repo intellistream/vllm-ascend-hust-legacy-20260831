@@ -73,6 +73,94 @@ Device_id,Step,Computing,Communication(Not Overlapped),Overlapped,Communication,
     return output
 
 
+def write_sew_trace(
+    output: Path,
+    signatures: list[tuple[str, int]],
+    *,
+    fanout: int = 3,
+) -> None:
+    records = []
+    step_id = 0
+    for signature, count in signatures:
+        for _ in range(count):
+            records.append({
+                "source": "grouped_dispatch",
+                "layer_id": 1,
+                "step_id": step_id,
+                "mode": "decode",
+                "num_tokens": fanout,
+                "top_k": 1,
+                "num_logical_experts": 8,
+                "fanout": fanout,
+                "active_experts": list(range(fanout)),
+                "expert_token_counts": {str(i): 1 for i in range(fanout)},
+                "group_list_type": 1,
+                "group_list_signature": signature,
+                "physical_expert_count": fanout,
+            })
+            step_id += 1
+    (output.parent / "moe_offload_trace.jsonl").write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_pipeline_profile(
+    output: Path,
+    *,
+    stage_t_ms: float,
+    stage_r_ms: float,
+    stage_c_ms: float,
+    stage_m_ms: float,
+    records: int = 4,
+) -> None:
+    lines = []
+    for step_id in range(records):
+        lines.append(json.dumps({
+            "event": "moe_pipeline_timing",
+            "layer_id": 1,
+            "step_id": step_id,
+            "stage_t_ms": stage_t_ms,
+            "stage_r_ms": stage_r_ms,
+            "stage_c_ms": stage_c_ms,
+            "stage_m_ms": stage_m_ms,
+        }))
+    (output.parent / "sew_moe_profile.jsonl").write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+    )
+
+
+def append_compute_bucket_gate_profile(output: Path) -> None:
+    profile_path = output.parent / "sew_moe_profile.jsonl"
+    with profile_path.open("a", encoding="utf-8") as f:
+        for payload in (
+            {
+                "enabled": True,
+                "reason": "eligible",
+                "bucket_id": 0,
+                "signature": "counts:2,0,1,0",
+                "original_expert_count": 4,
+                "compact_expert_count": 2,
+            },
+            {
+                "enabled": False,
+                "reason": "requires_unquantized_path",
+                "bucket_id": 1,
+                "signature": "counts:1,1,1,1",
+                "original_expert_count": 4,
+                "compact_expert_count": 4,
+            },
+        ):
+            f.write(json.dumps({
+                "name": "compute_bucket_fast_path_gate",
+                "event": "compute_bucket_fast_path_gate",
+                "layer_id": 1,
+                "seconds": 0.0001,
+                "payload": payload,
+            }) + "\n")
+
+
 def test_builds_phase_report_with_moe_and_fusion_recommendations(tmp_path):
     analyzer = load_analyzer_module()
     output = make_profile_dir(tmp_path, "decode")
@@ -111,3 +199,310 @@ def test_renders_markdown_with_phase_specific_ttft_and_tpot_focus(tmp_path):
     assert "TPOT focus" in markdown
     assert "GroupedMatmul" in markdown
     assert "RmsNorm" in markdown
+
+
+def test_analyzer_summarizes_sew_moe_trace(tmp_path):
+    analyzer = load_analyzer_module()
+    output = make_profile_dir(tmp_path, "decode")
+    trace_path = output.parent / "moe_offload_trace.jsonl"
+    trace_path.write_text(
+        "\n".join([
+            json.dumps({
+                "source": "logical_topk",
+                "layer_id": 1,
+                "step_id": 10,
+                "mode": "decode",
+                "num_tokens": 2,
+                "top_k": 2,
+                "num_logical_experts": 4,
+                "fanout": 3,
+                "active_experts": [0, 2, 3],
+                "expert_token_counts": {"0": 1, "2": 2, "3": 1},
+            }),
+            json.dumps({
+                "source": "grouped_dispatch",
+                "layer_id": 1,
+                "step_id": 10,
+                "mode": "decode",
+                "num_tokens": 4,
+                "top_k": 1,
+                "num_logical_experts": 0,
+                "fanout": 3,
+                "active_experts": [0, 1, 2],
+                "expert_token_counts": {"0": 1, "1": 2, "2": 1},
+                "group_list_type": 1,
+                "group_list_signature": "counts:1,2,1",
+                "physical_expert_count": 3,
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    report = analyzer.analyze_profile("decode", output, None)
+    markdown = analyzer.render_markdown([report])
+
+    assert report["sew_moe"]["record_count"] == 2
+    assert report["sew_moe"]["fanout_by_source"]["logical_topk"]["max"] == 3
+    assert report["sew_moe"]["top_group_list_signatures"][0]["signature"] == "counts:1,2,1"
+    assert report["sew_moe"]["slot_budget_hint"]["min_slots_per_layer"] == 3
+    assert report["sew_moe"]["slot_budget_hint"]["max_grouped_fanout"] == 3
+    assert "SEW-MoE active expert trace" in markdown
+    assert "counts:1,2,1" in markdown
+    assert "Minimum per-layer slots" in markdown
+
+
+def test_analyzer_reports_slot_budget_hint_from_grouped_fanout(tmp_path):
+    analyzer = load_analyzer_module()
+    output = make_profile_dir(tmp_path, "decode")
+    trace_path = output.parent / "moe_offload_trace.jsonl"
+    trace_path.write_text(
+        "\n".join([
+            json.dumps({
+                "source": "grouped_dispatch",
+                "layer_id": 3,
+                "step_id": 1,
+                "mode": "decode",
+                "num_tokens": 4,
+                "top_k": 1,
+                "num_logical_experts": 0,
+                "fanout": 4,
+                "active_experts": [0, 1, 2, 3],
+                "expert_token_counts": {"0": 1, "1": 1, "2": 1, "3": 1},
+                "group_list_type": 1,
+                "group_list_signature": "counts:1,1,1,1",
+                "physical_expert_count": 4,
+            }),
+            json.dumps({
+                "source": "grouped_dispatch",
+                "layer_id": 7,
+                "step_id": 2,
+                "mode": "decode",
+                "num_tokens": 2,
+                "top_k": 1,
+                "num_logical_experts": 0,
+                "fanout": 2,
+                "active_experts": [0, 1],
+                "expert_token_counts": {"0": 1, "1": 1},
+                "group_list_type": 1,
+                "group_list_signature": "counts:1,1",
+                "physical_expert_count": 2,
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    report = analyzer.analyze_profile("decode", output, None)
+
+    assert report["sew_moe"]["slot_budget_hint"] == {
+        "min_slots_per_layer": 4,
+        "max_grouped_fanout": 4,
+        "mean_grouped_fanout": 3.0,
+        "high_fanout_layers": [{"layer_id": 3, "max_fanout": 4}],
+    }
+
+
+def test_analyzer_recommends_p1_c_when_grouped_compute_dominates_stable_shapes(tmp_path):
+    analyzer = load_analyzer_module()
+    output = make_profile_dir(tmp_path, "decode")
+    write_sew_trace(output, [("counts:1,2,1", 8), ("counts:2,1,1", 2)])
+    write_pipeline_profile(output, stage_t_ms=0.1, stage_r_ms=0.5, stage_c_ms=6.0, stage_m_ms=0.4)
+
+    report = analyzer.analyze_profile("decode", output, None)
+    markdown = analyzer.render_markdown([report])
+
+    assert report["p1_decision"]["target"] == "P1-C"
+    assert report["p1_decision"]["signature_concentration_percent"] == 80.0
+    assert report["p1_decision"]["compute_bucket_hint"]["coverage_percent"] == 100.0
+    assert report["p1_decision"]["compute_bucket_hint"]["fallback_percent"] == 0.0
+    assert report["p1_decision"]["compute_bucket_hint"]["top_signatures"] == [
+        {"signature": "counts:1,2,1", "count": 8, "coverage_percent": 80.0},
+        {"signature": "counts:2,1,1", "count": 2, "coverage_percent": 20.0},
+    ]
+    assert report["p1_decision"]["compute_bucket_plan"] == {
+        "version": 1,
+        "phase": "decode",
+        "mode": "trace_only",
+        "selection": "top_grouped_signatures",
+        "total_grouped_records": 10,
+        "coverage_percent": 100.0,
+        "fallback_percent": 0.0,
+        "gate": {
+            "source": "grouped_dispatch",
+            "requires_group_list_signature": True,
+            "fallback": "existing_grouped_matmul_path",
+        },
+        "buckets": [
+            {
+                "bucket_id": 0,
+                "signature": "counts:1,2,1",
+                "sample_count": 8,
+                "coverage_percent": 80.0,
+                "active_expert_ids": [0, 1, 2],
+                "compact_group_list": [1, 2, 1],
+                "original_expert_count": 3,
+                "compact_expert_count": 3,
+            },
+            {
+                "bucket_id": 1,
+                "signature": "counts:2,1,1",
+                "sample_count": 2,
+                "coverage_percent": 20.0,
+                "active_expert_ids": [0, 1, 2],
+                "compact_group_list": [2, 1, 1],
+                "original_expert_count": 3,
+                "compact_expert_count": 3,
+            },
+        ],
+    }
+    assert "Recommended P1 target: P1-C" in markdown
+    assert "Stable grouped buckets" in markdown
+    assert "Compute bucket plan: 2 buckets" in markdown
+
+
+def test_analyzer_summarizes_compute_bucket_fast_path_gate_events(tmp_path):
+    analyzer = load_analyzer_module()
+    output = make_profile_dir(tmp_path, "decode")
+    write_sew_trace(output, [("counts:2,0,1,0", 4)])
+    write_pipeline_profile(output, stage_t_ms=0.1, stage_r_ms=0.5, stage_c_ms=6.0, stage_m_ms=0.4)
+    append_compute_bucket_gate_profile(output)
+
+    report = analyzer.analyze_profile("decode", output, None)
+    markdown = analyzer.render_markdown([report])
+
+    gate_summary = report["pipeline_profile"]["compute_bucket_fast_path_gate"]
+    assert gate_summary == {
+        "record_count": 2,
+        "enabled_count": 1,
+        "fallback_count": 1,
+        "enabled_percent": 50.0,
+        "mean_original_expert_count": 4.0,
+        "mean_compact_expert_count": 3.0,
+        "mean_compaction_ratio": 0.75,
+        "top_fallback_reasons": [{"reason": "requires_unquantized_path", "count": 1}],
+    }
+    assert "Compute bucket gate: enabled=50.0%" in markdown
+    assert "experts 4.0 -> 3.0" in markdown
+
+
+def test_analyzer_recommends_p1_rm_when_routing_is_large_and_shapes_unstable(tmp_path):
+    analyzer = load_analyzer_module()
+    output = make_profile_dir(tmp_path, "decode")
+    write_sew_trace(
+        output,
+        [
+            ("counts:1,0,0", 1),
+            ("counts:0,1,0", 1),
+            ("counts:0,0,1", 1),
+            ("counts:1,1,0", 1),
+        ],
+    )
+    write_pipeline_profile(output, stage_t_ms=0.0, stage_r_ms=2.4, stage_c_ms=3.0, stage_m_ms=1.3)
+
+    report = analyzer.analyze_profile("decode", output, None)
+
+    assert report["p1_decision"]["target"] == "P1-RM"
+    assert report["p1_decision"]["signature_concentration_percent"] == 25.0
+
+
+def test_analyzer_computes_bucket_fallback_against_all_grouped_signatures(tmp_path):
+    analyzer = load_analyzer_module()
+    output = make_profile_dir(tmp_path, "decode")
+    signatures = [("counts:hot", 18)]
+    signatures.extend((f"counts:tail{i}", 1) for i in range(12))
+    write_sew_trace(output, signatures)
+    write_pipeline_profile(output, stage_t_ms=0.1, stage_r_ms=0.5, stage_c_ms=6.0, stage_m_ms=0.4)
+
+    report = analyzer.analyze_profile("decode", output, None)
+
+    assert report["p1_decision"]["target"] == "P1-C"
+    assert report["sew_moe"]["grouped_signature_total_count"] == 30
+    assert report["p1_decision"]["compute_bucket_hint"]["coverage_percent"] == 66.7
+    assert report["p1_decision"]["compute_bucket_hint"]["fallback_percent"] == 33.3
+
+
+def test_analyzer_recommends_p1_t_when_offload_transfer_dominates(tmp_path):
+    analyzer = load_analyzer_module()
+    output = make_profile_dir(tmp_path, "decode")
+    write_sew_trace(output, [("counts:1,1,1,1,1,1,1,1", 4)], fanout=8)
+    write_pipeline_profile(output, stage_t_ms=13.4, stage_r_ms=0.4, stage_c_ms=0.5, stage_m_ms=0.2)
+
+    report = analyzer.analyze_profile("decode", output, None)
+
+    assert report["p1_decision"]["target"] == "P1-T"
+    assert report["pipeline_profile"]["fractions"]["t_frac"] > 0.9
+    assert report["p1_decision"]["slot_sweep_hint"]["start_slots"] == 8
+    assert report["p1_decision"]["slot_sweep_hint"]["stop_slots"] == 64
+    markdown = analyzer.render_markdown([report])
+    assert "--slot-range 8:64:8" in markdown
+
+
+def test_analyzer_recommends_p1_h_when_transfer_and_compute_are_close(tmp_path):
+    analyzer = load_analyzer_module()
+    output = make_profile_dir(tmp_path, "decode")
+    write_sew_trace(output, [("counts:2,1,1,0", 3), ("counts:1,2,0,1", 3)], fanout=4)
+    write_pipeline_profile(output, stage_t_ms=4.0, stage_r_ms=1.0, stage_c_ms=2.3, stage_m_ms=0.8)
+
+    report = analyzer.analyze_profile("decode", output, None)
+
+    assert report["p1_decision"]["target"] == "P1-H"
+    assert report["p1_decision"]["overlap_potential_ratio"] > 0.7
+
+
+def test_phase_arg_accepts_optional_sew_trace_and_pipeline_paths(tmp_path):
+    analyzer = load_analyzer_module()
+    output = tmp_path / "ASCEND_PROFILER_OUTPUT"
+    benchmark = tmp_path / "benchmark.json"
+    trace = tmp_path / "moe_offload_trace.jsonl"
+    pipeline = tmp_path / "sew_moe_profile.jsonl"
+
+    phase, parsed_output, parsed_benchmark, parsed_trace, parsed_pipeline = analyzer._parse_phase_arg(
+        f"decode:{output}:{benchmark}:{trace}:{pipeline}")
+
+    assert phase == "decode"
+    assert parsed_output == output
+    assert parsed_benchmark == benchmark
+    assert parsed_trace == trace
+    assert parsed_pipeline == pipeline
+
+
+def test_main_passes_optional_sew_paths_to_analyzer(tmp_path, monkeypatch):
+    analyzer = load_analyzer_module()
+    output = make_profile_dir(tmp_path, "decode")
+    trace = tmp_path / "trace.jsonl"
+    pipeline = tmp_path / "pipeline.jsonl"
+    json_output = tmp_path / "report.json"
+
+    calls = []
+
+    def fake_analyze_profile(phase, profiler_output, benchmark_path=None, sew_moe_trace_path=None,
+                             pipeline_profile_path=None):
+        calls.append((phase, profiler_output, benchmark_path, sew_moe_trace_path, pipeline_profile_path))
+        return {
+            "phase": phase,
+            "profiler_output": str(profiler_output),
+            "benchmark": {},
+            "op_hotspots": [],
+            "operator_hotspots": [],
+            "kernel_summary": {"by_type": [], "top_by_duration": []},
+            "step_trace": {},
+            "sew_moe": {"record_count": 0},
+            "pipeline_profile": {"record_count": 0},
+            "p1_decision": {"target": "INSUFFICIENT_DATA", "reason": "test"},
+            "optimization_opportunities": [],
+        }
+
+    monkeypatch.setattr(analyzer, "analyze_profile", fake_analyze_profile)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "analyze_ascend_moe_profile.py",
+            "--phase",
+            f"decode:{output}::{trace}:{pipeline}",
+            "--json-output",
+            str(json_output),
+        ],
+    )
+
+    assert analyzer.main() == 0
+    assert calls == [("decode", output, None, trace, pipeline)]

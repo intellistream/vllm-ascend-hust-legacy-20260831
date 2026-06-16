@@ -221,3 +221,7 @@ csrc/output/
 
 # claude code skills
 .claude/skills/*
+.github/agents/
+.github/skills/
+.github/
+cann-recipes-infer

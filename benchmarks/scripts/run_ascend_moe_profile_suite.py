@@ -80,6 +80,26 @@ def _new_profile_dirs(before: set[Path], profiler_dir: Path) -> list[Path]:
     return sorted(after, key=lambda path: path.stat().st_mtime)[-1:]
 
 
+def _jsonl_offset(path: Path | None) -> int:
+    if path is None or not path.exists():
+        return 0
+    return path.stat().st_size
+
+
+def _snapshot_jsonl_delta(source: Path | None, offset: int, dest: Path) -> bool:
+    if source is None or not source.exists():
+        return False
+    current_size = source.stat().st_size
+    if current_size <= offset:
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with source.open("rb") as src:
+        src.seek(offset)
+        payload = src.read()
+    dest.write_bytes(payload)
+    return bool(payload)
+
+
 def _analyse_profile_dir(profile_dir: Path):
     from torch_npu.profiler.profiler import analyse
 
@@ -184,9 +204,13 @@ def _scenario_manifest(
     scenario_dir: Path,
     profile_dirs: list[Path],
     returncode: int | None,
+    sew_moe_trace_source: Path | None = None,
+    sew_moe_profile_source: Path | None = None,
+    sew_moe_trace_jsonl: Path | None = None,
+    sew_moe_profile_jsonl: Path | None = None,
 ) -> dict[str, Any]:
     benchmark_json = scenario_dir / scenario.result_filename
-    return {
+    payload = {
         "name": scenario.name,
         "phase": scenario.phase,
         "description": scenario.description,
@@ -198,6 +222,13 @@ def _scenario_manifest(
             str(path / "ASCEND_PROFILER_OUTPUT") for path in profile_dirs if (path / "ASCEND_PROFILER_OUTPUT").exists()
         ],
     }
+    if sew_moe_trace_source is not None:
+        payload["sew_moe_source_trace_jsonl"] = str(sew_moe_trace_source)
+        payload["sew_moe_trace_jsonl"] = str(sew_moe_trace_jsonl or scenario_dir / "moe_offload_trace.jsonl")
+    if sew_moe_profile_source is not None:
+        payload["sew_moe_source_profile_jsonl"] = str(sew_moe_profile_source)
+        payload["sew_moe_profile_jsonl"] = str(sew_moe_profile_jsonl or scenario_dir / "sew_moe_profile.jsonl")
+    return payload
 
 
 def run_suite(args: argparse.Namespace) -> dict[str, Any]:
@@ -212,22 +243,52 @@ def run_suite(args: argparse.Namespace) -> dict[str, Any]:
         "profile_url": args.profile_url,
         "scenarios": [],
     }
+    trace_source = args.sew_moe_trace_path
+    profile_source = args.sew_moe_profile_path
+    if trace_source is not None:
+        manifest["sew_moe_source_trace_jsonl"] = str(trace_source)
+    if profile_source is not None:
+        manifest["sew_moe_source_profile_jsonl"] = str(profile_source)
 
     for scenario in scenarios:
         scenario_dir = output_dir / scenario.name
         scenario_dir.mkdir(parents=True, exist_ok=True)
         command = _bench_base_args(args, scenario_dir, scenario.result_filename) + scenario.bench_args
+        trace_dest = scenario_dir / "moe_offload_trace.jsonl" if trace_source is not None else None
+        profile_dest = scenario_dir / "sew_moe_profile.jsonl" if profile_source is not None else None
         if args.dry_run:
-            manifest["scenarios"].append(_scenario_manifest(scenario, command, scenario_dir, [], None))
+            manifest["scenarios"].append(
+                _scenario_manifest(
+                    scenario,
+                    command,
+                    scenario_dir,
+                    [],
+                    None,
+                    sew_moe_trace_source=trace_source,
+                    sew_moe_profile_source=profile_source,
+                    sew_moe_trace_jsonl=trace_dest,
+                    sew_moe_profile_jsonl=profile_dest,
+                ))
             continue
 
         before = _profile_dirs(args.profiler_dir)
+        trace_offset = _jsonl_offset(trace_source)
+        profile_offset = _jsonl_offset(profile_source)
         _post(_profile_endpoint(args.profile_url, "start_profile"), args.http_timeout)
         returncode = -1
         try:
             returncode = _run_command(command, scenario_dir / "benchmark.log")
         finally:
             _post(_profile_endpoint(args.profile_url, "stop_profile"), args.http_timeout)
+
+        wrote_trace = _snapshot_jsonl_delta(trace_source, trace_offset, trace_dest) if trace_dest is not None else False
+        wrote_profile = (
+            _snapshot_jsonl_delta(profile_source, profile_offset, profile_dest) if profile_dest is not None else False
+        )
+        if args.require_sew_moe_artifacts and trace_source is not None and not wrote_trace:
+            raise RuntimeError(f"Missing SEW-MoE trace delta for scenario {scenario.name}: {trace_source}")
+        if args.require_sew_moe_artifacts and profile_source is not None and not wrote_profile:
+            raise RuntimeError(f"Missing SEW-MoE profile delta for scenario {scenario.name}: {profile_source}")
 
         if args.stop_analyse_delay_sec:
             time.sleep(args.stop_analyse_delay_sec)
@@ -238,19 +299,47 @@ def run_suite(args: argparse.Namespace) -> dict[str, Any]:
                 _analyse_profile_dir(profile_dir)
 
         manifest["scenarios"].append(
-            _scenario_manifest(scenario, command, scenario_dir, profile_dirs, returncode))
+            _scenario_manifest(
+                scenario,
+                command,
+                scenario_dir,
+                profile_dirs,
+                returncode,
+                sew_moe_trace_source=trace_source,
+                sew_moe_profile_source=profile_source,
+                sew_moe_trace_jsonl=trace_dest if wrote_trace or trace_dest is not None else None,
+                sew_moe_profile_jsonl=profile_dest if wrote_profile or profile_dest is not None else None,
+            ))
 
     manifest_path = output_dir / "profile_suite_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     if not args.dry_run:
-        _write_analysis_report(manifest, output_dir)
+        _write_analysis_report(
+            manifest,
+            output_dir,
+            run_slot_sweep=args.run_slot_sweep,
+            slot_sweep_range=args.slot_sweep_range,
+            slot_sweep_policy=args.slot_sweep_policy,
+            slot_sweep_expert_bytes=args.slot_sweep_expert_bytes,
+            slot_sweep_bandwidth_gbps=args.slot_sweep_bandwidth_gbps,
+        )
     return manifest
 
 
-def _write_analysis_report(manifest: dict[str, Any], output_dir: Path):
+def _write_analysis_report(
+    manifest: dict[str, Any],
+    output_dir: Path,
+    *,
+    run_slot_sweep: bool = False,
+    slot_sweep_range: str = "8:64:8",
+    slot_sweep_policy: str = "lru",
+    slot_sweep_expert_bytes: int = 14_680_064,
+    slot_sweep_bandwidth_gbps: float = 24.0,
+):
     analyzer = _load_analyzer()
     reports = []
+    report_scenarios = []
     for scenario in manifest["scenarios"]:
         outputs = scenario.get("profiler_outputs") or []
         if not outputs:
@@ -260,7 +349,10 @@ def _write_analysis_report(manifest: dict[str, Any], output_dir: Path):
                 scenario["phase"],
                 outputs[-1],
                 scenario.get("benchmark_json"),
+                scenario.get("sew_moe_trace_jsonl"),
+                scenario.get("sew_moe_profile_jsonl"),
             ))
+        report_scenarios.append(scenario)
     if not reports:
         return
     (output_dir / "ascend_moe_profile_report.json").write_text(
@@ -271,6 +363,119 @@ def _write_analysis_report(manifest: dict[str, Any], output_dir: Path):
         analyzer.render_markdown(reports),
         encoding="utf-8",
     )
+    slot_sweep_results = {}
+    if run_slot_sweep:
+        slot_sweep_results = _run_slot_sweeps(
+            report_scenarios,
+            output_dir,
+            slot_sweep_range=slot_sweep_range,
+            slot_sweep_policy=slot_sweep_policy,
+            slot_sweep_expert_bytes=slot_sweep_expert_bytes,
+            slot_sweep_bandwidth_gbps=slot_sweep_bandwidth_gbps,
+        )
+    p1_plan = _extract_p1_plan(reports, slot_sweep_results=slot_sweep_results)
+    if p1_plan["plans"]:
+        (output_dir / "sew_moe_p1_plan.json").write_text(
+            json.dumps(p1_plan, indent=2),
+            encoding="utf-8",
+        )
+
+
+def _run_slot_sweeps(
+    scenarios: list[dict[str, Any]],
+    output_dir: Path,
+    *,
+    slot_sweep_range: str,
+    slot_sweep_policy: str,
+    slot_sweep_expert_bytes: int,
+    slot_sweep_bandwidth_gbps: float,
+) -> dict[str, dict[str, Any]]:
+    from tools.sew_offload.simulate_expert_slots import (
+        load_trace,
+        parse_slot_range,
+    )
+    from vllm_ascend.moe_offload.slot_simulator import ExpertSizeTable, SlotSimulator
+
+    slot_values = parse_slot_range(slot_sweep_range)
+    simulator = SlotSimulator(
+        size_table=ExpertSizeTable(default_expert_bytes=slot_sweep_expert_bytes),
+        host_to_hbm_bandwidth_gbps=slot_sweep_bandwidth_gbps,
+    )
+    results: dict[str, dict[str, Any]] = {}
+    for scenario in scenarios:
+        trace_path = scenario.get("sew_moe_trace_jsonl")
+        if not trace_path:
+            continue
+        trace = Path(trace_path)
+        if not trace.exists():
+            continue
+        records = load_trace(trace)
+        summaries = [
+            simulator.replay(records, num_slots=num_slots, policy_name=slot_sweep_policy).to_jsonable()
+            for num_slots in slot_values
+        ]
+        if not summaries:
+            continue
+        best = min(
+            summaries,
+            key=lambda item: (
+                item["host_to_hbm_bytes"],
+                item["miss_count"],
+                item["num_slots"],
+            ),
+        )
+        summary = {
+            "trace": str(trace),
+            "policy": slot_sweep_policy,
+            "slot_range": slot_sweep_range,
+            "recommended_num_slots": best["num_slots"],
+            "recommended_host_to_hbm_bytes": best["host_to_hbm_bytes"],
+            "recommended_miss_count": best["miss_count"],
+            "recommended_prefetchable_miss_count": best["prefetchable_miss_count"],
+            "recommended_exposed_miss_count": best["exposed_miss_count"],
+            "recommended_prefetchable_host_to_hbm_bytes": best["prefetchable_host_to_hbm_bytes"],
+            "recommended_exposed_host_to_hbm_bytes": best["exposed_host_to_hbm_bytes"],
+            "sweep": summaries,
+        }
+        scenario_dir = output_dir / str(scenario.get("name") or scenario.get("phase") or "unknown")
+        output_path = scenario_dir / f"slot_sweep_{slot_sweep_policy}.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        phase = str(scenario.get("phase", ""))
+        results[phase] = {
+            "path": str(output_path),
+            "summary": summary,
+        }
+    return results
+
+
+def _extract_p1_plan(
+    reports: list[dict[str, Any]],
+    *,
+    slot_sweep_results: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    slot_sweep_results = slot_sweep_results or {}
+    plans = []
+    for report in reports:
+        decision = report.get("p1_decision") or {}
+        plan: dict[str, Any] = {
+            "phase": report.get("phase", ""),
+            "target": decision.get("target", "UNKNOWN"),
+        }
+        if decision.get("compute_bucket_plan"):
+            plan["compute_bucket_plan"] = decision["compute_bucket_plan"]
+        if decision.get("slot_sweep_hint"):
+            plan["slot_sweep_hint"] = decision["slot_sweep_hint"]
+        sweep_result = slot_sweep_results.get(str(report.get("phase", "")))
+        if sweep_result:
+            plan["slot_sweep_result_json"] = sweep_result["path"]
+            plan["slot_sweep_result"] = sweep_result["summary"]
+        if len(plan) > 2:
+            plans.append(plan)
+    return {
+        "version": 1,
+        "plans": plans,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -308,6 +513,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stop-analyse-delay-sec", type=float, default=2.0)
     parser.add_argument("--skip-analyse", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--sew-moe-trace-path",
+        type=Path,
+        help=(
+            "Optional JSONL path written by the running vLLM server via "
+            "VLLM_ASCEND_MOE_OFFLOAD_TRACE_PATH. Per-scenario deltas are copied into the output directory."
+        ),
+    )
+    parser.add_argument(
+        "--sew-moe-profile-path",
+        type=Path,
+        help=(
+            "Optional JSONL path written by the running vLLM server via "
+            "VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH. Per-scenario deltas are copied into the output directory."
+        ),
+    )
+    parser.add_argument(
+        "--require-sew-moe-artifacts",
+        action="store_true",
+        help="Fail if configured SEW-MoE trace/profile paths do not produce per-scenario JSONL deltas.",
+    )
+    parser.add_argument(
+        "--run-slot-sweep",
+        action="store_true",
+        help="After analysis, replay per-scenario SEW-MoE traces through the fixed-slot simulator.",
+    )
+    parser.add_argument(
+        "--slot-sweep-range",
+        default="8:64:8",
+        help="Slot sweep range START:STOP[:STEP] used when --run-slot-sweep is set.",
+    )
+    parser.add_argument("--slot-sweep-policy", default="lru", choices=("lru", "sticky_layer_lru"))
+    parser.add_argument("--slot-sweep-expert-bytes", type=int, default=14_680_064)
+    parser.add_argument("--slot-sweep-bandwidth-gbps", type=float, default=24.0)
     return parser.parse_args()
 
 
