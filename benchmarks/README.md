@@ -160,6 +160,39 @@ The script reads `benchmarks/results/*.json` and writes
 throughput, TTFT, and TPOT with the non-offloading run treated as the upper
 bound and the offload 14GB run treated as the baseline.
 
+#### P0 profiling findings: where MoE inference spends its time
+
+The P0 profiling work (Feature 1) measures the per-stage execution cost of MoE
+inference on Ascend NPU and motivates the downstream GMM-kernel and
+expert-offload optimization branches. Headline result from the single-card
+non-offloading Qwen3-30B-A3B mixed-phase profile (Atlas 800I A2, Ascend
+PyTorch Profiler):
+
+| OP type | Total | Avg | Share of MoE op time | Cube util |
+|---|---:|---:|---:|---:|
+| **GroupedMatmul** | 2099.74 ms | 165.7 us | **62.6%** | 91.2% |
+| MatMulV2 | 401.67 ms | 21.0 us | 12.0% | 68.8% |
+| FusedInferAttentionScore | 179.36 ms | 28.3 us | 5.3% | 86.0% |
+| RmsNorm | 158.03 ms | 12.3 us | 4.7% | 0.0% |
+| MoeInitRoutingCustom | 112.13 ms | 17.7 us | 3.3% | 0.0% |
+
+End-to-end at this operating point: median TTFT ≈ 1169.6 ms, median TPOT
+≈ 252.6 ms, output throughput ≈ 37.4 tok/s.
+
+Takeaways that drive the other two branches:
+
+- **GroupedMatmul dominates (62.6%)** of MoE operator time with high Cube
+  utilization (91.2%) but also large wait time (976 ms) — the primary target
+  for the custom GMM kernel work (`feature/gmm-kernel-opt`).
+- The two grouped matmul stages (GMM1 gate/up, GMM2 down) are where both
+  per-expert compute and HBM-resident expert weight access concentrate, which
+  is what the expert-offload runtime (`feature/moe-offload-runtime`) restructures
+  when HBM cannot hold all experts.
+
+Reproduce the report with the profiling suite below; per-run reports land under
+`benchmarks/results/<run>/ascend_moe_profile_report.md` (results dir is not
+version-controlled).
+
 #### Profile Qwen3 MoE prefill and decode with Ascend PyTorch Profiler
 
 For single-card non-offloading Qwen3-30B-A3B analysis, start vLLM with the
