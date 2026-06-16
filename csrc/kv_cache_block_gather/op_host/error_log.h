@@ -6,21 +6,24 @@
 #define OP_LOGI(opname, ...)
 #define OP_LOGW(opname, ...)              \
     do {                                  \
-        printf("[WARN][%s] ", (opname));  \
+        (void)(opname);                   \
+        printf("[WARN] ");                \
         printf(__VA_ARGS__);              \
         printf("\n");                    \
     } while (0)
 
 #define OP_LOGE_WITHOUT_REPORT(opname, ...) \
     do {                                    \
-        printf("[ERRORx][%s] ", (opname));  \
+        (void)(opname);                     \
+        printf("[ERRORx] ");                \
         printf(__VA_ARGS__);                \
         printf("\n");                      \
     } while (0)
 
 #define OP_LOGE(opname, ...)              \
     do {                                  \
-        printf("[ERROR][%s] ", (opname)); \
+        (void)(opname);                   \
+        printf("[ERROR] ");               \
         printf(__VA_ARGS__);              \
         printf("\n");                    \
     } while (0)
