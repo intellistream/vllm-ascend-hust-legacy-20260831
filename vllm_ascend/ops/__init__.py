@@ -32,6 +32,7 @@ if not _device_op_initializing:
         pass
     import vllm_ascend.ops.layernorm  # noqa
     import vllm_ascend.ops.register_custom_ops  # noqa
+    import vllm_ascend.ops.sparse_linear  # noqa
 
 if HAS_TRITON:
     import vllm_ascend.ops.triton.linearnorm.split_qkv_rmsnorm_rope  # noqa
