@@ -9,6 +9,7 @@ from vllm_ascend.ops.sparse_linear import (
     _record_custom_op_invocation,
     activation_sparse_linear,
     activation_sparse_linear_direct,
+    activation_sparse_linear_direct_t,
     activation_sparse_linear_ref,
     activation_sparse_linear_packed_t_ref,
     activation_sparse_linear_packed_ref,
@@ -137,11 +138,17 @@ def test_activation_sparse_linear_cpu_wrapper_matches_masked_linear():
         weight_t=weight.t().contiguous(),
     )
     direct_wrapper = activation_sparse_linear_direct(x, weight, threshold)
+    direct_t_wrapper = activation_sparse_linear_direct_t(
+        x,
+        weight.t().contiguous(),
+        threshold,
+    )
     masked = activation_sparse_linear_ref(x, weight, threshold)
 
     assert torch.allclose(packed_wrapper, masked)
     assert torch.allclose(packed_t_wrapper, masked)
     assert torch.allclose(direct_wrapper, masked)
+    assert torch.allclose(direct_t_wrapper, masked)
 
 
 def test_activation_sparse_custom_op_marker_writes_once(tmp_path, monkeypatch):
@@ -170,12 +177,20 @@ def test_activation_sparse_custom_op_marker_writes_once(tmp_path, monkeypatch):
             "inclusive": False,
         },
     )
+    _record_custom_op_invocation(
+        "activation_sparse_linear_direct_t",
+        {
+            "x_shape": [1, 3],
+            "threshold_numel": 1,
+            "inclusive": False,
+        },
+    )
 
     records = [
         json.loads(line)
         for line in marker_path.read_text(encoding="utf-8").splitlines()
     ]
-    assert len(records) == 2
+    assert len(records) == 3
     assert records[0]["op"] == "activation_sparse_linear_packed_t"
     assert records[0]["x_shape"] == [2, 3]
     assert records[0]["threshold_numel"] == 2
@@ -185,6 +200,10 @@ def test_activation_sparse_custom_op_marker_writes_once(tmp_path, monkeypatch):
     assert records[1]["x_shape"] == [1, 3]
     assert records[1]["threshold_numel"] == 1
     assert records[1]["inclusive"] is False
+    assert records[2]["op"] == "activation_sparse_linear_direct_t"
+    assert records[2]["x_shape"] == [1, 3]
+    assert records[2]["threshold_numel"] == 1
+    assert records[2]["inclusive"] is False
 
 
 def _requires_npu_custom_op():
@@ -200,7 +219,7 @@ def _npu_sparse_tolerances(dtype: torch.dtype) -> tuple[float, float]:
     return 5e-2, 5e-2
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 def test_activation_sparse_linear_npu_matches_ref(dtype):
     _requires_npu_custom_op()
     torch.manual_seed(0)
@@ -210,14 +229,20 @@ def test_activation_sparse_linear_npu_matches_ref(dtype):
 
     actual = activation_sparse_linear(x, weight, threshold)
     direct = activation_sparse_linear_direct(x, weight, threshold)
+    direct_t = activation_sparse_linear_direct_t(
+        x,
+        weight.t().contiguous(),
+        threshold,
+    )
     expected = activation_sparse_linear_ref(x, weight, threshold)
     atol, rtol = _npu_sparse_tolerances(dtype)
 
     assert torch.allclose(actual.cpu(), expected.cpu(), atol=atol, rtol=rtol)
     assert torch.allclose(direct.cpu(), expected.cpu(), atol=atol, rtol=rtol)
+    assert torch.allclose(direct_t.cpu(), expected.cpu(), atol=atol, rtol=rtol)
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("inclusive", [False, True])
 def test_activation_sparse_linear_npu_packed_ops_edge_cases(dtype, inclusive):
     _requires_npu_custom_op()
@@ -253,6 +278,12 @@ def test_activation_sparse_linear_npu_packed_ops_edge_cases(dtype, inclusive):
         counts,
         weight_t,
     )
+    direct_t = torch.ops._C_ascend.activation_sparse_linear_direct_t(
+        x.contiguous(),
+        weight_t,
+        threshold.contiguous(),
+        inclusive,
+    )
     wrapper = activation_sparse_linear(
         x,
         weight,
@@ -272,10 +303,11 @@ def test_activation_sparse_linear_npu_packed_ops_edge_cases(dtype, inclusive):
     assert counts.cpu().tolist() == expected_counts
     assert torch.allclose(packed.cpu(), expected.cpu(), atol=atol, rtol=rtol)
     assert torch.allclose(packed_t.cpu(), expected.cpu(), atol=atol, rtol=rtol)
+    assert torch.allclose(direct_t.cpu(), expected.cpu(), atol=atol, rtol=rtol)
     assert torch.allclose(wrapper.cpu(), expected.cpu(), atol=atol, rtol=rtol)
 
 
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 def test_activation_sparse_linear_npu_batched_row_topk_matches_ref(dtype):
     _requires_npu_custom_op()
     torch.manual_seed(1)
@@ -300,6 +332,12 @@ def test_activation_sparse_linear_npu_batched_row_topk_matches_ref(dtype):
         counts,
         weight_t,
     )
+    direct_t = torch.ops._C_ascend.activation_sparse_linear_direct_t(
+        x.contiguous(),
+        weight_t,
+        threshold,
+        True,
+    )
     wrapper = activation_sparse_linear(
         x,
         weight,
@@ -318,4 +356,21 @@ def test_activation_sparse_linear_npu_batched_row_topk_matches_ref(dtype):
     assert counts.max().item() <= input_dim
     atol, rtol = _npu_sparse_tolerances(dtype)
     assert torch.allclose(packed_t.cpu(), expected.cpu(), atol=atol, rtol=rtol)
+    assert torch.allclose(direct_t.cpu(), expected.cpu(), atol=atol, rtol=rtol)
     assert torch.allclose(wrapper.cpu(), expected.cpu(), atol=atol, rtol=rtol)
+
+
+def test_activation_sparse_linear_npu_bf16_wrapper_falls_back_to_ref():
+    _requires_npu_custom_op()
+    torch.manual_seed(2)
+    x = torch.randn(3, 32, device="npu", dtype=torch.bfloat16)
+    weight = torch.randn(17, 32, device="npu", dtype=torch.bfloat16)
+    threshold = torch.tensor([0.25, 0.5, 0.75], device="npu")
+
+    actual = activation_sparse_linear(x, weight, threshold)
+    direct = activation_sparse_linear_direct(x, weight, threshold)
+    expected = activation_sparse_linear_ref(x, weight, threshold)
+
+    atol, rtol = _npu_sparse_tolerances(torch.bfloat16)
+    assert torch.allclose(actual.cpu(), expected.cpu(), atol=atol, rtol=rtol)
+    assert torch.allclose(direct.cpu(), expected.cpu(), atol=atol, rtol=rtol)

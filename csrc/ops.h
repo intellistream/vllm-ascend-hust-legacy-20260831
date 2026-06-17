@@ -156,6 +156,20 @@ namespace vllm_ascend {
         uint32_t output_dim,
         uint32_t block_dim);
 
+    extern void activation_sparse_linear_direct_t_impl(
+        AscendType type,
+        void *stream,
+        void *x,
+        void *weight_t,
+        void *threshold,
+        void *y,
+        uint32_t batch_size,
+        uint32_t input_dim,
+        uint32_t output_dim,
+        bool threshold_per_row,
+        bool inclusive,
+        uint32_t block_dim);
+
     extern void mla_preprocess_impl(
         void* stream,
         void* hidden_state,

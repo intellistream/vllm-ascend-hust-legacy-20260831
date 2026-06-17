@@ -116,11 +116,11 @@ def activation_sparse_linear_direct(
     *,
     inclusive: bool = False,
 ) -> torch.Tensor:
-    if not getattr(x, "is_npu", False) or not _custom_op_enabled():
+    if not _can_use_custom_op(x, weight):
         if _requires_backend_kernel():
             raise RuntimeError(
                 "activation_sparse_linear_direct requires the Ascend custom "
-                "op when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
+                "fp16 op when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
             )
         return activation_sparse_linear_ref(
             x,
@@ -145,6 +145,42 @@ def activation_sparse_linear_direct(
     )
 
 
+def activation_sparse_linear_direct_t(
+    x: torch.Tensor,
+    weight_t: torch.Tensor,
+    threshold: torch.Tensor,
+    *,
+    inclusive: bool = False,
+) -> torch.Tensor:
+    if not _can_use_custom_op(x, weight_t):
+        if _requires_backend_kernel():
+            raise RuntimeError(
+                "activation_sparse_linear_direct_t requires the Ascend custom "
+                "fp16 op when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
+            )
+        return activation_sparse_linear_ref(
+            x,
+            weight_t.t().contiguous(),
+            threshold,
+            inclusive=inclusive,
+        )
+    _record_custom_op_invocation(
+        "activation_sparse_linear_direct_t",
+        {
+            **_tensor_marker_payload("x", x),
+            **_tensor_marker_payload("weight_t", weight_t),
+            **_tensor_marker_payload("threshold", threshold),
+            "inclusive": bool(inclusive),
+        },
+    )
+    return torch.ops._C_ascend.activation_sparse_linear_direct_t(
+        x.contiguous(),
+        weight_t.contiguous(),
+        threshold.to(dtype=torch.float32, device=x.device).contiguous(),
+        inclusive,
+    )
+
+
 def activation_sparse_linear(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -153,11 +189,12 @@ def activation_sparse_linear(
     inclusive: bool = False,
     weight_t: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    if not getattr(x, "is_npu", False) or not _custom_op_enabled():
+    custom_weight = weight if weight_t is None else weight_t
+    if not _can_use_custom_op(x, custom_weight):
         if _requires_backend_kernel():
             raise RuntimeError(
                 "activation_sparse_linear requires the Ascend packed custom "
-                "ops when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
+                "fp16 ops when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
             )
         values, indices, counts = activation_sparse_pack_ref(
             x,
@@ -171,6 +208,16 @@ def activation_sparse_linear(
             indices,
             counts,
             weight_t,
+        )
+
+    if weight_t is None:
+        weight_t = weight.t().contiguous()
+    if _should_use_direct_t(x, weight_t):
+        return activation_sparse_linear_direct_t(
+            x,
+            weight_t,
+            threshold,
+            inclusive=inclusive,
         )
 
     _record_custom_op_invocation(
@@ -188,8 +235,6 @@ def activation_sparse_linear(
         threshold.to(dtype=torch.float32, device=x.device).contiguous(),
         inclusive,
     )
-    if weight_t is None:
-        weight_t = weight.t().contiguous()
     return torch.ops._C_ascend.activation_sparse_linear_packed_t(
         values,
         indices,
@@ -198,9 +243,35 @@ def activation_sparse_linear(
     )
 
 
+def _should_use_direct_t(x: torch.Tensor, weight_t: torch.Tensor) -> bool:
+    mode = os.environ.get("VLLM_ASCEND_SPARSE_LINEAR_IMPL", "auto").lower()
+    if mode in {"packed", "packed_t"}:
+        return False
+    if mode in {"direct", "direct_t"}:
+        return True
+    if mode != "auto":
+        return False
+    return (
+        x.dim() == 2
+        and x.shape[0] == 1
+        and x.shape[1] <= 4096
+        and weight_t.dim() == 2
+        and weight_t.shape[1] >= 32768
+    )
+
+
 def _requires_backend_kernel() -> bool:
     value = os.environ.get("VLLM_SPARSE_GEMV_REQUIRE_KERNEL", "")
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _can_use_custom_op(x: torch.Tensor, weight: torch.Tensor | None) -> bool:
+    return (
+        getattr(x, "is_npu", False)
+        and _custom_op_enabled()
+        and x.dtype == torch.float16
+        and (weight is None or weight.dtype == torch.float16)
+    )
 
 
 def _tensor_marker_payload(name: str, tensor: torch.Tensor | None) -> dict[str, Any]:

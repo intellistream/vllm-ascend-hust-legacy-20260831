@@ -543,12 +543,19 @@ class cmake_build_ext(build_ext):
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
         cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
 
-        torch_npu_command = f"{sys.executable} -m pip show torch-npu | grep '^Location:' | awk '{{print $2}}'"
         try:
-            torch_npu_path = subprocess.check_output(torch_npu_command, shell=True).decode().strip()
-            torch_npu_path += "/torch_npu"
+            torch_npu_path = subprocess.check_output(
+                [
+                    python_executable,
+                    "-c",
+                    (
+                        "import pathlib, torch_npu; "
+                        "print(pathlib.Path(torch_npu.__file__).resolve().parent)"
+                    ),
+                ],
+            ).decode().strip()
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Retrieve torch version version failed: {e}")
+            raise RuntimeError(f"Retrieve torch_npu path failed: {e}")
 
         # add TORCH_NPU_PATH
         cmake_args += [f"-DTORCH_NPU_PATH={torch_npu_path}"]
@@ -648,9 +655,11 @@ class cmake_build_ext(build_ext):
             print(f"Copy: {src_cann_ops_custom} -> {dst_cann_ops_custom}")
 
     def run(self):
-        if envs.COMPILE_CUSTOM_KERNELS:
+        if envs.COMPILE_CUSTOM_KERNELS and envs.VLLM_ASCEND_BUILD_ACLNN:
             # First, ensure ACLNN custom-ops is built and installed.
             self.run_command("build_aclnn")
+        elif envs.COMPILE_CUSTOM_KERNELS:
+            print("Skipping build_aclnn because VLLM_ASCEND_BUILD_ACLNN=0")
 
         # Then, run the standard build_ext command to compile the extensions
         super().run()

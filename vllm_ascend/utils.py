@@ -388,6 +388,23 @@ def is_add_rms_norm_bias_custom_op_available() -> bool:
     return True
 
 
+def _preload_custom_kernel_library() -> None:
+    ascend_home = envs_ascend.ASCEND_HOME_PATH or os.environ.get("ASCEND_HOME_PATH")
+    if ascend_home:
+        ascendcl_path = os.path.join(ascend_home, "lib64", "libascendcl.so")
+        if os.path.exists(ascendcl_path):
+            ctypes.CDLL(ascendcl_path, mode=ctypes.RTLD_GLOBAL)
+
+    package_dir = os.path.dirname(os.path.realpath(__file__))
+    for lib_path in (
+        os.path.join(package_dir, "libvllm_ascend_kernels.so"),
+        os.path.join(package_dir, "lib64", "libvllm_ascend_kernels.so"),
+    ):
+        if os.path.exists(lib_path):
+            ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
+            return
+
+
 def enable_custom_op():
     """
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
@@ -417,6 +434,8 @@ def enable_custom_op():
         if not torch.compiler.is_compiling():
             bootstrap_custom_op_env()
         # isort: off
+        _preload_custom_kernel_library()
+
         # register custom ops into torch_library here
         import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
 
@@ -425,10 +444,10 @@ def enable_custom_op():
 
         # isort: on
         _CUSTOM_OP_ENABLED = True
-    except ImportError as e:
+    except (ImportError, OSError) as e:
         # Prefer the extension's rpath for vendor op_api loading. Only fall back
         # to mutating LD_LIBRARY_PATH when the import proves it is still needed.
-        if (not torch.compiler.is_compiling()) and "libcust_opapi.so" in str(e):
+        if isinstance(e, ImportError) and (not torch.compiler.is_compiling()) and "libcust_opapi.so" in str(e):
             try:
                 bootstrap_custom_op_env(include_vendor_lib=True)
                 import vllm_ascend.meta_registration  # type: ignore  # noqa: F401

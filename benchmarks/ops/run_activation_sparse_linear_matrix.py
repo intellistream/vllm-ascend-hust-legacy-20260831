@@ -117,6 +117,12 @@ def parse_args() -> argparse.Namespace:
         help="Forwarded to bench_activation_sparse_linear.py.",
     )
     parser.add_argument(
+        "--max-direct-t-err",
+        type=float,
+        default=None,
+        help="Forwarded to bench_activation_sparse_linear.py.",
+    )
+    parser.add_argument(
         "--min-packed-total-speedup",
         type=float,
         default=None,
@@ -138,6 +144,17 @@ def parse_args() -> argparse.Namespace:
         "--min-direct-speedup",
         type=float,
         default=None,
+        help="Forwarded to bench_activation_sparse_linear.py.",
+    )
+    parser.add_argument(
+        "--min-direct-t-speedup",
+        type=float,
+        default=None,
+        help="Forwarded to bench_activation_sparse_linear.py.",
+    )
+    parser.add_argument(
+        "--skip-direct",
+        action="store_true",
         help="Forwarded to bench_activation_sparse_linear.py.",
     )
     parser.add_argument(
@@ -202,8 +219,11 @@ def main() -> int:
                 ]
                 if args.inclusive:
                     cmd.append("--inclusive")
+                if args.skip_direct:
+                    cmd.append("--skip-direct")
                 add_optional_float(cmd, "--max-sparse-err", args.max_sparse_err)
                 add_optional_float(cmd, "--max-direct-err", args.max_direct_err)
+                add_optional_float(cmd, "--max-direct-t-err", args.max_direct_t_err)
                 add_optional_float(
                     cmd,
                     "--min-packed-total-speedup",
@@ -223,6 +243,11 @@ def main() -> int:
                     cmd,
                     "--min-direct-speedup",
                     args.min_direct_speedup,
+                )
+                add_optional_float(
+                    cmd,
+                    "--min-direct-t-speedup",
+                    args.min_direct_t_speedup,
                 )
 
                 proc = subprocess.run(cmd, text=True, capture_output=True)
@@ -269,8 +294,9 @@ def main() -> int:
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 
     print(
-        "shape\t mode\t sparsity\t dense_ms\t packed_total_ms\t "
-        "with_threshold_ms\t speedup\t with_threshold_speedup\t passed"
+        "shape\t mode\t sparsity\t dense_ms\t direct_t_ms\t "
+        "direct_t_speedup\t packed_total_ms\t with_threshold_ms\t speedup\t "
+        "with_threshold_speedup\t passed"
     )
     for result in results:
         print(
@@ -278,6 +304,8 @@ def main() -> int:
             f"\t {result['threshold_mode']}"
             f"\t {result['requested_sparsity']:.2f}"
             f"\t {result['dense_ms']:.4f}"
+            f"\t {result['direct_t_sparse_ms']:.4f}"
+            f"\t {result['direct_t_speedup']:.4f}"
             f"\t {result['packed_total_ms']:.4f}"
             f"\t {result['packed_total_with_threshold_ms']:.4f}"
             f"\t {result['packed_total_speedup']:.4f}"

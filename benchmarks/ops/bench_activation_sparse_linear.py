@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -10,6 +11,7 @@ from vllm_ascend.ops.sparse_linear import (
     _custom_op_enabled,
     activation_sparse_linear,
     activation_sparse_linear_direct,
+    activation_sparse_linear_direct_t,
 )
 
 
@@ -49,6 +51,12 @@ def parse_args() -> argparse.Namespace:
         help="Fail if direct sparse max abs error exceeds this value.",
     )
     parser.add_argument(
+        "--max-direct-t-err",
+        type=float,
+        default=None,
+        help="Fail if direct_t sparse max abs error exceeds this value.",
+    )
+    parser.add_argument(
         "--min-packed-total-speedup",
         type=float,
         default=None,
@@ -74,6 +82,17 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Fail if dense_ms / direct_sparse_ms is below this value.",
+    )
+    parser.add_argument(
+        "--min-direct-t-speedup",
+        type=float,
+        default=None,
+        help="Fail if dense_ms / direct_t_sparse_ms is below this value.",
+    )
+    parser.add_argument(
+        "--skip-direct",
+        action="store_true",
+        help="Skip the direct sparse kernel and benchmark only the packed path.",
     )
     parser.add_argument("--json-output", type=Path, default=None)
     return parser.parse_args()
@@ -152,18 +171,26 @@ def main() -> None:
     compare = torch.ge if effective_inclusive else torch.gt
 
     dense_out = torch.nn.functional.linear(x, weight)
-    direct_out = activation_sparse_linear_direct(
-        x,
-        weight,
-        threshold,
-        inclusive=effective_inclusive,
-    )
+    direct_out = None
+    if not args.skip_direct:
+        direct_out = activation_sparse_linear_direct(
+            x,
+            weight,
+            threshold,
+            inclusive=effective_inclusive,
+        )
     packed_out = activation_sparse_linear(
         x,
         weight,
         threshold,
         inclusive=effective_inclusive,
         weight_t=weight_t,
+    )
+    direct_t_out = activation_sparse_linear_direct_t(
+        x,
+        weight_t,
+        threshold,
+        inclusive=effective_inclusive,
     )
     threshold_mask = threshold_for_mask(threshold, x)
     masked_x = torch.where(
@@ -178,8 +205,14 @@ def main() -> None:
         packed_out.to(dtype=torch.float32) -
         expected_sparse.to(dtype=torch.float32)
     ).abs().max().item()
-    direct_max_abs_err = (
-        direct_out.to(dtype=torch.float32) -
+    direct_max_abs_err = None
+    if direct_out is not None:
+        direct_max_abs_err = (
+            direct_out.to(dtype=torch.float32) -
+            expected_sparse.to(dtype=torch.float32)
+        ).abs().max().item()
+    direct_t_max_abs_err = (
+        direct_t_out.to(dtype=torch.float32) -
         expected_sparse.to(dtype=torch.float32)
     ).abs().max().item()
     dense_sparse_max_abs_delta = (
@@ -204,10 +237,22 @@ def main() -> None:
         args.warmup,
         args.iters,
     )
-    direct_sparse_time = bench(
-        lambda: activation_sparse_linear_direct(
+    direct_sparse_time = None
+    if not args.skip_direct:
+        direct_sparse_time = bench(
+            lambda: activation_sparse_linear_direct(
+                x,
+                weight,
+                threshold,
+                inclusive=effective_inclusive,
+            ),
+            args.warmup,
+            args.iters,
+        )
+    direct_t_sparse_time = bench(
+        lambda: activation_sparse_linear_direct_t(
             x,
-            weight,
+            weight_t,
             threshold,
             inclusive=effective_inclusive,
         ),
@@ -253,29 +298,64 @@ def main() -> None:
         .mean()
         .item()
     )
-    direct_speedup = dense_time / direct_sparse_time
+    direct_speedup = (
+        None if direct_sparse_time is None else dense_time / direct_sparse_time
+    )
+    direct_t_speedup = dense_time / direct_t_sparse_time
     packed_total_speedup = dense_time / packed_total_time
     packed_compute_speedup = dense_time / packed_compute_time
     packed_total_with_threshold_speedup = (
         dense_time / packed_total_with_threshold_time
     )
     failures = []
+    if not math.isfinite(sparse_max_abs_err):
+        failures.append(
+            f"packed sparse max abs error is not finite: {sparse_max_abs_err}"
+        )
     if (
         args.max_sparse_err is not None
-        and sparse_max_abs_err > args.max_sparse_err
+        and (
+            not math.isfinite(sparse_max_abs_err)
+            or sparse_max_abs_err > args.max_sparse_err
+        )
     ):
         failures.append(
             "packed sparse max abs error "
             f"{sparse_max_abs_err:.6g} > {args.max_sparse_err:.6g}"
         )
+    if direct_max_abs_err is not None and not math.isfinite(direct_max_abs_err):
+        failures.append(
+            f"direct sparse max abs error is not finite: {direct_max_abs_err}"
+        )
+    if not math.isfinite(direct_t_max_abs_err):
+        failures.append(
+            f"direct_t sparse max abs error is not finite: {direct_t_max_abs_err}"
+        )
     if (
         args.max_direct_err is not None
-        and direct_max_abs_err > args.max_direct_err
+        and direct_max_abs_err is not None
+        and (
+            not math.isfinite(direct_max_abs_err)
+            or direct_max_abs_err > args.max_direct_err
+        )
     ):
         failures.append(
             "direct sparse max abs error "
             f"{direct_max_abs_err:.6g} > {args.max_direct_err:.6g}"
         )
+    if (
+        args.max_direct_t_err is not None
+        and (
+            not math.isfinite(direct_t_max_abs_err)
+            or direct_t_max_abs_err > args.max_direct_t_err
+        )
+    ):
+        failures.append(
+            "direct_t sparse max abs error "
+            f"{direct_t_max_abs_err:.6g} > {args.max_direct_t_err:.6g}"
+        )
+    if args.max_direct_err is not None and direct_max_abs_err is None:
+        failures.append("--max-direct-err cannot be used with --skip-direct")
     if (
         args.min_packed_total_speedup is not None
         and packed_total_speedup < args.min_packed_total_speedup
@@ -305,11 +385,22 @@ def main() -> None:
         )
     if (
         args.min_direct_speedup is not None
+        and direct_speedup is not None
         and direct_speedup < args.min_direct_speedup
     ):
         failures.append(
             "direct speedup "
             f"{direct_speedup:.6g} < {args.min_direct_speedup:.6g}"
+        )
+    if args.min_direct_speedup is not None and direct_speedup is None:
+        failures.append("--min-direct-speedup cannot be used with --skip-direct")
+    if (
+        args.min_direct_t_speedup is not None
+        and direct_t_speedup < args.min_direct_t_speedup
+    ):
+        failures.append(
+            "direct_t speedup "
+            f"{direct_t_speedup:.6g} < {args.min_direct_t_speedup:.6g}"
         )
 
     result = {
@@ -330,12 +421,16 @@ def main() -> None:
         "nnz_mean": float(counts.to(dtype=torch.float32).mean().item()),
         "sparse_max_abs_err": sparse_max_abs_err,
         "direct_max_abs_err": direct_max_abs_err,
+        "direct_t_max_abs_err": direct_t_max_abs_err,
         "dense_sparse_max_abs_delta": dense_sparse_max_abs_delta,
         "weight_t_cached": True,
         "dense_ms": dense_time * 1000.0,
         "threshold_ms": threshold_time * 1000.0,
         "online_threshold_ms": online_threshold_time * 1000.0,
-        "direct_sparse_ms": direct_sparse_time * 1000.0,
+        "direct_sparse_ms": (
+            None if direct_sparse_time is None else direct_sparse_time * 1000.0
+        ),
+        "direct_t_sparse_ms": direct_t_sparse_time * 1000.0,
         "pack_ms": pack_time * 1000.0,
         "packed_compute_ms": packed_compute_time * 1000.0,
         "packed_total_ms": packed_total_time * 1000.0,
@@ -343,6 +438,7 @@ def main() -> None:
             packed_total_with_threshold_time * 1000.0
         ),
         "direct_speedup": direct_speedup,
+        "direct_t_speedup": direct_t_speedup,
         "packed_total_speedup": packed_total_speedup,
         "packed_total_with_threshold_speedup": (
             packed_total_with_threshold_speedup
