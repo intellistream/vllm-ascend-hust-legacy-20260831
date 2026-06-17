@@ -59,8 +59,8 @@ from __future__ import annotations
 
 import torch
 
-import vllm_ascend.ops.fused_moe.moe_stage_params as _stage_params
-from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
+from . import moe_stage_params as _stage_params
+from .moe_stage_contracts import (
     MoEAllGatherCombineMetadata,
     MoEAllToAllCombineMetadata,
     MoEFusedExpertsInput,
@@ -72,7 +72,7 @@ from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
     MoEWeights,
     TMoECombineMetadata,
 )
-from vllm_ascend.ops.fused_moe.moe_stage_params import (
+from .moe_stage_params import (
     MoEQuantParams,
     MoERoutingParams,
 )

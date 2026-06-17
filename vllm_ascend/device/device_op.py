@@ -46,17 +46,108 @@ class BaseDeviceAdaptor:
         active_expert_range=None,
         quant_mode: int = -1,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
-            hidden_states,
-            topk_ids,
-            scale=scale,
-            active_num=active_num,
-            expert_num=expert_num,
-            expert_tokens_num_type=expert_tokens_num_type,
-            expert_tokens_num_flag=expert_tokens_num_flag,
-            active_expert_range=active_expert_range,
-            quant_mode=quant_mode,
+        ascend_ns = getattr(torch.ops, "_C_ascend", None)
+        custom_init_routing = getattr(ascend_ns, "npu_moe_init_routing_custom", None)
+        if custom_init_routing is not None:
+            return custom_init_routing(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
+
+        # Fallback for environments where custom _C_ascend op is not registered.
+        npu_init_v2 = getattr(torch_npu, "npu_moe_init_routing_v2", None)
+        if npu_init_v2 is not None:
+            return npu_init_v2(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
+
+        npu_init = getattr(torch_npu, "npu_moe_init_routing", None)
+        if npu_init is not None:
+            return npu_init(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+            )
+
+        raise RuntimeError("No available MoE init routing op found on this Ascend runtime")
+
+    @staticmethod
+    def split_qkv_rmsnorm_rope(
+        *,
+        input: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        q_hidden_size: int,
+        kv_hidden_size: int,
+        head_dim: int,
+        eps: float,
+        q_bias: torch.Tensor | None = None,
+        k_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        qkv_rmsnorm_rope = getattr(torch.ops.vllm, "qkv_rmsnorm_rope", None)
+        if qkv_rmsnorm_rope is not None:
+            return qkv_rmsnorm_rope(
+                input=input,
+                cos_sin_cache=cos_sin_cache,
+                positions=positions,
+                q_weight=q_weight,
+                k_weight=k_weight,
+                q_hidden_size=q_hidden_size,
+                kv_hidden_size=kv_hidden_size,
+                head_dim=head_dim,
+                eps=eps,
+                q_bias=q_bias,
+                k_bias=k_bias,
+            )
+
+        # Fallback path when custom op registration is unavailable.
+        q, k, v = input.split([q_hidden_size, kv_hidden_size, kv_hidden_size], dim=-1)
+
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // head_dim, head_dim)
+        q_norm_out, _ = torch.ops.npu.npu_rms_norm(q_by_head, q_weight, eps)
+        if q_bias is not None:
+            q_norm_out = q_norm_out + q_bias
+
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // head_dim, head_dim)
+        k_norm_out, _ = torch.ops.npu.npu_rms_norm(k_by_head, k_weight, eps)
+        if k_bias is not None:
+            k_norm_out = k_norm_out + k_bias
+
+        q_flat = q_norm_out.view(q.shape)
+        k_flat = k_norm_out.view(k.shape)
+        rope_dim = cos_sin_cache.shape[-1]
+        q_rope, k_rope = torch.ops.vllm.npu_rotary_embedding(
+            positions,
+            q_flat,
+            k_flat,
+            cos_sin_cache,
+            head_dim,
+            rope_dim,
+            True,
         )
+        return q_rope, k_rope, v
 
     @staticmethod
     def maybe_normalize_mxfp_scale_layout(scale: torch.Tensor | None) -> torch.Tensor | None:
@@ -77,19 +168,41 @@ class BaseDeviceAdaptor:
         eps: float = 1e-20,
         bias_opt: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k(
-            x,
-            k=k,
-            k_group=k_group,
-            group_count=group_count,
-            group_select_mode=group_select_mode,
-            renorm=renorm,
-            norm_type=norm_type,
-            out_flag=out_flag,
-            routed_scaling_factor=routed_scaling_factor,
-            eps=eps,
-            bias_opt=bias_opt,
-        )
+        if hasattr(torch.ops, "_C_ascend") and hasattr(torch.ops._C_ascend, "moe_gating_top_k"):
+            topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k(
+                x,
+                k=k,
+                k_group=k_group,
+                group_count=group_count,
+                group_select_mode=group_select_mode,
+                renorm=renorm,
+                norm_type=norm_type,
+                out_flag=out_flag,
+                routed_scaling_factor=routed_scaling_factor,
+                eps=eps,
+                bias_opt=bias_opt,
+            )
+        elif hasattr(torch_npu, "npu_moe_gating_top_k"):
+            topk_weights, topk_ids, out = torch_npu.npu_moe_gating_top_k(
+                x,
+                k=k,
+                bias=bias_opt,
+                k_group=k_group,
+                group_count=group_count,
+                group_select_mode=group_select_mode,
+                renorm=0,
+                norm_type=norm_type,
+                routed_scaling_factor=routed_scaling_factor,
+                eps=eps,
+            )
+            if norm_type == 0 and renorm == 1:
+                topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        else:
+            raise RuntimeError(
+                "No available MoE gating top-k op found. "
+                "Expected torch.ops._C_ascend.moe_gating_top_k or torch_npu.npu_moe_gating_top_k"
+            )
+
         return topk_weights, topk_ids.to(torch.int32), out
 
     @staticmethod

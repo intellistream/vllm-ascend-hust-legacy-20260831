@@ -67,6 +67,7 @@ def select_experts(
         weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(hidden_states, "gate_up")
     is_support_npu_moe_gating_top_k = check_npu_moe_gating_top_k(
         hidden_states=hidden_states,
+        num_experts=router_logits.shape[-1],
         top_k=top_k,
         renormalize=renormalize,
         topk_group=topk_group,
@@ -124,6 +125,7 @@ def select_experts(
 
 def check_npu_moe_gating_top_k(
     hidden_states: torch.Tensor,
+    num_experts: int | None,
     top_k: int,
     renormalize: bool,
     topk_group: int | None = None,
@@ -137,19 +139,29 @@ def check_npu_moe_gating_top_k(
         return False
     if scoring_func != "softmax" and scoring_func != "sigmoid":
         return False
+    if num_experts is None:
+        num_experts = hidden_states.shape[-1]
+
+    has_custom_moe_gating_topk = hasattr(torch.ops, "_C_ascend") and hasattr(
+        torch.ops._C_ascend, "moe_gating_top_k"
+    )
+    # torch_npu.npu_moe_gating_top_k currently supports at most 2048 experts.
+    if not has_custom_moe_gating_topk and num_experts > 2048:
+        return False
+
     topk_group = topk_group if topk_group is not None else 1
     num_expert_group = num_expert_group if num_expert_group is not None else 1
     if not (
         num_expert_group > 0
-        and hidden_states.shape[-1] % num_expert_group == 0
-        and hidden_states.shape[-1] // num_expert_group > 2
+        and num_experts % num_expert_group == 0
+        and num_experts // num_expert_group > 2
     ):
         return False
     if topk_group < 1 or topk_group > num_expert_group:
         return False
-    if top_k < 1 or top_k > (hidden_states.shape[-1] / (num_expert_group * topk_group)):
+    if top_k < 1 or top_k > (num_experts / (num_expert_group * topk_group)):
         return False
-    if topk_group * hidden_states.shape[-1] / num_expert_group < top_k:  # noqa: SIM103
+    if topk_group * num_experts / num_expert_group < top_k:  # noqa: SIM103
         return False
     return True
 

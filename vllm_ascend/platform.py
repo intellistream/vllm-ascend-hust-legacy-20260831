@@ -429,6 +429,12 @@ class NPUPlatform(Platform):
             # If splitting ops does not contain the vllm::mla forward value, this configuration issue will
             # not be detected in advance assert.
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
+            # MoE custom ops return tuples and are not compatible with ACL Graph
+            # compilation. They must be treated as graph break points.
+            compilation_config.splitting_ops.extend([
+                "vllm::moe_forward",
+                "vllm::moe_forward_shared",
+            ])
             update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif (

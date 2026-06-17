@@ -201,7 +201,12 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         )
         if zero_expert_num == 0 or zero_expert_type is None:
             assert router_logits.shape[1] == num_logical_experts, (
-                "Number of global experts mismatch (excluding redundancy)"
+                f"Number of global experts mismatch (excluding redundancy): "
+                f"router_logits.shape[1]={router_logits.shape[1]}, "
+                f"num_logical_experts={num_logical_experts}, "
+                f"num_experts={num_experts}, "
+                f"global_redundant_expert_num={global_redundant_expert_num}, "
+                f"n_shared_experts={n_shared_experts}"
             )
 
         if self.multistream_overlap_gate:

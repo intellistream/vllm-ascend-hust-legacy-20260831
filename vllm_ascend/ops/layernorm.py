@@ -166,6 +166,7 @@ class AscendRMSNormGated(RMSNormGated):
         norm_before_gate: bool = False,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        activation: str = "swish",
     ):
         """If group_size is not None, we do GroupNorm with each group having group_size elements.
         group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
@@ -173,6 +174,7 @@ class AscendRMSNormGated(RMSNormGated):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__(hidden_size, eps, group_size, norm_before_gate, device, dtype)
         self.eps = eps
+        self.activation = activation
         self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
         self.register_parameter("bias", None)
         self.group_size = group_size

@@ -230,7 +230,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     1. Non-MoE models return `None`.
     2. Without expert parallel, fall back to all-gather.
     3. On A2 with expert parallel, pick MC2 when tokens fit the MC2 capacity
-       and the DP size is large enough; otherwise use all-gather.
+        and the DP size is large enough; otherwise use all-gather.
     4. On A3 with expert parallel, prefer fused MC2 when using w8a8_dynamic
        quantization with small EP size, no dynamic_eplb, and not in MTP
        mode; otherwise use MC2 within capacity or all-to-all.

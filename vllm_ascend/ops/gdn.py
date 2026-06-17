@@ -36,8 +36,76 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
+from vllm.model_executor.layers.fla.ops import fused_recurrent_gated_delta_rule
+from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.ops.triton.mamba.causal_conv1d import causal_conv1d_fn
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import weak_ref_tensors
+
+# Check if the AscendC fused_gdn_gating op is available at import time.
+# If not, fall back to the Triton kernel implementation.
+_HAS_ASCENDC_FUSED_GDN_GATING = hasattr(
+    torch.ops, '_C_ascend') and hasattr(
+        torch.ops._C_ascend, 'npu_fused_gdn_gating')
+
+# Check if the AscendC npu_recurrent_gated_delta_rule op is available.
+# If not, fall back to the Triton fused_recurrent_gated_delta_rule kernel.
+_HAS_ASCENDC_RECURRENT_GDR = hasattr(
+    torch.ops, '_C_ascend') and hasattr(
+        torch.ops._C_ascend, 'npu_recurrent_gated_delta_rule')
+
+
+def _fused_gdn_gating(A_log, a, b, dt_bias):
+    """Call AscendC npu_fused_gdn_gating if available, else Triton fallback."""
+    if _HAS_ASCENDC_FUSED_GDN_GATING:
+        return torch.ops._C_ascend.npu_fused_gdn_gating(
+            A_log, a, b, dt_bias.to(torch.float32))
+    return fused_gdn_gating_patch(A_log, a, b, dt_bias)
+
+
+def _recurrent_gated_delta_rule(query, key, value, g, beta, state, scale,
+                                 cu_seqlens, ssm_state_indices,
+                                 num_accepted_tokens=None):
+    """Call AscendC npu_recurrent_gated_delta_rule or Triton fallback.
+
+    AscendC takes squeezed tensors and actual_seq_lengths; Triton takes
+    batched tensors and cu_seqlens.  This wrapper presents a unified interface
+    matching the AscendC calling convention (squeezed inputs + cu_seqlens)
+    and dispatches accordingly.
+    """
+    if _HAS_ASCENDC_RECURRENT_GDR:
+        # Convert cu_seqlens -> actual_seq_lengths for AscendC
+        actual_seq_lengths = torch.cat(
+            [cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
+        kwargs = dict(
+            query=query, key=key, value=value,
+            g=g, beta=beta,
+            state=state, scale=scale,
+            actual_seq_lengths=actual_seq_lengths,
+            ssm_state_indices=ssm_state_indices,
+        )
+        if num_accepted_tokens is not None:
+            kwargs['num_accepted_tokens'] = num_accepted_tokens.to(torch.int32)
+            # AscendC spec-decode path uses flattened (1-D) state indices
+            kwargs['ssm_state_indices'] = ssm_state_indices.flatten()
+        return torch.ops._C_ascend.npu_recurrent_gated_delta_rule(**kwargs)
+
+    # Triton fallback: expects [B, T, ...] layout and cu_seqlens.
+    # The Triton kernel uses the same [HV, V, K] state layout as the
+    # AscendC op, so we can pass the state cache directly.
+    out, _ = fused_recurrent_gated_delta_rule(
+        q=query.unsqueeze(0),
+        k=key.unsqueeze(0),
+        v=value.unsqueeze(0),
+        g=g.unsqueeze(0) if g is not None else g,
+        beta=beta.unsqueeze(0) if beta is not None else beta,
+        initial_state=state,
+        inplace_final_state=True,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=ssm_state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        scale=scale,
+    )
+    return out
 
 
 def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
@@ -216,8 +284,7 @@ def update_conv1d_graph_params(
                     new_num_accepted = ()
 
             torch.npu.graph_task_update_begin(update_stream, handle)
-            torch.ops._C_ascend.npu_causal_conv1d_custom(
-                output,
+            output = torch.ops._C_ascend.npu_causal_conv1d_custom(
                 mixed_qkv,
                 conv_weights_T,
                 conv_state=conv_state,
@@ -298,23 +365,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        if vllm_version_is("0.20.2"):
-            torch.ops.vllm.gdn_attention_core(
-                mixed_qkv,
-                b,
-                a,
-                core_attn_out,
-                self.prefix,
-            )
-        else:
-            torch.ops.vllm.gdn_attention_core(
-                mixed_qkv,
-                b,
-                a,
-                core_attn_out,
-                False,
-                self.prefix,
-            )
+        torch.ops.vllm.gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            self.prefix,
+        )
 
         # ============================================================
         # Part 3: Output Projection
@@ -420,8 +477,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
 
                 torch.npu.graph_task_group_begin(stream)
-                torch.ops._C_ascend.npu_causal_conv1d_custom(
-                    output_spec,
+                output_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     mixed_qkv_spec,
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
@@ -439,9 +495,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 mixed_qkv_spec = output_spec
             else:
                 # for enforce eager
-                output_spec = torch.empty_like(mixed_qkv_spec)
-                torch.ops._C_ascend.npu_causal_conv1d_custom(
-                    output_spec,
+                mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     mixed_qkv_spec,
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
@@ -454,7 +508,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=1,
                 )
-                mixed_qkv_spec = output_spec
 
         # 1.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
@@ -483,9 +536,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         cache_indices_opt,
                         initial_state_mode_opt,
                     ) = get_non_spec_causal_conv1d_host_args(attn_metadata)
-                    mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
-                    torch.ops._C_ascend.npu_causal_conv1d_custom(
-                        mixed_qkv_non_spec_output,
+                    mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
                         mixed_qkv_non_spec,
                         conv_weights_T,
                         conv_state=self_kv_cache[0],
@@ -498,7 +549,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         pad_slot_id=PAD_SLOT_ID,
                         run_mode=0,
                     )
-                    mixed_qkv_non_spec = mixed_qkv_non_spec_output
         elif attn_metadata.num_decodes > 0:
             conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
@@ -536,8 +586,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
 
                 torch.npu.graph_task_group_begin(stream)
-                torch.ops._C_ascend.npu_causal_conv1d_custom(
-                    output_non_spec,
+                output_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     mixed_qkv_non_spec,
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
@@ -554,9 +603,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 graph_params.conv1d_handles[num_actual_tokens].append(handle)
                 mixed_qkv_non_spec = output_non_spec
             else:
-                output_non_spec = torch.empty_like(mixed_qkv_non_spec)
-                torch.ops._C_ascend.npu_causal_conv1d_custom(
-                    output_non_spec,
+                mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     mixed_qkv_non_spec,
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
@@ -569,7 +616,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=1,
                 )
-                mixed_qkv_non_spec = output_non_spec
         else:
             mixed_qkv_non_spec = None
 
@@ -577,7 +623,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
         # 2. Recurrent attention
-        g, beta = torch.ops._C_ascend.npu_fused_gdn_gating(self.A_log, a, b, self.dt_bias.to(torch.float32))
+        g, beta = _fused_gdn_gating(self.A_log, a, b, self.dt_bias)
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 g_spec = g
@@ -598,14 +644,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
             cu_seqlens = spec_query_start_loc[: attn_metadata.num_spec_decodes + 1]
-            actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
             query_spec = l2norm_fwd(query_spec)
             key_spec = l2norm_fwd(key_spec)
             # Dispatches to the vllm-ascend AscendC custom operator
-            # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
+            # (csrc/recurrent_gated_delta_rule) or Triton fallback.
             # The custom op extends dtype support (e.g. float32 state) and is
             # loaded at runtime via ASCEND_CUSTOM_OPP_PATH.
-            core_attn_out_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+            core_attn_out_spec = _recurrent_gated_delta_rule(
                 query=query_spec.squeeze(0),
                 key=key_spec.squeeze(0),
                 value=value_spec.squeeze(0),
@@ -613,9 +658,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_spec.squeeze(0),
                 state=ssm_state,
                 scale=key_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=spec_state_indices_tensor.flatten(),
-                num_accepted_tokens=num_accepted_tokens.to(torch.int32),
+                cu_seqlens=cu_seqlens,
+                ssm_state_indices=spec_state_indices_tensor,
+                num_accepted_tokens=num_accepted_tokens,
             ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None
@@ -642,12 +687,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         elif attn_metadata.num_decodes > 0:
             cu_seqlens = non_spec_query_start_loc[: attn_metadata.num_decodes + 1]
-            actual_seq_lengths = torch.cat([cu_seqlens[:1], cu_seqlens[1:] - cu_seqlens[:-1]])
             query_non_spec = l2norm_fwd(query_non_spec)
             key_non_spec = l2norm_fwd(key_non_spec)
             # Dispatches to the vllm-ascend AscendC custom operator
-            # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
-            core_attn_out_non_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+            # (csrc/recurrent_gated_delta_rule) or Triton fallback.
+            core_attn_out_non_spec = _recurrent_gated_delta_rule(
                 query=query_non_spec.squeeze(0),
                 key=key_non_spec.squeeze(0),
                 value=value_non_spec.squeeze(0),
@@ -655,7 +699,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
                 state=ssm_state,
                 scale=key_non_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
+                cu_seqlens=cu_seqlens,
                 ssm_state_indices=non_spec_state_indices_tensor,
             ).unsqueeze(0)
         else:
