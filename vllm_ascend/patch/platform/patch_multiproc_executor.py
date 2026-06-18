@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import os
 import weakref
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from multiprocessing.synchronize import Lock as LockType
 
 import vllm.v1.executor.multiproc_executor
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.logger import init_logger
 from vllm.utils.network_utils import get_distributed_init_method, get_loopback_ip, get_open_port
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.executor.abstract import FailureCallback
@@ -19,6 +22,119 @@ from vllm.v1.executor.multiproc_executor import (
     WorkerProc,
     set_multiprocessing_worker_envs,
 )
+from vllm_ascend import envs as envs_ascend
+
+logger = init_logger(__name__)
+
+_WORKER_DEVICE_INDEX_ENV = "VLLM_ASCEND_WORKER_DEVICE_INDEX"
+_WORKER_PHYSICAL_DEVICE_ENV = "VLLM_ASCEND_WORKER_PHYSICAL_DEVICE"
+_VISIBLE_DEVICE_ENVS = (
+    "ASCEND_RT_VISIBLE_DEVICES",
+    "ASCEND_VISIBLE_DEVICES",
+    "NPU_VISIBLE_DEVICES",
+)
+
+
+def _split_visible_devices(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _get_worker_visible_devices() -> str:
+    for env_name in _VISIBLE_DEVICE_ENVS:
+        original_visible_devices = os.environ.get(f"VLLM_ASCEND_ORIGINAL_{env_name}", "")
+        if original_visible_devices:
+            return original_visible_devices
+
+    for env_name in _VISIBLE_DEVICE_ENVS:
+        visible_devices = os.environ.get(env_name, "")
+        if visible_devices:
+            return visible_devices
+    return ""
+
+
+def _select_worker_visible_device(local_rank: int) -> str | None:
+    visible_devices = _get_worker_visible_devices()
+    if not visible_devices:
+        logger.warning(
+            "VLLM_ASCEND_WORKER_NARROW_VISIBLE_DEVICES is enabled, but no "
+            "Ascend visible-device environment variable is set."
+        )
+        return None
+
+    devices = _split_visible_devices(visible_devices)
+    if local_rank < 0 or local_rank >= len(devices):
+        logger.warning(
+            "VLLM_ASCEND_WORKER_NARROW_VISIBLE_DEVICES is enabled, but "
+            "local_rank=%s is outside visible devices %s.",
+            local_rank,
+            visible_devices,
+        )
+        return None
+
+    return devices[local_rank]
+
+
+def _apply_worker_visible_device(local_rank: int) -> bool:
+    selected_device = _select_worker_visible_device(local_rank)
+    if selected_device is None:
+        return False
+
+    for env_name in _VISIBLE_DEVICE_ENVS:
+        original_value = os.environ.get(env_name)
+        if original_value is not None:
+            os.environ.setdefault(f"VLLM_ASCEND_ORIGINAL_{env_name}", original_value)
+        os.environ[env_name] = selected_device
+
+    os.environ[_WORKER_DEVICE_INDEX_ENV] = "0"
+    os.environ[_WORKER_PHYSICAL_DEVICE_ENV] = selected_device
+    os.environ["VLLM_ASCEND_WORKER_ORIGINAL_LOCAL_RANK"] = str(local_rank)
+    logger.info(
+        "Narrowed worker visible Ascend devices to %s for local_rank=%s.",
+        selected_device,
+        local_rank,
+    )
+    return True
+
+
+def _narrow_worker_visible_devices(local_rank: int) -> None:
+    if not envs_ascend.VLLM_ASCEND_WORKER_NARROW_VISIBLE_DEVICES:
+        return
+
+    _apply_worker_visible_device(local_rank)
+
+
+@contextmanager
+def _worker_visible_devices_env(local_rank: int) -> Iterator[None]:
+    if not envs_ascend.VLLM_ASCEND_WORKER_NARROW_VISIBLE_DEVICES:
+        yield
+        return
+
+    selected_device = _select_worker_visible_device(local_rank)
+    if selected_device is None:
+        yield
+        return
+
+    updates = {
+        _WORKER_DEVICE_INDEX_ENV: "0",
+        _WORKER_PHYSICAL_DEVICE_ENV: selected_device,
+        "VLLM_ASCEND_WORKER_ORIGINAL_LOCAL_RANK": str(local_rank),
+    }
+    for env_name in _VISIBLE_DEVICE_ENVS:
+        original_value = os.environ.get(env_name)
+        if original_value is not None:
+            updates[f"VLLM_ASCEND_ORIGINAL_{env_name}"] = original_value
+        updates[env_name] = selected_device
+
+    old_values = {name: os.environ.get(name) for name in updates}
+    os.environ.update(updates)
+    try:
+        yield
+    finally:
+        for name, old_value in old_values.items():
+            if old_value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = old_value
 
 
 class AscendMultiprocExecutor(MultiprocExecutor):
@@ -193,19 +309,25 @@ class AscendWorkerProc(WorkerProc):
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
-            target=WorkerProc.worker_main,
+            target=AscendWorkerProc.worker_main,
             kwargs=process_kwargs,
             name=f"VllmWorker-{rank}",
             daemon=False,
         )
 
-        proc.start()
+        with _worker_visible_devices_env(local_rank):
+            proc.start()
         # Close child ends of pipes here in the parent
         ready_writer.close()
         death_reader.close()
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
         return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
+
+    @staticmethod
+    def worker_main(*args, **kwargs):
+        _narrow_worker_visible_devices(int(kwargs.get("local_rank", 0)))
+        return WorkerProc.worker_main(*args, **kwargs)
 
 
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor

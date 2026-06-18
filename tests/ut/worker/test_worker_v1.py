@@ -1100,6 +1100,44 @@ class TestNPUWorker(TestBase):
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
 
+    @patch.dict("os.environ", {"VLLM_ASCEND_WORKER_DEVICE_INDEX": "0"})
+    @patch("vllm_ascend.worker.worker.bind_cpus")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    @patch("vllm_ascend.worker.worker.get_ascend_device_type")
+    @patch("vllm_ascend.worker.worker.NPUWorker._warm_up_atb")
+    def test_compile_or_warm_up_model_binds_worker_device_index(
+        self,
+        mock_warm_up_atb,
+        mock_get_ascend_device_type,
+        mock_get_ascend_config,
+        mock_bind_cpus,
+    ):
+        """Test CPU binding uses worker-local device index after warmup."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.local_rank = 3
+            worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.compilation_config = MagicMock()
+            worker.vllm_config.compilation_config.compile_sizes = []
+            worker.vllm_config.compilation_config.compilation_time = 0
+            worker.model_config = MagicMock()
+            worker.model_config.enforce_eager = True
+            worker.model_config.seed = 12345
+            worker.cache_config = MagicMock()
+            worker.cache_config.kv_cache_memory_bytes = 1
+            worker.compilation_config = MagicMock()
+            worker.compilation_config.encoder_compilation_time = 0
+            mock_get_ascend_config.return_value.enable_cpu_binding = True
+
+            worker.compile_or_warm_up_model()
+
+            mock_warm_up_atb.assert_called_once()
+            mock_bind_cpus.assert_called_once_with(0)
+            mock_get_ascend_device_type.assert_called_once()
+
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     def test_initialize_from_config_with_sleep_mode(self,

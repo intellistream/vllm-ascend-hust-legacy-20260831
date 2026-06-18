@@ -125,6 +125,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB": lambda: os.getenv(
         "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB", None
     ),
+    # Whether each multiprocessing worker should narrow Ascend visible-device
+    # env vars to its own selected physical device before process start.
+    # This is an internal process-isolation aid for multi-worker launches.
+    "VLLM_ASCEND_WORKER_NARROW_VISIBLE_DEVICES": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_WORKER_NARROW_VISIBLE_DEVICES", "0"))
+    ),
+    # Internal logical NPU index used after worker visible devices are narrowed.
+    # When VLLM_ASCEND_WORKER_NARROW_VISIBLE_DEVICES is enabled this is usually 0.
+    "VLLM_ASCEND_WORKER_DEVICE_INDEX": lambda: os.getenv("VLLM_ASCEND_WORKER_DEVICE_INDEX", None),
+    # Internal physical NPU id used by health checks after visible-device narrowing.
+    "VLLM_ASCEND_WORKER_PHYSICAL_DEVICE": lambda: os.getenv("VLLM_ASCEND_WORKER_PHYSICAL_DEVICE", None),
 }
 
 # end-env-vars-definition

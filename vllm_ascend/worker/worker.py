@@ -71,6 +71,9 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
+_WORKER_DEVICE_INDEX_ENV = "VLLM_ASCEND_WORKER_DEVICE_INDEX"
+_WORKER_PHYSICAL_DEVICE_ENV = "VLLM_ASCEND_WORKER_PHYSICAL_DEVICE"
+
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
@@ -297,6 +300,23 @@ def _maybe_auto_select_idle_ascend_device(local_rank: int, parallel_config) -> i
     return logical_id
 
 
+def _get_worker_device_index(local_rank: int) -> int:
+    raw_device_index = envs_ascend.VLLM_ASCEND_WORKER_DEVICE_INDEX
+    if raw_device_index is None:
+        return local_rank
+    try:
+        device_index = int(raw_device_index)
+    except ValueError as exc:
+        raise RuntimeError(f"{_WORKER_DEVICE_INDEX_ENV} must be an integer, got {raw_device_index!r}.") from exc
+    if device_index < 0:
+        raise RuntimeError(f"{_WORKER_DEVICE_INDEX_ENV} must be non-negative, got {device_index}.")
+    return device_index
+
+
+def _get_worker_physical_device_id(local_rank: int) -> str:
+    return envs_ascend.VLLM_ASCEND_WORKER_PHYSICAL_DEVICE or str(local_rank)
+
+
 class NPUWorker(WorkerBase):
     def __init__(
         self,
@@ -474,21 +494,31 @@ class NPUWorker(WorkerBase):
         )
         device_index = selected_device if selected_device is not None else self.local_rank
 
-        device = torch.device(f"npu:{device_index}")
-        try:
+        worker_device_index_env = envs_ascend.VLLM_ASCEND_WORKER_DEVICE_INDEX
+        if worker_device_index_env is not None:
+            worker_device_index = _get_worker_device_index(self.local_rank)
+            device = torch.device(f"npu:{worker_device_index}")
             torch.npu.set_device(device)
-        except Exception as exc:
-            if selected_device is None or device_index == self.local_rank:
-                raise
+        else:
+            worker_device_index = device_index
+            device = torch.device(f"npu:{worker_device_index}")
+            try:
+                torch.npu.set_device(device)
+            except Exception as exc:
+                if worker_device_index == self.local_rank:
+                    raise
 
-            logger.warning(
-                "Failed to initialize auto-selected Ascend device %s (%s); falling back to local_rank %s.",
-                device_index,
-                exc,
-                self.local_rank,
-            )
-            device = torch.device(f"npu:{self.local_rank}")
-            torch.npu.set_device(device)
+                logger.warning(
+                    "Failed to initialize auto-selected NPU device %s for "
+                    "local rank %s; falling back to local rank device %s: %s",
+                    worker_device_index,
+                    self.local_rank,
+                    self.local_rank,
+                    exc,
+                )
+                worker_device_index = self.local_rank
+                device = torch.device(f"npu:{worker_device_index}")
+                torch.npu.set_device(device)
 
         check_ascend_device_type()
 
@@ -785,7 +815,7 @@ class NPUWorker(WorkerBase):
         # worker process before migratepages/taskset run.
         if get_ascend_config().enable_cpu_binding:
             try:
-                bind_cpus(self.local_rank)
+                bind_cpus(_get_worker_device_index(self.local_rank))
             except Exception as e:
                 logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
         # Reset the seed to ensure that the random state is not affected by
@@ -962,8 +992,9 @@ class NPUWorker(WorkerBase):
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
         init_batch_invariance()
+        worker_device_index = _get_worker_device_index(self.local_rank)
         init_distributed_environment(
-            self.parallel_config.world_size, self.rank, self.distributed_init_method, self.local_rank, "hccl"
+            self.parallel_config.world_size, self.rank, self.distributed_init_method, worker_device_index, "hccl"
         )
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
@@ -1027,9 +1058,10 @@ class NPUWorker(WorkerBase):
         import subprocess
 
         logger.info("check_health Start!")
+        npu_smi_device_id = _get_worker_physical_device_id(self.local_rank)
         try:
             result = subprocess.run(
-                ["npu-smi", "info", "-i", str(self.local_rank), "-t", "health"],
+                ["npu-smi", "info", "-i", npu_smi_device_id, "-t", "health"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -1039,13 +1071,13 @@ class NPUWorker(WorkerBase):
                 parse_text_output(result.stdout)
                 logger.info("check_health success!")
             else:
-                logger.info("query NPU card %s fail: %s", self.local_rank, result.stderr)
+                logger.info("query NPU card %s fail: %s", npu_smi_device_id, result.stderr)
         except subprocess.TimeoutExpired:
-            logger.info("query NPU card  %s timeout.", self.local_rank)
+            logger.info("query NPU card %s timeout.", npu_smi_device_id)
         except FileNotFoundError:
             logger.info("npu-smi tool not found.")
         except Exception as e:
-            logger.info("query NPU card %s fail: %s", self.local_rank, e)
+            logger.info("query NPU card %s fail: %s", npu_smi_device_id, e)
         return
 
 

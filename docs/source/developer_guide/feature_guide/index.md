@@ -12,6 +12,7 @@ disaggregated_prefill
 eplb_swift_balancer
 ACL_Graph
 KV_Cache_Pool_Guide
+device_kv_transfer_prototype
 add_custom_aclnn_op
 context_parallel
 quantization
