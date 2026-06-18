@@ -112,6 +112,10 @@ class MetadataServer:
         }
         self.shared_memory = {}  # type: ignore
         self.num_cpu_blocks = -1
+        if vllm_config.model_config is None:
+            raise ValueError("CPUOffloadingConnector requires model_config for CPU KV cache manager")
+        self.max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.max_model_len = vllm_config.model_config.max_model_len
 
     @staticmethod
     def _safe_create_shared_memory(name: str, size: int) -> SharedMemory:
@@ -170,16 +174,24 @@ class MetadataServer:
         if self.num_cpu_blocks == -1 or num_blocks < self.num_cpu_blocks:
             self.num_cpu_blocks = num_blocks
         self.layer = layer
+        self._post_init_cpu_block_manager()
         return self.shared_memory[(pp_rank, tp_rank)]
 
-    def post_init(self):
+    def _post_init_cpu_block_manager(self) -> bool:
         # different processors in data parallel may call multiple times
         if hasattr(self, "cpu_block_manager"):
-            return
+            return True
         # do shared_memory() at least once
+        if self.num_cpu_blocks < 0 or not hasattr(self, "layer"):
+            logger.info("defer cpu kv cache manager init until cpu kv caches are registered")
+            return False
         logger.info("assign cpu num blocks: %s", self.num_cpu_blocks)
-        assert self.num_cpu_blocks >= 0
-        self.cpu_block_manager = CPUKVCacheManager(self.layer, self.num_cpu_blocks)
+        self.cpu_block_manager = CPUKVCacheManager(
+            self.layer,
+            self.num_cpu_blocks,
+            self.max_num_batched_tokens,
+            self.max_model_len,
+        )
         self.functions.update(
             {
                 "get_matched_num_and_touch": self.cpu_block_manager.get_matched_num_and_touch,
@@ -188,6 +200,10 @@ class MetadataServer:
                 "cache_and_free_slots": self.cpu_block_manager.cache_and_free_slots,
             }
         )
+        return True
+
+    def post_init(self):
+        self._post_init_cpu_block_manager()
 
     def serve_step(self):
         client_id = self.socket.recv()
