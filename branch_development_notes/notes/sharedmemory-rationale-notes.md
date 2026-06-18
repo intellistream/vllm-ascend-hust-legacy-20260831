@@ -1,4 +1,4 @@
-# CPU KV Cache SharedMemory Rationale Notes
+2# CPU KV Cache SharedMemory Rationale Notes
 
 Generated on 2026-06-17.
 
