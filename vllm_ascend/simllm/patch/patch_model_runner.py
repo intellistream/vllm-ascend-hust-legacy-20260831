@@ -1068,10 +1068,12 @@ def _simllm_build_store_plan(
         req_id: idx for idx, req_id in enumerate(input_batch_req_ids)
     }
     store_plan: list[tuple[int, int]] = []
+    planned_rows: set[int] = set()
     for hash_idx, req_id in enumerate(prefill_req_ids[:num_hashes]):
         row_idx = req_id_to_row.get(req_id)
-        if row_idx is not None:
+        if row_idx is not None and row_idx not in planned_rows:
             store_plan.append((row_idx, hash_idx))
+            planned_rows.add(row_idx)
     return store_plan
 
 

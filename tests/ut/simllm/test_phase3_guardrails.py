@@ -16,7 +16,6 @@ from vllm_ascend.simllm.patch.patch_model_runner import (
     _simllm_handle_deferrals,
 )
 
-
 SIMLLM_ROOT = Path(__file__).parents[3] / "vllm_ascend" / "simllm"
 
 

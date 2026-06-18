@@ -164,6 +164,33 @@ class TestConcurrentSafety:
         assert len(mgr.lookup_by_hash(10)) == 0
         assert len(mgr.lookup_by_hash(20)) == 1
 
+    def test_overwrite_same_hash_does_not_duplicate_bucket_membership(self):
+        mgr = KVManager()
+        mgr.store(_make_task("a", lsh_hash=10))
+        mgr.store(_make_task("a", lsh_hash=10))
+
+        assert mgr.size() == 1
+        assert mgr._buckets[10] == ["a"]
+        assert [task.task_id for task in mgr.lookup_by_hash(10)] == ["a"]
+
+    def test_bucket_index_has_no_stale_ids_after_churn(self):
+        mgr = KVManager(max_cache_size=4)
+
+        for i in range(20):
+            mgr.store(_make_task(f"task-{i}", lsh_hash=i % 3))
+
+        cached_ids = set(mgr._cache)
+        indexed_ids = {
+            task_id
+            for bucket in mgr._buckets.values()
+            for task_id in bucket
+        }
+
+        assert mgr.size() == 4
+        assert indexed_ids == cached_ids
+        for task_id, task in mgr._cache.items():
+            assert task_id in mgr._buckets[task.lsh_hash]
+
     def test_store_many_sequential(self):
         """No errors when storing many tasks sequentially."""
         mgr = KVManager(max_cache_size=128)

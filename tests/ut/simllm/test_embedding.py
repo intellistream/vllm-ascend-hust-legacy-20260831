@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 import torch
-
 from huggingface_hub.utils._http import close_session as _hf_close_session
+
 from vllm_ascend.simllm.embedding import extract_embedding
 
 # ---------------------------------------------------------------------------

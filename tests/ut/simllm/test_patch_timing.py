@@ -13,7 +13,6 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-
 PATCH_SIMLLM_PATH = (
     Path(__file__).parents[3]
     / "vllm_ascend"
