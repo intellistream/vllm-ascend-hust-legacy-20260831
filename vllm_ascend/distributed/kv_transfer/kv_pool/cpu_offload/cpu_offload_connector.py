@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import json
 import os
 import queue
 import threading
@@ -22,6 +23,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
+import vllm_ascend.envs as ascend_envs
 from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.metadata import (
     MetadataServer,
     MetadataServerProc,
@@ -254,6 +256,10 @@ class CPUOffloadingConnectorWorker:
         self.save_stream = torch.npu.Stream()
         self.zmq_rpc_client = MetadataServer.ZMQRPCClient()
         self.load_block_mapping: list[tuple[int, int]] = []
+        self.h2d_profile_path = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_H2D_PROFILE_PATH
+        self._h2d_profile_pending: list[
+            tuple[torch.npu.Event, torch.npu.Event, int, int, str]
+        ] = []
         self.save_input_queue: queue.Queue[tuple[str, ReqMeta]] = queue.Queue()
         self.save_output_queue: queue.Queue[str] = queue.Queue()
         self._save_done_condition = threading.Condition()
@@ -331,8 +337,61 @@ class CPUOffloadingConnectorWorker:
     def wait_for_layer_load(self) -> None:
         # TODO: Replace with `torch.npu.current_stream().wait_stream(self.load_stream)` after fixing the bug.
         self.load_stream.synchronize()
+        self._collect_h2d_profile_events()
         self.current_layer += 1
         self.load_kv_layer(self.current_layer)
+
+    def _copy_kv_part(self, cpu_layer_part: torch.Tensor, gpu_layer_part: torch.Tensor) -> None:
+        profile = self._start_h2d_profile()
+        bytes_moved = len(self.load_block_mapping) * cpu_layer_part.stride(0) * cpu_layer_part.element_size()
+        for cpu_block_id, gpu_block_id in self.load_block_mapping:
+            gpu_layer_part[gpu_block_id].copy_(cpu_layer_part[cpu_block_id], non_blocking=True)
+        if profile is not None:
+            self._finish_h2d_profile(
+                profile,
+                bytes_moved,
+                len(self.load_block_mapping),
+                "tensor_copy",
+            )
+
+    def _start_h2d_profile(self) -> torch.npu.Event | None:
+        if not self.h2d_profile_path or not self.load_block_mapping:
+            return None
+        event = torch.npu.Event(enable_timing=True)
+        event.record(self.load_stream)
+        return event
+
+    def _finish_h2d_profile(
+        self,
+        start_event: torch.npu.Event,
+        bytes_moved: int,
+        segment_count: int,
+        backend: str,
+    ) -> None:
+        end_event = torch.npu.Event(enable_timing=True)
+        end_event.record(self.load_stream)
+        self._h2d_profile_pending.append(
+            (start_event, end_event, bytes_moved, segment_count, backend)
+        )
+
+    def _collect_h2d_profile_events(self) -> None:
+        if not self.h2d_profile_path or not self._h2d_profile_pending:
+            return
+        profile_dir = os.path.dirname(self.h2d_profile_path)
+        if profile_dir:
+            os.makedirs(profile_dir, exist_ok=True)
+        with open(self.h2d_profile_path, "a", encoding="utf-8") as profile_file:
+            for start_event, end_event, bytes_moved, segment_count, backend in self._h2d_profile_pending:
+                record = {
+                    "pid": os.getpid(),
+                    "layer": self.current_layer,
+                    "backend": backend,
+                    "bytes": bytes_moved,
+                    "segments": segment_count,
+                    "elapsed_ms": start_event.elapsed_time(end_event),
+                }
+                profile_file.write(json.dumps(record) + "\n")
+        self._h2d_profile_pending.clear()
 
     def load_kv_layer(self, layer: int):
         if layer == len(self.gpu_kv_caches):
@@ -340,9 +399,10 @@ class CPUOffloadingConnectorWorker:
         gpu_kv_caches = next(self.gpu_kv_caches_load_iter)
         cpu_kv_caches = self.cpu_kv_caches[layer]
         with torch.npu.stream(self.load_stream):
-            for cpu_block_id, gpu_block_id in self.load_block_mapping:
-                for gpu_layer_part, cpu_layer_part in zip(gpu_kv_caches, cpu_kv_caches):
-                    gpu_layer_part[gpu_block_id].copy_(cpu_layer_part[cpu_block_id], non_blocking=True)
+            if not self.load_block_mapping:
+                return
+            for gpu_layer_part, cpu_layer_part in zip(gpu_kv_caches, cpu_kv_caches):
+                self._copy_kv_part(cpu_layer_part, gpu_layer_part)
 
     def get_finished(self) -> set[str]:
         done_sending: set[str] = set()
@@ -387,7 +447,7 @@ class CPUOffloadingConnectorWorker:
             self.zmq_rpc_client.call("cache_and_free_slots", req_id)
 
     def wait_for_save(self) -> None:
-        timeout_s = float(os.getenv("VLLM_ASCEND_CPU_OFFLOAD_SAVE_TIMEOUT_S", "300"))
+        timeout_s = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_SAVE_TIMEOUT_S
         deadline = time.monotonic() + timeout_s
         with self._save_done_condition:
             while self._pending_save_req_ids:

@@ -140,6 +140,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Optional JSONL output path for CPU offload H2D copy profiling. Each record
+    # is emitted after the load stream synchronizes, so elapsed_ms is measured by
+    # NPU events rather than host submission time.
+    "VLLM_ASCEND_CPU_OFFLOAD_H2D_PROFILE_PATH": lambda: os.getenv(
+        "VLLM_ASCEND_CPU_OFFLOAD_H2D_PROFILE_PATH", None
+    ),
+    # Maximum seconds the worker should wait for asynchronous CPU offload saves.
+    "VLLM_ASCEND_CPU_OFFLOAD_SAVE_TIMEOUT_S": lambda: float(
+        os.getenv("VLLM_ASCEND_CPU_OFFLOAD_SAVE_TIMEOUT_S", "300")
+    ),
 }
 
 # end-env-vars-definition
