@@ -97,6 +97,11 @@ else()
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host/tiling/tiling_data.cpp)
 endif()
 
+if(NOT VLLM_ASCEND_BUILD_ASCENDC_KERNELS)
+    list(APPEND VLLM_ASCEND_SRC
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/stubs/ascendc_kernel_stubs.cpp)
+endif()
+
 include_directories(
   ${pybind11_INCLUDE_DIRS}
   ${PYTHON_INCLUDE_PATH}
