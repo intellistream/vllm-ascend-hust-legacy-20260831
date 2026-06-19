@@ -557,6 +557,10 @@ class cmake_build_ext(build_ext):
         # When unset (None), CMake will auto-detect from CANN headers.
         if envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY is not None:
             cmake_args += [f"-DVLLM_ASCEND_ENABLE_BATCH_MEMCPY={envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY}"]
+        cmake_args += [
+            "-DVLLM_ASCEND_BUILD_ASCENDC_KERNELS="
+            f"{'ON' if envs.VLLM_ASCEND_BUILD_ASCENDC_KERNELS else 'OFF'}"
+        ]
 
         build_tool = []
         # TODO(ganyi): ninja and ccache support for ascend c auto codegen. now we can only use make build

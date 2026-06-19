@@ -11,16 +11,20 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     # ASCEND910B (A2) series
     # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
-    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
-    if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "dependency catlass is missing, try to fetch it..."
-        if ! git submodule update --init --recursive; then
-            echo "fetch failed"
-            exit 1
+    if [[ -z "${VLLM_ASCEND_ACLNN_OPS:-}" ]]; then
+        CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
+        if [[ ! -d "${CATLASS_PATH}" ]]; then
+            echo "dependency catlass is missing, try to fetch it..."
+            if ! git submodule update --init --recursive; then
+                echo "fetch failed"
+                exit 1
+            fi
         fi
+        ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
+        export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
+    else
+        echo "skip default catlass dependency setup because VLLM_ASCEND_ACLNN_OPS is set"
     fi
-    ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
-    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
 
 
     CUSTOM_OPS="moe_grouped_matmul;grouped_matmul_swiglu_quant_weight_nz_tensor_list;lightning_indexer_vllm;sparse_flash_attention;matmul_allreduce_add_rmsnorm;moe_init_routing_custom;moe_gating_top_k;add_rms_norm_bias;apply_top_k_top_p_custom;transpose_kv_cache_by_block;copy_and_expand_eagle_inputs;causal_conv1d;lightning_indexer_quant;hamming_dist_top_k;reshape_and_cache_bnsd;recurrent_gated_delta_rule;kv_cache_block_gather;"
@@ -29,16 +33,20 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     # ASCEND910C (A3) series
     # dependency: catlass
     git config --global --add safe.directory "$ROOT_DIR"
-    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
-    if [[ ! -d "${CATLASS_PATH}" ]]; then
-        echo "dependency catlass is missing, try to fetch it..."
-        if ! git submodule update --init --recursive; then
-            echo "fetch failed"
-            exit 1
+    if [[ -z "${VLLM_ASCEND_ACLNN_OPS:-}" ]]; then
+        CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
+        if [[ ! -d "${CATLASS_PATH}" ]]; then
+            echo "dependency catlass is missing, try to fetch it..."
+            if ! git submodule update --init --recursive; then
+                echo "fetch failed"
+                exit 1
+            fi
         fi
+        # for dispatch_gmm_combine_decode
+        yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
+    else
+        echo "skip default catlass/HCCL dependency setup because VLLM_ASCEND_ACLNN_OPS is set"
     fi
-    # for dispatch_gmm_combine_decode
-    yes | cp "${HCCL_STRUCT_FILE_PATH}" "${ROOT_DIR}/csrc/utils/inc/kernel"
 
     CUSTOM_OPS_ARRAY=(
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
@@ -74,6 +82,10 @@ else
     exit 0
 fi
 
+if [[ -n "${VLLM_ASCEND_ACLNN_OPS:-}" ]]; then
+    CUSTOM_OPS="${VLLM_ASCEND_ACLNN_OPS}"
+    echo "override custom ops from VLLM_ASCEND_ACLNN_OPS: ${CUSTOM_OPS}"
+fi
 
 # build custom ops
 cd csrc

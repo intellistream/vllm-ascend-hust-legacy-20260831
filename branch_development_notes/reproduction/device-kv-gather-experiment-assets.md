@@ -98,11 +98,30 @@ branch's extension registered, so build the current checkout first:
 python3 -m pip install -e . --no-build-isolation -v
 ```
 
-As of 2026-06-19, the normal editable build can be blocked if
-`csrc/third_party/catlass` is empty and the git index still contains the stale
-`tmp/cann-stack` gitlink without a `.gitmodules` mapping. For the worker-local
-copy baseline, the full ACLNN custom-op build is not required. A narrower manual
-CMake build of `vllm_ascend_C` is enough to register `swap_blocks_batch`:
+As of 2026-06-19, `tmp/cann-stack` has been removed from the repository index
+and must not be used as a reproduction resource. For transfer-path validation,
+the full ACLNN custom-op set and bundled AscendC kernel target are not required.
+Use the narrow 910B build path below to build only the
+`kv_cache_block_gather` ACLNN op plus the `vllm_ascend_C` torch binding:
+
+```bash
+cd /tmp/vllm-ascend-hust
+
+VLLM_ASCEND_ACLNN_OPS=kv_cache_block_gather \
+VLLM_ASCEND_BUILD_ASCENDC_KERNELS=0 \
+SOC_VERSION=ascend910b1 \
+python3 -m pip install -e . --no-build-isolation -v
+
+PYTHONPATH=/tmp/vllm-ascend-hust python3 - <<'PY'
+import torch
+import vllm_ascend.vllm_ascend_C
+print("has swap_blocks_batch", hasattr(torch.ops._C_ascend, "swap_blocks_batch"))
+print("has kv_cache_block_gather", hasattr(torch.ops._C_ascend, "kv_cache_block_gather"))
+PY
+```
+
+If editable install is not desirable, the equivalent manual CMake path can build
+only `vllm_ascend_C`:
 
 ```bash
 cd /tmp/vllm-ascend-hust
@@ -121,7 +140,8 @@ cmake -S . -B /tmp/vllm-ascend-hust-cmake-build \
   -DCMAKE_INSTALL_PREFIX=/tmp/vllm-ascend-hust/vllm_ascend \
   -DCMAKE_PREFIX_PATH=$PYBIND11_CMAKE\;$TORCH_CMAKE \
   -DSOC_VERSION=ascend910b1 \
-  -DTORCH_NPU_PATH=$TORCH_NPU_PATH
+  -DTORCH_NPU_PATH=$TORCH_NPU_PATH \
+  -DVLLM_ASCEND_BUILD_ASCENDC_KERNELS=OFF
 
 cmake --build /tmp/vllm-ascend-hust-cmake-build -j 8 --target vllm_ascend_C
 cmake --install /tmp/vllm-ascend-hust-cmake-build
@@ -171,14 +191,14 @@ torch.ops._C_ascend.kv_cache_block_gather(
 )
 ```
 
-The remaining blocker is the extension build/registration path:
+The remaining validation item is to rerun mapped H2D using the narrow 910B build
+path above:
 
 - single-op `kv_cache_block_gather` builds and exports the ACLNN symbols;
-- a full `SOC_VERSION=ascend910b` root CMake build reaches unrelated MLA bf16
-  kernel compilation errors in the current container;
-- a minimal `SOC_VERSION=ascend310p3` build can build `vllm_ascend_C`, but does
-  not register `swap_blocks_batch` or `kv_cache_block_gather`, so it is not a
-  valid transfer benchmark build.
+- `VLLM_ASCEND_ACLNN_OPS=kv_cache_block_gather` keeps the ACLNN build focused on
+  the required op;
+- `VLLM_ASCEND_BUILD_ASCENDC_KERNELS=0` skips unrelated bundled AscendC kernel
+  targets while preserving `vllm_ascend_C` registration for both transfer ops.
 
 The latest failed mapped smoke record is:
 
@@ -215,10 +235,9 @@ python3 branch_development_notes/tools/bench_cpu_npu_offload_transfer.py \
 - Worker-local transfer quick baseline: verified through manual CMake build of
   `vllm_ascend_C`; 18 cases / 30 rows, all pass.
 - Worker-local mapped H2D selector: implemented experimentally and call-order
-  fixed; real smoke remains blocked on a 910B extension build that registers
-  both `swap_blocks_batch` and `kv_cache_block_gather`.
-- Normal editable build remains blocked until `csrc/third_party/catlass` and the
-  stale `tmp/cann-stack` gitlink situation is cleaned up.
+  fixed; real smoke should be rerun with the narrow 910B transfer build above.
+- `tmp/cann-stack` has been removed from the repository index and is no longer
+  part of the reproduction path.
 
 ## Optional Trace Analysis Tool
 

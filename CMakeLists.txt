@@ -29,7 +29,9 @@ endif()
 
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
 set(SOC_VERSION ${SOC_VERSION})
+option(VLLM_ASCEND_BUILD_ASCENDC_KERNELS "Build bundled AscendC kernel library target." ON)
 message(STATUS "Detected SOC version: ${SOC_VERSION}")
+message(STATUS "Build bundled AscendC kernels: ${VLLM_ASCEND_BUILD_ASCENDC_KERNELS}")
 
 if (NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Release" CACHE STRINGS "Build type Release/Debug (default Release)" FORCE)
@@ -72,7 +74,9 @@ if(SOC_VERSION MATCHES "ascend950")
     list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
 endif()
 
-if(SOC_VERSION MATCHES "ascend310p.*")
+if(NOT VLLM_ASCEND_BUILD_ASCENDC_KERNELS)
+    message(STATUS "Skipping vllm_ascend_kernels compile by request")
+elseif(SOC_VERSION MATCHES "ascend310p.*")
     message(STATUS "310P hardware detected: skip vllm_ascend_kernels compile")
 else()
     ascendc_library(vllm_ascend_kernels SHARED
@@ -183,7 +187,7 @@ set(VLLM_ASCEND_C_COMMON_LIBS
   opapi
 )
 
-if(SOC_VERSION MATCHES "ascend310p.*")
+if(NOT VLLM_ASCEND_BUILD_ASCENDC_KERNELS OR SOC_VERSION MATCHES "ascend310p.*")
   target_link_libraries(
     vllm_ascend_C
     PUBLIC
@@ -200,7 +204,7 @@ endif()
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib:$ORIGIN/_cann_ops_custom/vendors/vllm-ascend/op_api/lib")
 
-if(SOC_VERSION MATCHES "ascend310p.*")
+if(NOT VLLM_ASCEND_BUILD_ASCENDC_KERNELS OR SOC_VERSION MATCHES "ascend310p.*")
   install(TARGETS vllm_ascend_C DESTINATION ${VLLM_ASCEND_INSTALL_PATH})
 else()
   install(TARGETS vllm_ascend_C vllm_ascend_kernels DESTINATION ${VLLM_ASCEND_INSTALL_PATH})

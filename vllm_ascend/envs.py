@@ -41,6 +41,19 @@ env_variables: dict[str, Callable[[], Any]] = {
     # scenarios in an environment without an NPU. Do not set it to False in
     # other scenarios.
     "COMPILE_CUSTOM_KERNELS": lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
+    # Whether to build and link the bundled AscendC kernel library target during
+    # package builds. Default is enabled. Set to 0 only for narrow engineering
+    # experiments that need the Python torch binding extension without unrelated
+    # AscendC kernels, for example worker-local transfer backend validation.
+    # Valid values: 0 or 1. Not sensitive.
+    "VLLM_ASCEND_BUILD_ASCENDC_KERNELS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_BUILD_ASCENDC_KERNELS", "1"))
+    ),
+    # Optional semicolon-separated ACLNN custom op list for package builds.
+    # Default empty value means use the SOC-specific default list in
+    # csrc/build_aclnn.sh. Example: kv_cache_block_gather.
+    # Not sensitive.
+    "VLLM_ASCEND_ACLNN_OPS": lambda: os.getenv("VLLM_ASCEND_ACLNN_OPS", None),
     # The CXX compiler used for compiling the package. If not set, the default
     # value is None, which means the system default CXX compiler will be used.
     "CXX_COMPILER": lambda: os.getenv("CXX_COMPILER", None),

@@ -139,10 +139,11 @@ Started on 2026-06-19:
   `vllm_ascend_C` is built from the current checkout. Next validation command
   should run inside the reproduction Docker after:
   `python3 -m pip install -e . --no-build-isolation`.
-- Attempted full editable build in Docker. It failed before measurement because
-  `csrc/third_party/catlass` is empty and the git index still contains a
-  `tmp/cann-stack` gitlink that has no `.gitmodules` entry. That makes
-  `git submodule update --init --recursive` fail during `build_aclnn.sh`.
+- Attempted full editable build in Docker. The old blocker included a stale
+  `tmp/cann-stack` gitlink with no `.gitmodules` entry. That gitlink has now
+  been removed, and transfer-path validation should use the narrow build:
+  `VLLM_ASCEND_ACLNN_OPS=kv_cache_block_gather` plus
+  `VLLM_ASCEND_BUILD_ASCENDC_KERNELS=0`.
 - Verified a narrower manual CMake build path for Phase 2:
   - copied the checkout to `/tmp` inside Docker;
   - configured and built target `vllm_ascend_C`;
@@ -202,9 +203,9 @@ Worker-local quick baseline headline:
 | Fragment count sweep: 1, 8, 32, 128, 512, 2048 | Measure device-side parallelism and launch/index overhead. | C++ benchmark and matrix runner can vary `--selected-blocks`; p95/p99 are now emitted. | Need higher-iteration repeat for stable thresholds. | Use the existing matrix runner and persist results under `branch_development_notes/work`. | Same as above. | JSON rows exist for every count and include latency percentiles. |
 | Contiguous run length sweep | Decide when bulk copy is better than gather. | Benchmark has source/destination patterns but no contiguous-run concept. | Cannot generate block ids with controlled run lengths like 1, 2, 4, 8, 16 contiguous pages per run. | Add `--src-run-length` / `--dst-run-length` or a `run_length` pattern that creates grouped contiguous block ids. Compare gather vs one-run or coalesced-copy implementation. | C++ benchmark block-id generator; optional Python runner. | Results show crossover between many small runs and large contiguous runs. |
 | Random vs sorted block ids | Measure index locality and host DRAM locality. | C++ benchmark supports `random`, `sequential`, `reverse`, `stride`; sequential is a proxy for sorted. | No explicit "same random set sorted by src" comparison; no host locality labels in output. | Add `sorted_random` pattern: generate random ids, then sort by source id while preserving destination mapping variants. | C++ benchmark block-id generator. | Report contains random and sorted-random cases with identical selected set. |
-| HtoD only | CPU to NPU load policy. | Covered by mapped-host gather and H2D copy in C++ benchmark; worker-local copy path supports CPU->NPU; experimental worker-local mapped H2D selector is implemented. | Mapped worker-local smoke still needs a 910B `vllm_ascend_C` build that registers both `swap_blocks_batch` and `kv_cache_block_gather`. | Keep C++ microbench for raw backend; use worker-local H2D benchmark through `CpuNpuOffloadingHandler.transfer_async`; repair/reuse valid 910B extension registration path. | `branch_development_notes/tools/bench_cpu_npu_offload_transfer.py`; `vllm_ascend/kv_offload/cpu_npu.py`. | Raw op and worker-local H2D copy/mapped numbers are both reported. |
+| HtoD only | CPU to NPU load policy. | Covered by mapped-host gather and H2D copy in C++ benchmark; worker-local copy path supports CPU->NPU; experimental worker-local mapped H2D selector is implemented. | Mapped worker-local smoke needs to be rerun with the narrow 910B transfer build. | Keep C++ microbench for raw backend; use worker-local H2D benchmark through `CpuNpuOffloadingHandler.transfer_async`; build with `VLLM_ASCEND_ACLNN_OPS=kv_cache_block_gather` and `VLLM_ASCEND_BUILD_ASCENDC_KERNELS=0`. | `branch_development_notes/tools/bench_cpu_npu_offload_transfer.py`; `vllm_ascend/kv_offload/cpu_npu.py`. | Raw op and worker-local H2D copy/mapped numbers are both reported. |
 | DtoH only | NPU to CPU save policy. | Worker-local copy path supports D2H via `swap_blocks_batch`. | No mapped-host write/scatter backend; C++ gather benchmark has no D2H case; legacy gather path only loads. | Add baseline D2H copy benchmark first. Treat mapped D2H as future custom op (`kv_cache_block_scatter` or read/write variant) if needed. | `CpuNpuOffloadingHandler` benchmark harness; optional new custom op later. | D2H copy latency/GB/s reported; mapped D2H explicitly marked unsupported until op exists. |
-| Bidirectional | Save/load default strategy and interference. | Worker-local copy path has separate H2D/D2H streams; `branch_development_notes/tools/bench_cpu_npu_offload_transfer.py` can issue H2D, D2H, and bidirectional synthetic jobs. | Copy validation is complete; mapped H2D plus copy D2H awaits a 910B extension build that registers both required ops. | Run the worker-local runner inside the reproduction Docker after a valid manual CMake build. Include mapped H2D plus copy D2H after the H2D smoke passes. | `branch_development_notes/tools/bench_cpu_npu_offload_transfer.py`; `CpuNpuOffloadingHandler` instrumentation. | Output includes H2D, D2H, combined throughput, queue delay, and stream wait. |
+| Bidirectional | Save/load default strategy and interference. | Worker-local copy path has separate H2D/D2H streams; `branch_development_notes/tools/bench_cpu_npu_offload_transfer.py` can issue H2D, D2H, and bidirectional synthetic jobs. | Copy validation is complete; mapped H2D plus copy D2H needs a rerun with the narrow 910B transfer build. | Run the worker-local runner inside the reproduction Docker after the transfer-only build. Include mapped H2D plus copy D2H after the H2D smoke passes. | `branch_development_notes/tools/bench_cpu_npu_offload_transfer.py`; `CpuNpuOffloadingHandler` instrumentation. | Output includes H2D, D2H, combined throughput, queue delay, and stream wait. |
 | With prefill running | Detect prefill regression from device-driven gather using NPU cores. | Existing benchmark is transfer-only; repo has model benchmark harnesses. | No concurrent prefill + transfer test. | Add an e2e scenario that issues long-prefill requests while background CPU-hit loads are triggered. Use two modes: copy backend and mapped backend. | New e2e benchmark config or script; reuse `vllm bench` / `aisbench`; add backend env toggles. | p50/p95/p99 TTFT and prefill latency regression emitted for copy vs mapped. |
 | With decode running | Detect ITL regression from device-driven gather. | Existing benchmark is transfer-only; `aisbench` can collect serving metrics. | No decode-heavy workload paired with host gather; no ITL extraction helper in current local helper analogous to `get_TTFT`. | Add decode-heavy dataset/config and `get_ITL` parser. Run copy vs mapped with matched seeds and traffic. | `tools/aisbench.py`; nightly/e2e benchmark YAML or standalone runner. | p50/p95/p99 ITL regression <= configured threshold, or mapped backend is limited to prefill window. |
 | Long-context CPU-hit workload | Measure TTFT/throughput benefit in real CPU-hit path. | Skipped CPU offload test has a latency pattern with cold/GPU-hit/CPU-hit; prefix benchmark YAMLs exist. | Test is skipped and not matrix-grade; no mapped-vs-copy toggle; no percentiles. | Unskip/rewrite for worker-local offload. Add requests with controlled CPU cache residency and compare cold, copy CPU-hit, mapped CPU-hit. | `tests/e2e/singlecard/test_cpu_offloading.py` replacement; standalone benchmark runner for longer runs. | CPU-hit workload emits TTFT/throughput percentiles and correctness check. |
@@ -236,9 +237,10 @@ Worker-local quick baseline headline:
 The mapped gather integration now has an experimental worker-local selector in
 `vllm_ascend/kv_offload/cpu_npu.py`, which already owns CPU tensors, transfer
 streams, events, in-flight transfer queues, and H2D/D2H copy execution. The
-first smoke found and fixed the op call order. The remaining blocker is a valid
-910B extension build that registers both `swap_blocks_batch` and
-`kv_cache_block_gather`.
+first smoke found and fixed the op call order. The repository now has a narrow
+910B transfer build path for registering both `swap_blocks_batch` and
+`kv_cache_block_gather` without using `tmp/cann-stack` or unrelated bundled
+AscendC kernels.
 
 Supplement:
 

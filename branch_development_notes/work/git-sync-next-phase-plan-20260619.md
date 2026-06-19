@@ -83,25 +83,28 @@ Status:
 
 ## Next Phase
 
-### P0: Fix The Extension Registration Path
+### P0: Rerun Mapped H2D With Narrow 910B Transfer Build
 
 Goal:
 
-- produce a reproducible 910B `vllm_ascend_C` build that registers both
+- validate the reproducible 910B transfer-only build that registers both
   `torch.ops._C_ascend.swap_blocks_batch` and
   `torch.ops._C_ascend.kv_cache_block_gather`.
 
 Why:
 
-- this is the only blocker for validating the worker-local mapped H2D path.
+- `tmp/cann-stack` has been removed from the repository index and must not be
+  used as a resource;
+- unrelated bundled AscendC kernels should not block transfer-path validation.
 
 Work items:
 
-- inspect root CMake targets and SOC guards for transfer op registration;
-- isolate unrelated MLA bf16 compile failures from the transfer-only build;
-- document a minimal 910B build recipe under
-  `branch_development_notes/reproduction`;
-- rerun `worker-local-mapped-h2d-smoke` once both ops register.
+- build with
+  `VLLM_ASCEND_ACLNN_OPS=kv_cache_block_gather`,
+  `VLLM_ASCEND_BUILD_ASCENDC_KERNELS=0`, and `SOC_VERSION=ascend910b1`;
+- verify both transfer ops register;
+- rerun `worker-local-mapped-h2d-smoke`;
+- record the run under `branch_development_notes/work`.
 
 ### P1: Add Inner-Loop Worker-Local Benchmark Mode
 

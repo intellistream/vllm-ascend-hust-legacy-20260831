@@ -51,28 +51,34 @@ Worker-local mapped H2D selection has been added behind the existing
 `VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER` switch. The first real smoke exposed and
 fixed an implementation bug: `kv_cache_block_gather` takes
 `src_block_ids, src_pages, dst_block_ids, out`. The current blocker is now the
-reproducible 910B extension registration path. A minimal `ascend310p3` build can
-produce `vllm_ascend_C`, but it does not register `swap_blocks_batch` or
-`kv_cache_block_gather`; a full `ascend910b` build reaches unrelated MLA bf16
-kernel compilation errors in this container.
+mapped H2D rerun itself. The engineering blocker has been addressed by removing
+the stale `tmp/cann-stack` gitlink and adding a narrow 910B build path:
+
+```bash
+VLLM_ASCEND_ACLNN_OPS=kv_cache_block_gather \
+VLLM_ASCEND_BUILD_ASCENDC_KERNELS=0 \
+SOC_VERSION=ascend910b1 \
+python3 -m pip install -e . --no-build-isolation -v
+```
+
+This builds only the required ACLNN custom op and skips unrelated bundled
+AscendC kernels while preserving `vllm_ascend_C` transfer op registration.
 
 ## Known Blockers
 
-1. Normal full editable Docker build is currently blocked because
-   `csrc/third_party/catlass` is empty and the git index still contains a stale
-   `tmp/cann-stack` gitlink with no `.gitmodules` entry.
+1. Mapped H2D smoke needs to be rerun with the new narrow 910B transfer build.
 2. Raw matrix quick run used only 3 measured iterations, so exact copy/gather
    crossover thresholds need a higher-iteration repeat.
-3. Worker-local mapped-host gather backend is integrated experimentally, but
-   the mapped smoke still needs a 910B extension build that registers both
-   `swap_blocks_batch` and `kv_cache_block_gather`.
+3. The full production-style 910B build may still require proper `catlass`
+   submodule initialization for unrelated fused/MLA kernels, but transfer-path
+   validation no longer depends on those kernels.
 
 ## Recommended Next Step
 
-Repair or reuse a 910B `vllm_ascend_C` build that registers both transfer ops,
-then rerun the mapped H2D smoke and expand to mapped-vs-copy H2D matrix cases.
-Before using the numbers as thresholds, reduce runner overhead by reusing
-`CpuNpuOffloadingHandler` across iterations or adding an inner-loop mode.
+Run the mapped H2D smoke with the narrow 910B transfer build, then expand to
+mapped-vs-copy H2D matrix cases. Before using the numbers as thresholds, reduce
+runner overhead by reusing `CpuNpuOffloadingHandler` across iterations or adding
+an inner-loop mode.
 
 The concrete git sync and next-phase plan is recorded in:
 
