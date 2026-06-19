@@ -14,7 +14,11 @@
 #include <unistd.h>
 
 #include "acl/acl.h"
+#if __has_include("aclnnop/aclnn_kv_cache_block_gather.h")
 #include "aclnnop/aclnn_kv_cache_block_gather.h"
+#else
+#include "aclnn_kv_cache_block_gather.h"
+#endif
 
 namespace {
 
@@ -242,6 +246,8 @@ void PrintStats(const std::string &name, const std::vector<float> &ms,
               << std::fixed << std::setprecision(3) << mean_ms
               << " p50_ms=" << std::setw(9) << Percentile(ms, 0.50)
               << " p90_ms=" << std::setw(9) << Percentile(ms, 0.90)
+              << " p95_ms=" << std::setw(9) << Percentile(ms, 0.95)
+              << " p99_ms=" << std::setw(9) << Percentile(ms, 0.99)
               << " GB/s=" << std::setw(9) << std::setprecision(2) << gbps
               << std::endl;
 }

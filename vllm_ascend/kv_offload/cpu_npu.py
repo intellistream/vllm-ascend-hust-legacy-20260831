@@ -8,6 +8,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import AttentionBackend  # type: ignore
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler, TransferResult, TransferSpec
+from vllm_ascend import envs as ascend_envs
 
 
 @dataclass
@@ -73,6 +74,23 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
 
         # Reusable event pool to avoid allocation overhead
         self._event_pool: list[torch.npu.Event] = []
+        self.use_host_gather = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER
+        self.host_gather_op = None
+        self._host_gather_fallback_logged = False
+        if self.use_host_gather:
+            host_gather_lib = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_LIB
+            if host_gather_lib:
+                torch.ops.load_library(host_gather_lib)
+            try:
+                self.host_gather_op = torch.ops._C_ascend.kv_cache_block_gather
+            except AttributeError:
+                logger.warning(
+                    "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER is enabled for "
+                    "worker-local KV offload, but "
+                    "torch.ops._C_ascend.kv_cache_block_gather is not "
+                    "available. Falling back to swap_blocks_batch."
+                )
+                self.use_host_gather = False
 
         pin_memory = is_pin_memory_available()
 
@@ -130,6 +148,67 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         self._block_size_in_bytes_arr = np.array(block_sizes_in_bytes, dtype=np.int64)
         # Total bytes per block across all sub-tensors (for transfer stats)
         self._total_bytes_per_block = int(self._block_size_in_bytes_arr.sum())
+
+    def _log_host_gather_fallback_once(self, reason: str) -> None:
+        if not self._host_gather_fallback_logged:
+            logger.info("Worker-local mapped-host gather fallback: %s", reason)
+            self._host_gather_fallback_logged = True
+
+    def _can_use_host_gather(self, is_d2h: bool) -> bool:
+        if is_d2h:
+            return False
+        if not self.use_host_gather or self.host_gather_op is None:
+            return False
+        for npu_tensor, cpu_tensor in zip(self.npu_tensors, self.cpu_tensors):
+            for kv_idx in range(2):
+                npu_t = npu_tensor[kv_idx]
+                cpu_t = cpu_tensor[kv_idx]
+                if not cpu_t.is_contiguous() or not npu_t.is_contiguous():
+                    self._log_host_gather_fallback_once(
+                        "KV cache tensor is not contiguous"
+                    )
+                    return False
+                if cpu_t.dtype != npu_t.dtype:
+                    self._log_host_gather_fallback_once(
+                        "CPU/NPU KV cache dtype mismatch"
+                    )
+                    return False
+                if cpu_t.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+                    self._log_host_gather_fallback_once(
+                        f"unsupported KV cache dtype {cpu_t.dtype}"
+                    )
+                    return False
+        return True
+
+    def _run_host_gather(
+        self,
+        src_block_ids: np.ndarray,
+        dst_block_ids: np.ndarray,
+    ) -> None:
+        assert self.host_gather_op is not None
+        if src_block_ids.size == 0:
+            return
+        src_min = int(src_block_ids.min())
+        src_max = int(src_block_ids.max())
+        device = self.npu_tensors[0][0].device
+        relative_src_block_ids = torch.tensor(
+            (src_block_ids - src_min).astype(np.int32),
+            dtype=torch.int32,
+            device=device,
+        )
+        device_dst_block_ids = torch.tensor(
+            dst_block_ids.astype(np.int32),
+            dtype=torch.int32,
+            device=device,
+        )
+        for npu_tensor, cpu_tensor in zip(self.npu_tensors, self.cpu_tensors):
+            for kv_idx in range(2):
+                self.host_gather_op(
+                    relative_src_block_ids,
+                    cpu_tensor[kv_idx][src_min : src_max + 1],
+                    device_dst_block_ids,
+                    npu_tensor[kv_idx],
+                )
 
     def _get_event(self) -> torch.npu.Event:
         if self._event_pool:
@@ -213,8 +292,11 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
         with torch.npu.stream(stream):
             start_event.record(stream)
             if total > 0:
-                direction = 0 if not is_d2h else 1
-                torch.ops._C_ascend.swap_blocks_batch(batch_src, batch_dst, batch_sizes, direction)
+                if self._can_use_host_gather(is_d2h):
+                    self._run_host_gather(src_block_ids, dst_block_ids)
+                else:
+                    direction = 0 if not is_d2h else 1
+                    torch.ops._C_ascend.swap_blocks_batch(batch_src, batch_dst, batch_sizes, direction)
             end_event.record(stream)
 
         transfers.append(
