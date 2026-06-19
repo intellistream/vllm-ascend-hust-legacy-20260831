@@ -54,6 +54,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--directions", nargs="+", default=["h2d", "d2h", "bidirectional"],
                         choices=["h2d", "d2h", "bidirectional"])
     parser.add_argument("--h2d-backend", choices=["copy", "mapped"], default="copy")
+    parser.add_argument(
+        "--custom-opp-path",
+        type=Path,
+        default=None,
+        help=(
+            "Custom OPP vendor directory for mapped H2D, usually "
+            "vllm_ascend/_cann_ops_custom/vendors/vllm-ascend. "
+            "If omitted, the tool auto-detects the editable build output."
+        ),
+    )
     parser.add_argument("--dtype", choices=sorted(DTYPE_NAMES), default="float16")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--iters", type=int, default=10)
@@ -96,6 +106,40 @@ def run_git(args: list[str]) -> str:
         ).strip()
     except Exception:
         return ""
+
+
+def prepend_env_path(name: str, value: str) -> None:
+    current = os.environ.get(name, "")
+    parts = [part for part in current.split(":") if part]
+    if value not in parts:
+        os.environ[name] = ":".join([value, *parts]) if parts else value
+
+
+def default_custom_opp_path() -> Path:
+    repo_root = Path(__file__).resolve().parents[2]
+    return repo_root / "vllm_ascend" / "_cann_ops_custom" / "vendors" / "vllm-ascend"
+
+
+def configure_mapped_backend_env(args: argparse.Namespace) -> dict[str, str]:
+    if args.h2d_backend != "mapped":
+        return {}
+
+    custom_opp = args.custom_opp_path or default_custom_opp_path()
+    configured: dict[str, str] = {}
+    if custom_opp.exists():
+        custom_opp_str = str(custom_opp)
+        prepend_env_path("ASCEND_CUSTOM_OPP_PATH", custom_opp_str)
+        configured["ASCEND_CUSTOM_OPP_PATH"] = os.environ["ASCEND_CUSTOM_OPP_PATH"]
+
+        opapi_lib = custom_opp / "op_api" / "lib" / "libcust_opapi.so"
+        if opapi_lib.exists():
+            os.environ.setdefault(
+                "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB", str(opapi_lib)
+            )
+            configured["VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB"] = os.environ[
+                "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB"
+            ]
+    return configured
 
 
 def build_block_ids(
@@ -161,6 +205,17 @@ def make_manifest(args: argparse.Namespace, cases: list[dict[str, Any]]) -> dict
             "warmup": args.warmup,
             "iters": args.iters,
             "seed": args.seed,
+            "custom_opp_path": str(args.custom_opp_path)
+            if args.custom_opp_path
+            else "",
+        },
+        "mapped_backend_env": {
+            key: os.environ[key]
+            for key in (
+                "ASCEND_CUSTOM_OPP_PATH",
+                "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB",
+            )
+            if key in os.environ
         },
         "cases": cases,
         "dry_run": args.dry_run,
@@ -402,6 +457,13 @@ def write_outputs(
 
 def main() -> int:
     args = parse_args()
+    configured_env = configure_mapped_backend_env(args)
+    if configured_env:
+        print(
+            "mapped backend env: "
+            + ", ".join(f"{key}={value}" for key, value in configured_env.items()),
+            flush=True,
+        )
     cases = expanded_cases(args)
     manifest = make_manifest(args, cases)
     if args.dry_run:
