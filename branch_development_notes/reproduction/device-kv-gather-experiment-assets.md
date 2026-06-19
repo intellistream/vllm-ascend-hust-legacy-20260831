@@ -17,6 +17,7 @@ minimal source-level changes needed for the prototype.
 | `branch_development_notes/work/raw-matrix-quick-20260619-073434` | First completed quick raw matrix run. |
 | `branch_development_notes/work/worker-local-transfer-smoke-cmake-20260619-084437` | First completed worker-local H2D/D2H/bidirectional copy smoke. |
 | `branch_development_notes/work/worker-local-transfer-quick-20260619-084951` | First completed worker-local copy quick baseline matrix. |
+| `branch_development_notes/work/worker-local-mapped-h2d-narrow-20260619-191240` | First passing worker-local mapped H2D smoke using the narrow 910B transfer build. |
 | `branch_development_notes/work/experiment-matrix-gap-report.md` | Capability gap and progress report for the experiment matrix. |
 | `branch_development_notes/notes/reproduction.md` | Base custom-op build and smoke reproduction guide. |
 
@@ -172,15 +173,20 @@ python3 branch_development_notes/tools/bench_cpu_npu_offload_transfer.py \
 This establishes the copy baseline before adding mapped-host gather backend
 selection to `CpuNpuOffloadingHandler`.
 
-## Worker-Local Mapped H2D Reproduction Status
+## Worker-Local Mapped H2D Reproduction
 
 The worker-local runner now has a `--h2d-backend mapped` mode, which sets
 `VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER=1` before constructing
-`CpuNpuOffloadingHandler`.
+`CpuNpuOffloadingHandler`. It also auto-detects the editable custom OPP output
+and sets the mapped gather runtime environment:
 
-As of 2026-06-19, the mapped H2D smoke has not yet produced a valid transfer
-row. The implementation call shape has been corrected to match the registered
-op signature:
+```text
+ASCEND_CUSTOM_OPP_PATH
+VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB
+```
+
+The implementation call shape has been corrected to match the registered op
+signature:
 
 ```text
 torch.ops._C_ascend.kv_cache_block_gather(
@@ -191,8 +197,7 @@ torch.ops._C_ascend.kv_cache_block_gather(
 )
 ```
 
-The remaining validation item is to rerun mapped H2D using the narrow 910B build
-path above:
+The first passing mapped H2D smoke used the narrow 910B build path above:
 
 - single-op `kv_cache_block_gather` builds and exports the ACLNN symbols;
 - `VLLM_ASCEND_ACLNN_OPS=kv_cache_block_gather` keeps the ACLNN build focused on
@@ -200,14 +205,14 @@ path above:
 - `VLLM_ASCEND_BUILD_ASCENDC_KERNELS=0` skips unrelated bundled AscendC kernel
   targets while preserving `vllm_ascend_C` registration for both transfer ops.
 
-The latest failed mapped smoke record is:
+Result record:
 
 ```text
-branch_development_notes/work/worker-local-mapped-h2d-smoke-20260619-095730
+branch_development_notes/work/worker-local-mapped-h2d-narrow-20260619-191240
 ```
 
-Use a 910B build that registers both `torch.ops._C_ascend.swap_blocks_batch`
-and `torch.ops._C_ascend.kv_cache_block_gather` before rerunning:
+After the narrow build registers both `torch.ops._C_ascend.swap_blocks_batch`
+and `torch.ops._C_ascend.kv_cache_block_gather`, run:
 
 ```bash
 PYTHONPATH=/tmp/vllm-ascend-hust \
@@ -234,8 +239,8 @@ python3 branch_development_notes/tools/bench_cpu_npu_offload_transfer.py \
   `vllm_ascend_C`; 4KB x 8 blocks H2D/D2H/bidirectional all pass.
 - Worker-local transfer quick baseline: verified through manual CMake build of
   `vllm_ascend_C`; 18 cases / 30 rows, all pass.
-- Worker-local mapped H2D selector: implemented experimentally and call-order
-  fixed; real smoke should be rerun with the narrow 910B transfer build above.
+- Worker-local mapped H2D selector: verified with the narrow 910B transfer
+  build; first 4KB x 8 random-block H2D smoke row is pass.
 - `tmp/cann-stack` has been removed from the repository index and is no longer
   part of the reproduction path.
 

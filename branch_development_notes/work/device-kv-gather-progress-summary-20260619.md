@@ -13,7 +13,7 @@ The experiment is now past the initial feasibility question.
 | Raw matrix runner | Assetized | `branch_development_notes/tools/bench_device_kv_gather_matrix.py`. |
 | Matrix config | Assetized | `branch_development_notes/benchmarks/device_kv_gather/matrix.json`. |
 | Worker-local copy runner | Assetized and quick-baselined | `branch_development_notes/tools/bench_cpu_npu_offload_transfer.py`; smoke run under `worker-local-transfer-smoke-cmake-20260619-084437`; quick baseline under `worker-local-transfer-quick-20260619-084951`. |
-| Worker-local mapped H2D backend | Implemented, awaiting valid 910B extension registration | Call-order bug fixed; latest smoke notes under `worker-local-mapped-h2d-smoke-20260619-095730`. |
+| Worker-local mapped H2D backend | Narrow smoke passed | 910B narrow build registers both transfer ops; mapped H2D smoke under `worker-local-mapped-h2d-narrow-20260619-191240` is pass. |
 | Reproduction docs | Assetized | `branch_development_notes/reproduction/device-kv-gather-experiment-assets.md`. |
 
 ## Main Experimental Signal
@@ -50,35 +50,49 @@ throughput. The quick baseline reaches 0.81 GB/s H2D and 0.84 GB/s D2H at
 Worker-local mapped H2D selection has been added behind the existing
 `VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER` switch. The first real smoke exposed and
 fixed an implementation bug: `kv_cache_block_gather` takes
-`src_block_ids, src_pages, dst_block_ids, out`. The current blocker is now the
-mapped H2D rerun itself. The engineering blocker has been addressed by removing
-the stale `tmp/cann-stack` gitlink and adding a narrow 910B build path:
+`src_block_ids, src_pages, dst_block_ids, out`.
+
+The mapped H2D smoke now passes with the narrow 910B transfer build. That build
+removes the stale `tmp/cann-stack` dependency and avoids unrelated bundled
+AscendC kernel compilation:
 
 ```bash
 VLLM_ASCEND_ACLNN_OPS=kv_cache_block_gather \
 VLLM_ASCEND_BUILD_ASCENDC_KERNELS=0 \
 SOC_VERSION=ascend910b1 \
-python3 -m pip install -e . --no-build-isolation -v
+python3 -m pip install -e . --no-build-isolation --no-deps -v
 ```
 
 This builds only the required ACLNN custom op and skips unrelated bundled
 AscendC kernels while preserving `vllm_ascend_C` transfer op registration.
 
+The first passing worker-local mapped H2D row is:
+
+```text
+run: branch_development_notes/work/worker-local-mapped-h2d-narrow-20260619-191240
+case: h2d, mapped, 4096-byte blocks, 8 random blocks, warmup=1, iters=3
+mean_ms: 0.612
+p95_ms: 0.704
+p99_ms: 0.716
+gbps: 0.11
+status: pass
+```
+
 ## Known Blockers
 
-1. Mapped H2D smoke needs to be rerun with the new narrow 910B transfer build.
-2. Raw matrix quick run used only 3 measured iterations, so exact copy/gather
+1. Raw matrix quick run used only 3 measured iterations, so exact copy/gather
    crossover thresholds need a higher-iteration repeat.
+2. Worker-local mapped-vs-copy H2D still needs an expanded matrix beyond the
+   64 KiB smoke payload.
 3. The full production-style 910B build may still require proper `catlass`
    submodule initialization for unrelated fused/MLA kernels, but transfer-path
    validation no longer depends on those kernels.
 
 ## Recommended Next Step
 
-Run the mapped H2D smoke with the narrow 910B transfer build, then expand to
-mapped-vs-copy H2D matrix cases. Before using the numbers as thresholds, reduce
-runner overhead by reusing `CpuNpuOffloadingHandler` across iterations or adding
-an inner-loop mode.
+Expand to mapped-vs-copy H2D matrix cases. Before using the numbers as
+thresholds, reduce runner overhead by reusing `CpuNpuOffloadingHandler` across
+iterations or adding an inner-loop mode.
 
 The concrete git sync and next-phase plan is recorded in:
 

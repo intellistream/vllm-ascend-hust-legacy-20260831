@@ -1,0 +1,2 @@
+block_bytes,bytes_per_transfer,case_name,device_id,direction,dtype,gbps,h2d_backend,iters,layers,mean_ms,measured_direction,num_cpu_blocks,num_gpu_blocks,p50_ms,p90_ms,p95_ms,p99_ms,pattern,selected_blocks,status,wall_mean_ms,warmup
+4096,65536,worker_local_copy,0,h2d,float16,0.10716201416999195,mapped,3,1,0.6115599870681763,h2d,4096,4096,0.5729399919509888,0.6896759748458863,0.7042679727077485,0.7159415709972382,random,8,pass,1.172870397567749,1
