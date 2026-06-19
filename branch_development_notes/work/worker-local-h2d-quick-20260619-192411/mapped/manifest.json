@@ -1,0 +1,136 @@
+{
+  "argv": [
+    "branch_development_notes/tools/bench_cpu_npu_offload_transfer.py",
+    "--device-id",
+    "0",
+    "--h2d-backend",
+    "mapped",
+    "--block-bytes",
+    "4096",
+    "16384",
+    "65536",
+    "--selected-blocks",
+    "8",
+    "32",
+    "128",
+    "512",
+    "--directions",
+    "h2d",
+    "--patterns",
+    "random",
+    "--warmup",
+    "3",
+    "--iters",
+    "10",
+    "--output-dir",
+    "/workspace/vllm-ascend-hust/branch_development_notes/work/worker-local-h2d-quick-20260619-192411/mapped"
+  ],
+  "cases": [
+    {
+      "block_bytes": 4096,
+      "case_name": "worker_local_copy",
+      "direction": "h2d",
+      "pattern": "random",
+      "selected_blocks": 8
+    },
+    {
+      "block_bytes": 4096,
+      "case_name": "worker_local_copy",
+      "direction": "h2d",
+      "pattern": "random",
+      "selected_blocks": 32
+    },
+    {
+      "block_bytes": 4096,
+      "case_name": "worker_local_copy",
+      "direction": "h2d",
+      "pattern": "random",
+      "selected_blocks": 128
+    },
+    {
+      "block_bytes": 4096,
+      "case_name": "worker_local_copy",
+      "direction": "h2d",
+      "pattern": "random",
+      "selected_blocks": 512
+    },
+    {
+      "block_bytes": 16384,
+      "case_name": "worker_local_copy",
+      "direction": "h2d",
+      "pattern": "random",
+      "selected_blocks": 8
+    },
+    {
+      "block_bytes": 16384,
+      "case_name": "worker_local_copy",
+      "direction": "h2d",
+      "pattern": "random",
+      "selected_blocks": 32
+    },
+    {
+      "block_bytes": 16384,
+      "case_name": "worker_local_copy",
+      "direction": "h2d",
+      "pattern": "random",
+      "selected_blocks": 128
+    },
+    {
+      "block_bytes": 16384,
+      "case_name": "worker_local_copy",
+      "direction": "h2d",
+      "pattern": "random",
+      "selected_blocks": 512
+    },
+    {
+      "block_bytes": 65536,
+      "case_name": "worker_local_copy",
+      "direction": "h2d",
+      "pattern": "random",
+      "selected_blocks": 8
+    },
+    {
+      "block_bytes": 65536,
+      "case_name": "worker_local_copy",
+      "direction": "h2d",
+      "pattern": "random",
+      "selected_blocks": 32
+    },
+    {
+      "block_bytes": 65536,
+      "case_name": "worker_local_copy",
+      "direction": "h2d",
+      "pattern": "random",
+      "selected_blocks": 128
+    },
+    {
+      "block_bytes": 65536,
+      "case_name": "worker_local_copy",
+      "direction": "h2d",
+      "pattern": "random",
+      "selected_blocks": 512
+    }
+  ],
+  "config": {
+    "custom_opp_path": "",
+    "device_id": 0,
+    "dtype": "float16",
+    "h2d_backend": "mapped",
+    "iters": 10,
+    "layers": 1,
+    "num_cpu_blocks": 4096,
+    "num_gpu_blocks": 4096,
+    "seed": 0,
+    "warmup": 3
+  },
+  "cwd": "/tmp/vllm-ascend-hust",
+  "dry_run": false,
+  "git_branch": "experiment/device-kv-gather",
+  "git_sha": "80da4b338dd400c1c9bd3e3dab7024dbd3c781a6",
+  "mapped_backend_env": {
+    "ASCEND_CUSTOM_OPP_PATH": "/tmp/vllm-ascend-hust/vllm_ascend/_cann_ops_custom/vendors/vllm-ascend",
+    "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB": "/tmp/vllm-ascend-hust/vllm_ascend/_cann_ops_custom/vendors/vllm-ascend/op_api/lib/libcust_opapi.so"
+  },
+  "platform": "Linux-5.15.0-25-generic-aarch64-with-glibc2.38",
+  "python": "3.11.14 (main, Feb 26 2026, 04:51:44) [GCC 12.3.1 (openEuler 12.3.1-99.oe2403sp2)]"
+}

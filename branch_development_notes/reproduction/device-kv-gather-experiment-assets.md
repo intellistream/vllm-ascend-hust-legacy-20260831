@@ -18,6 +18,7 @@ minimal source-level changes needed for the prototype.
 | `branch_development_notes/work/worker-local-transfer-smoke-cmake-20260619-084437` | First completed worker-local H2D/D2H/bidirectional copy smoke. |
 | `branch_development_notes/work/worker-local-transfer-quick-20260619-084951` | First completed worker-local copy quick baseline matrix. |
 | `branch_development_notes/work/worker-local-mapped-h2d-narrow-20260619-191240` | First passing worker-local mapped H2D smoke using the narrow 910B transfer build. |
+| `branch_development_notes/work/worker-local-h2d-quick-20260619-192411` | First worker-local copy-vs-mapped H2D quick matrix with 12 random H2D cases per backend. |
 | `branch_development_notes/work/experiment-matrix-gap-report.md` | Capability gap and progress report for the experiment matrix. |
 | `branch_development_notes/notes/reproduction.md` | Base custom-op build and smoke reproduction guide. |
 
@@ -241,6 +242,8 @@ python3 branch_development_notes/tools/bench_cpu_npu_offload_transfer.py \
   `vllm_ascend_C`; 18 cases / 30 rows, all pass.
 - Worker-local mapped H2D selector: verified with the narrow 910B transfer
   build; first 4KB x 8 random-block H2D smoke row is pass.
+- Worker-local copy-vs-mapped H2D quick matrix: verified with the narrow 910B
+  transfer build; 12 copy cases and 12 mapped cases all pass.
 - `tmp/cann-stack` has been removed from the repository index and is no longer
   part of the reproduction path.
 

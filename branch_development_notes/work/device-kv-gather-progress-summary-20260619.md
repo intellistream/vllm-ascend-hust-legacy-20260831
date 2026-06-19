@@ -13,7 +13,7 @@ The experiment is now past the initial feasibility question.
 | Raw matrix runner | Assetized | `branch_development_notes/tools/bench_device_kv_gather_matrix.py`. |
 | Matrix config | Assetized | `branch_development_notes/benchmarks/device_kv_gather/matrix.json`. |
 | Worker-local copy runner | Assetized and quick-baselined | `branch_development_notes/tools/bench_cpu_npu_offload_transfer.py`; smoke run under `worker-local-transfer-smoke-cmake-20260619-084437`; quick baseline under `worker-local-transfer-quick-20260619-084951`. |
-| Worker-local mapped H2D backend | Narrow smoke passed | 910B narrow build registers both transfer ops; mapped H2D smoke under `worker-local-mapped-h2d-narrow-20260619-191240` is pass. |
+| Worker-local mapped H2D backend | Quick matrix passed | 910B narrow build registers both transfer ops; mapped H2D smoke and 12-case H2D quick matrix pass. |
 | Reproduction docs | Assetized | `branch_development_notes/reproduction/device-kv-gather-experiment-assets.md`. |
 
 ## Main Experimental Signal
@@ -78,21 +78,39 @@ gbps: 0.11
 status: pass
 ```
 
+The first worker-local H2D copy-vs-mapped quick matrix is:
+
+```text
+run: branch_development_notes/work/worker-local-h2d-quick-20260619-192411
+cases: 12 copy H2D + 12 mapped H2D
+block_bytes: 4096, 16384, 65536
+selected_blocks: 8, 32, 128, 512
+pattern: random
+warmup: 3
+iters: 10
+status: all pass
+```
+
+Headline signal: mapped H2D is slower for the smallest 4KB/16KB x 8 cases, but
+wins clearly once random selected block count grows. The 64KB x 512 case was
+86.524 ms on copy and 0.637 ms on mapped in this quick run.
+
 ## Known Blockers
 
 1. Raw matrix quick run used only 3 measured iterations, so exact copy/gather
    crossover thresholds need a higher-iteration repeat.
-2. Worker-local mapped-vs-copy H2D still needs an expanded matrix beyond the
-   64 KiB smoke payload.
+2. Worker-local mapped-vs-copy H2D now has a quick matrix, but still needs
+   destination KV correctness checks and profiler-backed synchronization
+   validation before policy thresholds are trusted.
 3. The full production-style 910B build may still require proper `catlass`
    submodule initialization for unrelated fused/MLA kernels, but transfer-path
    validation no longer depends on those kernels.
 
 ## Recommended Next Step
 
-Expand to mapped-vs-copy H2D matrix cases. Before using the numbers as
-thresholds, reduce runner overhead by reusing `CpuNpuOffloadingHandler` across
-iterations or adding an inner-loop mode.
+Add destination-content validation to `bench_cpu_npu_offload_transfer.py`, then
+capture matched copy and mapped msprof traces for representative small and
+large random H2D cases.
 
 The concrete git sync and next-phase plan is recorded in:
 
