@@ -277,6 +277,9 @@ class AscendFusedMoE(FusedMoE):
     gate_stream: torch.npu.Stream | None = None
 
     def __init__(self, *args, **kwargs):
+        # Save routed_input_transform before super().__init__() creates the runner,
+        # so it's available when we recreate the runner as AscendMoERunner below.
+        self._routed_input_transform = kwargs.get("routed_input_transform")
         super().__init__(*args, **kwargs)
 
         num_experts = kwargs["num_experts"]
@@ -374,7 +377,6 @@ class AscendFusedMoE(FusedMoE):
             kwargs.pop("gate", None),
             kwargs.pop("shared_experts", None),
             self.quant_method,
-            self.reduce_results,
             self.vllm_config.parallel_config.enable_dbo,
         )
 
@@ -570,7 +572,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         if ascend_config.mix_placement:
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled = mock_false
             rocm_aiter_ops.is_fused_moe_enabled = mock_false
-        AscendFusedMoE.__init__(self, **kwargs)
+        AscendFusedMoE.__init__(self, routed_input_transform=routed_input_transform, **kwargs)
         if ascend_config.mix_placement:
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled = mock_true
             rocm_aiter_ops.is_fused_moe_enabled = mock_true
@@ -596,10 +598,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             self.moe_config,
             self.router,
             self._routed_input_transform,
-            self.gate,
+            self._gate,
             self._shared_experts,
             self.quant_method,
-            self.reduce_results,
             self.vllm_config.parallel_config.enable_dbo,
         )
 
