@@ -207,6 +207,26 @@ void* get_mapped_host_device_ptr(void* host_ptr, uint64_t bytes)
     return static_cast<char*>(mapped_base) + offset;
 }
 
+int64_t clear_kv_cache_block_gather_host_mappings()
+{
+    std::lock_guard<std::mutex> guard(get_host_mapping_mutex());
+    auto& mappings = get_host_mappings();
+    const int64_t cleared = static_cast<int64_t>(mappings.size());
+    for (const auto& mapping : mappings) {
+        const aclError ret =
+            aclrtHostUnregister(reinterpret_cast<void*>(mapping.host_base));
+        TORCH_CHECK(ret == ACL_SUCCESS,
+                    "kv_cache_block_gather: aclrtHostUnregister failed, error code: ",
+                    ret,
+                    ", host_base=",
+                    reinterpret_cast<void*>(mapping.host_base),
+                    ", register_size=",
+                    mapping.size);
+    }
+    mappings.clear();
+    return cleared;
+}
+
 aclTensor* create_acl_tensor_with_data(const at::Tensor& tensor, void* data)
 {
     static const auto aclCreateTensor = GET_OP_API_FUNC(aclCreateTensor);
@@ -1316,6 +1336,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def("kv_cache_block_gather(Tensor src_block_ids, Tensor src_pages, Tensor dst_block_ids, Tensor! out) -> ()");
     ops.impl("kv_cache_block_gather", torch::kPrivateUse1, &vllm_ascend::kv_cache_block_gather);
+    ops.def("clear_kv_cache_block_gather_host_mappings() -> int");
+    ops.impl("clear_kv_cache_block_gather_host_mappings",
+             c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::clear_kv_cache_block_gather_host_mappings);
 
     ops.def("device_print(str msg) -> ()");
     ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,

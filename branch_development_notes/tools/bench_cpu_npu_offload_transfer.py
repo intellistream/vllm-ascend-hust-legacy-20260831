@@ -273,6 +273,18 @@ def make_handler(args: argparse.Namespace, block_bytes: int):
     return torch, handler
 
 
+def clear_mapped_host_mappings(torch: Any, args: argparse.Namespace) -> None:
+    if args.h2d_backend != "mapped":
+        return
+    clear_op = getattr(
+        torch.ops._C_ascend, "clear_kv_cache_block_gather_host_mappings", None
+    )
+    if clear_op is not None:
+        cleared = clear_op()
+        if cleared:
+            print(f"cleared {cleared} mapped host ranges", flush=True)
+
+
 def wait_for_jobs(handler: Any, job_ids: set[int]) -> list[Any]:
     handler.wait(job_ids)
     deadline = time.monotonic() + 30.0
@@ -299,6 +311,7 @@ def run_one_case(
     import numpy as np
 
     torch, CPULoadStoreSpec, GPULoadStoreSpec, _ = import_runtime()
+    clear_mapped_host_mappings(torch, args)
     _, handler = make_handler(args, case["block_bytes"])
 
     rng = np.random.default_rng(args.seed + case_index)

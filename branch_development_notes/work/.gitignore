@@ -10,6 +10,9 @@ raw-matrix-*/run_*.stderr
 # Container/build logs are transient. Keep observations.md summaries instead.
 **/docker.log
 
+# Failed partial run with root-owned files from an interrupted container.
+worker-local-h2d-quick-20260619-191717/
+
 # One-off TraceLoom smoke output produced with default truncation. Keep the
 # full-analysis trial record instead.
 traceloom-kickstart-20260619/
