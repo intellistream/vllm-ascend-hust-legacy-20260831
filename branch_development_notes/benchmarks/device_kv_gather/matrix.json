@@ -1,0 +1,31 @@
+{
+  "description": "Phase-1 raw kv_cache_block_gather microbenchmark matrix.",
+  "defaults": {
+    "device_id": 0,
+    "num_pages": 4096,
+    "dst_blocks": null,
+    "warmup": 3,
+    "iters": 10,
+    "src_patterns": ["random"],
+    "dst_patterns": ["random"]
+  },
+  "cases": [
+    {
+      "name": "fragment_size_sweep",
+      "fragment_bytes": [128, 512, 1024, 4096, 16384, 65536, 1048576],
+      "selected_blocks": [1024]
+    },
+    {
+      "name": "fragment_count_sweep",
+      "fragment_bytes": [4096, 16384, 65536],
+      "selected_blocks": [1, 8, 32, 128, 512, 2048]
+    },
+    {
+      "name": "locality_pattern_sweep",
+      "fragment_bytes": [4096, 16384, 65536],
+      "selected_blocks": [1024],
+      "src_patterns": ["sequential", "stride", "random"],
+      "dst_patterns": ["sequential", "stride", "random"]
+    }
+  ]
+}

@@ -208,3 +208,25 @@ Suggested targeted checks before depending on the branch:
   review rules for defaults, valid values, and sensitivity.
 - Benchmark CPU-offload load latency and memory behavior on Ascend 910B/C with
   realistic KV-cache block mappings.
+
+## External Experiment Tools
+
+Branch-specific analysis tools should stay under
+`branch_development_notes/external` as local-only manual checkouts, not as git
+submodules. This avoids repeating the stale `tmp/cann-stack` gitlink problem
+and keeps experimental dependencies out of the source/build path.
+
+Current planned external tool:
+
+- `vllm-hust-perf-analyzer`
+  - URL: `https://github.com/vLLM-HUST/vllm-hust-perf-analyzer.git`
+  - local path: `branch_development_notes/external/vllm-hust-perf-analyzer`
+  - purpose: TraceLoom analysis for Ascend/CANN `msprof` outputs.
+  - first tested commit:
+    `4f47a3f502916340dd74c40fc94ef1be8a1cf38c`
+  - first local trial record:
+    `branch_development_notes/work/traceloom-kickstart-full-20260619/observations.md`
+
+The checkout directory is ignored by
+`branch_development_notes/external/.gitignore`. For any experiment that uses
+it, record the exact commit SHA in that run's `observations.md`.

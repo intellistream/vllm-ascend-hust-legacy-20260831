@@ -1,0 +1,15 @@
+# Large generated profiler databases; keep summaries, tree maps, metadata, and
+# observations tracked instead.
+traceloom-*/db*.traceloom_augmented.db
+
+# Per-case benchmark process logs are useful locally but are regenerated from
+# manifest/results files.
+raw-matrix-*/run_*.stdout
+raw-matrix-*/run_*.stderr
+
+# Container/build logs are transient. Keep observations.md summaries instead.
+**/docker.log
+
+# One-off TraceLoom smoke output produced with default truncation. Keep the
+# full-analysis trial record instead.
+traceloom-kickstart-20260619/

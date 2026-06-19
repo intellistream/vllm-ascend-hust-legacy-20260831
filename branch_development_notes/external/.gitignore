@@ -1,0 +1,4 @@
+# External experiment tool checkouts are intentionally local-only.
+*
+!.gitignore
+!README.md
