@@ -31,13 +31,15 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.eagle import speculator as vllm_speculator
-from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator, gumbel_sample, update_eagle_inputs
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata
 from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
-from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import EagleAclGraphManager
+from vllm_ascend.worker.v2.spec_decode.eagle.aclgraph import (
+    DecodeEagleAclGraphManager,
+    PrefillEagleAclGraphManager,
+)
 
 
 class AscendEagleSpeculator(EagleSpeculator):
@@ -385,13 +387,29 @@ def torch_gather_wrapper():
 @contextmanager
 def graph_manager_wrapper(speculator):
     """Context manager to override graph manager."""
-    original_graph_manager = EagleCudaGraphManager
+    original_prefill_graph_manager = vllm_speculator.PrefillEagleCudaGraphManager
+    original_decode_graph_manager = vllm_speculator.DecodeEagleCudaGraphManager
 
-    def factory(vllm_config: VllmConfig, device: torch.device, cudagraph_mode: CUDAGraphMode, decode_query_len: int):
-        return EagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
+    def prefill_factory(
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+    ):
+        return PrefillEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
+
+    def decode_factory(
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+    ):
+        return DecodeEagleAclGraphManager(vllm_config, device, cudagraph_mode, decode_query_len, speculator)
 
     try:
-        vllm_speculator.EagleCudaGraphManager = factory
+        vllm_speculator.PrefillEagleCudaGraphManager = prefill_factory
+        vllm_speculator.DecodeEagleCudaGraphManager = decode_factory
         yield
     finally:
-        vllm_speculator.EagleCudaGraphManager = original_graph_manager
+        vllm_speculator.PrefillEagleCudaGraphManager = original_prefill_graph_manager
+        vllm_speculator.DecodeEagleCudaGraphManager = original_decode_graph_manager
