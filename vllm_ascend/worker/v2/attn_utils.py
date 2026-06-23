@@ -75,6 +75,7 @@ def build_attn_metadata(
     graph_pad_size: int = -1,
     num_input_tokens: int = 0,
     prefill_context_parallel_metadata: AscendPrefillContextParallelMetadata | None = None,
+    for_cudagraph_capture: bool = False,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
@@ -112,10 +113,17 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            metadata = attn_metadata_builder.build(
-                common_prefix_len=0,
-                common_attn_metadata=common_attn_metadata,
-            )
+            if for_cudagraph_capture:
+                if hasattr(attn_metadata_builder, "build_for_graph_capture"):
+                    build_for_capture = attn_metadata_builder.build_for_graph_capture
+                else:
+                    build_for_capture = attn_metadata_builder.build_for_cudagraph_capture
+                metadata = build_for_capture(common_attn_metadata)
+            else:
+                metadata = attn_metadata_builder.build(
+                    common_prefix_len=0,
+                    common_attn_metadata=common_attn_metadata,
+                )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata

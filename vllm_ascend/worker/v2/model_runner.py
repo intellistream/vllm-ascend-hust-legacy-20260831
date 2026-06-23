@@ -217,14 +217,14 @@ class NPUModelRunner(GPUModelRunner):
             expanded_idx_mapping = idx_mapping
             expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
         else:
-            num_draft_tokens = np.array(
+            num_draft_tokens_arr = np.array(
                 [len(draft_tokens.get(req_id, ())) for req_id in req_ids],
                 dtype=np.int32,
             )
-            total_num_draft_tokens = int(num_draft_tokens.sum())
+            total_num_draft_tokens = int(num_draft_tokens_arr.sum())
             total_num_logits = num_reqs + total_num_draft_tokens
 
-            num_logits = num_draft_tokens + 1
+            num_logits = num_draft_tokens_arr + 1
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
@@ -261,7 +261,6 @@ class NPUModelRunner(GPUModelRunner):
 
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-
         # Get prefill tokens if any.
         if self.req_states.any_prefills(idx_mapping_np):
             prepare_prefill_inputs(
@@ -304,6 +303,16 @@ class NPUModelRunner(GPUModelRunner):
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
         positions = self.input_buffers.positions[:num_tokens_after_padding]
 
+        # CPU upper bound on seq_lens (num_computed_tokens + num_scheduled_tokens).
+        # Keep the Ascend input batch aligned with the current vLLM v1 contract.
+        seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
+        np.add(
+            self.req_states.num_computed_tokens_np[idx_mapping_np],
+            num_scheduled_tokens,
+            out=seq_lens_cpu_upper_bound_np[:num_reqs],
+        )
+        seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
+
         self.input_batch = AscendInputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -319,6 +328,7 @@ class NPUModelRunner(GPUModelRunner):
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,  # TODO(Ronald1995): support cp.
             input_ids=input_ids,
             positions=positions,
@@ -354,6 +364,9 @@ class NPUModelRunner(GPUModelRunner):
             num_rejected,
         )
 
+        self._copy_num_computed_tokens_to_cpu()
+
+    def _copy_num_computed_tokens_to_cpu(self):
         # npu attention backend still need to use seq_lens_cpu,
         # we need to copy num_computed_tokens back to cpu.
         default_stream = torch.cuda.current_stream()
