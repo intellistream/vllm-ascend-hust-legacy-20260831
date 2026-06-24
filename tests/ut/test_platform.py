@@ -363,9 +363,7 @@ class TestNPUPlatform(TestBase):
             with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
                 self.platform.check_and_update_config(vllm_config)
 
-        self.assertTrue(
-            any("Compilation disabled, using eager mode by default" in message for message in cm.output)
-        )
+        self.assertTrue(any("Compilation disabled, using eager mode by default" in message for message in cm.output))
 
         self.assertEqual(
             vllm_config.compilation_config.mode,
@@ -408,6 +406,92 @@ class TestNPUPlatform(TestBase):
         self.assertFalse(vllm_config.model_config.enforce_eager)
         self.assertEqual(vllm_config.compilation_config.mode, CompilationMode.VLLM_COMPILE)
         self.assertEqual(vllm_config.compilation_config.cudagraph_mode, CUDAGraphMode.FULL)
+
+    @patch("vllm_ascend.platform.refresh_block_size")
+    @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.platform.enable_sp", return_value=False)
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    def test_check_and_update_config_defaults_mixed_graph_to_full_decode(
+        self,
+        mock_auto_detect,
+        mock_init_ascend,
+        mock_init_recompute,
+        _mock_enable_sp,
+        _mock_device_type,
+        _mock_refresh_block_size,
+    ):
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_init_recompute.return_value = MagicMock()
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.model_config.is_encoder_decoder = False
+        vllm_config.model_config.enable_sleep_mode = True
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.parallel_config.worker_cls = "manual"
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        vllm_config.cache_config.block_size = 1
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        vllm_config.compilation_config.custom_ops = []
+        vllm_config._set_cudagraph_sizes = MagicMock()
+
+        self.platform.check_and_update_config(vllm_config)
+
+        self.assertEqual(
+            vllm_config.compilation_config.cudagraph_mode,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+        )
+        self.assertEqual(vllm_config.compilation_config.splitting_ops, [])
+
+    @patch("vllm_ascend.platform.refresh_block_size")
+    @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.platform.enable_sp", return_value=False)
+    @patch("vllm_ascend.platform.update_aclgraph_sizes")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    def test_check_and_update_config_respects_explicit_piecewise_graph(
+        self,
+        mock_auto_detect,
+        mock_init_ascend,
+        mock_init_recompute,
+        mock_update_aclgraph_sizes,
+        _mock_enable_sp,
+        _mock_device_type,
+        _mock_refresh_block_size,
+    ):
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_init_recompute.return_value = MagicMock()
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.model_config.is_encoder_decoder = False
+        vllm_config.model_config.enable_sleep_mode = True
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.parallel_config.worker_cls = "manual"
+        vllm_config.parallel_config.cp_kv_cache_interleave_size = 1
+        vllm_config.parallel_config.all2all_backend = None
+        vllm_config.cache_config.block_size = 1
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        vllm_config.compilation_config.custom_ops = []
+        vllm_config.compilation_config.splitting_ops = []
+        vllm_config.compilation_config.set_splitting_ops_for_v1 = MagicMock()
+        vllm_config._set_cudagraph_sizes = MagicMock()
+
+        self.platform.check_and_update_config(vllm_config)
+
+        self.assertEqual(
+            vllm_config.compilation_config.cudagraph_mode,
+            CUDAGraphMode.PIECEWISE,
+        )
+        vllm_config.compilation_config.set_splitting_ops_for_v1.assert_called_once()
+        mock_update_aclgraph_sizes.assert_called_once_with(vllm_config)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)

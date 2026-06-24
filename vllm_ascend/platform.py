@@ -395,9 +395,12 @@ class NPUPlatform(Platform):
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
                 update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
 
-        # TODO: Full graph is fully supported later, and the default value will be set to full graph.
+        # vLLM V1 defaults to FULL_AND_PIECEWISE. Ascend does not support the
+        # mixed mode directly, but decode-only full graph avoids the per-layer
+        # PIECEWISE replay overhead on common decoder-only serving workloads.
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
-            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            logger.info("Falling back to FULL_DECODE_ONLY for NPU FULL_AND_PIECEWISE graph mode")
+            compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
 
         # encoder-decoder models currently only support piecewise mode
         if model_config and model_config.is_encoder_decoder is True:
