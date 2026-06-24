@@ -225,3 +225,4 @@ csrc/output/
 .github/skills/
 .github/
 cann-recipes-infer
+benchmark_results/
