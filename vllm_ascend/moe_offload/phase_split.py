@@ -243,6 +243,126 @@ def plan_hit_miss_phases(
     )
 
 
+def build_b2_wave_routing(
+    physical_topk_ids: "torch.Tensor",
+    topk_weights: "torch.Tensor",
+):
+    """B2 per-wave routing on the OFFLOAD path (log2phy-remapped topk_ids).
+
+    The offload dispatch path remaps ``topk_ids`` through the wave's ``log2phy``
+    buffer BEFORE this point: experts staged into this wave's slots get a valid
+    physical slot id (>=0); every other (non-wave) logical expert maps to -1.
+    Unlike the EP path, offload dispatch does NOT auto-zero dropped experts, so
+    here we make the wave self-contained:
+
+      * ``safe_ids`` = physical_topk_ids with -1 replaced by 0 (an in-range slot)
+        so ``npu_moe_init_routing`` never indexes out of bounds. Those tokens are
+        routed into slot 0 but contribute nothing because...
+      * ``masked_weights`` = topk_weights zeroed wherever physical id was -1, so
+        the combine (unpermute by probs) adds 0 for non-wave (token,expert) pairs.
+
+    Summing each wave's combined output reproduces the full MoE output (addition
+    over disjoint expert subsets), per the wave-accumulate keystone.
+
+    Returns ``(safe_ids, masked_weights)`` -- both same shape as the inputs.
+    """
+    import torch
+
+    kept = physical_topk_ids != -1
+    safe_ids = torch.where(kept, physical_topk_ids, torch.zeros_like(physical_topk_ids))
+    masked_weights = topk_weights * kept.to(topk_weights.dtype)
+    return safe_ids, masked_weights
+
+
+def build_wave_expert_map(
+    wave_logical_experts: tuple[int, ...],
+    num_logical_experts: int,
+) -> "torch.Tensor":
+    """Build a per-wave ``expert_map`` for B2 wave-streamed prefill.
+
+    The AllGather token dispatcher drops experts whose ``expert_map`` entry is -1
+    (``mask = expert_map[topk_ids] != -1; topk_weights = topk_weights * mask``).
+    For one wave we therefore map ONLY that wave's logical experts to physical slot
+    positions ``0..k-1`` (their order within the wave) and map every other logical
+    expert to -1. Running dispatch->matmul->combine with this map computes exactly
+    that wave's ``(token, expert)`` contributions (others contribute 0); summing
+    across waves reproduces the full MoE output (see the wave-accumulate keystone).
+
+    Returns an int32 tensor of shape ``[num_logical_experts]``.
+    """
+    import torch
+
+    expert_map = torch.full((int(num_logical_experts),), -1, dtype=torch.int32)
+    for slot_position, logical_expert in enumerate(wave_logical_experts):
+        expert_map[int(logical_expert)] = slot_position
+    return expert_map
+
+
+def plan_capacity_bounded_phases(
+    expert_slices: list[tuple[int, int]],
+    active_expert_ids: tuple[int, ...],
+    num_slots: int,
+) -> MoEPhasePlan:
+    """B2: split active experts into capacity-bounded waves of <= num_slots each.
+
+    Unlike :func:`plan_hit_miss_phases` (which splits on slot *readiness*), this
+    planner splits on slot *capacity*: when an offloaded layer's active expert
+    set exceeds ``num_slots`` (the fixed HBM slot budget), a single grouped
+    matmul cannot run because not all experts can be resident at once. We instead
+    emit ``ceil(N / num_slots)`` waves, each covering a contiguous chunk of at
+    most ``num_slots`` experts. The executor stages each wave's experts into the
+    slot bank (eager prefill only), runs a partial grouped matmul over just that
+    wave's tokens, and scatters the result back. Because every token belongs to
+    exactly one expert and every expert to exactly one wave, the per-wave scatters
+    are disjoint and cover all tokens -> the concatenated result is element-wise
+    identical to a single-phase run.
+
+    Parameters mirror :func:`plan_hit_miss_phases`: ``expert_slices[i]`` is the
+    ``(start, end)`` token range for ``active_expert_ids[i]`` in the sorted hidden
+    states. ``num_slots`` is the per-layer fixed slot count.
+
+    Waves are marked ``is_hit=False`` because every wave requires staging (no wave
+    is resident up front under B2's capacity pressure).
+    """
+    if num_slots <= 0:
+        raise ValueError(f"num_slots must be greater than 0, got {num_slots}")
+    if len(active_expert_ids) != len(expert_slices):
+        raise ValueError(
+            f"Mismatched lengths: active_expert_ids={len(active_expert_ids)}, "
+            f"expert_slices={len(expert_slices)}"
+        )
+
+    total_tokens = sum(end - start for start, end in expert_slices)
+
+    # Fits in one wave -> degenerate to a single phase (same as B1's slot path).
+    if len(active_expert_ids) <= num_slots:
+        return _build_single_phase_plan(
+            expert_slices, active_expert_ids, reason="capacity_single_wave"
+        )
+
+    phases: list[MoEPhase] = []
+    for wave_index, start in enumerate(range(0, len(active_expert_ids), num_slots)):
+        chunk_ids = active_expert_ids[start : start + num_slots]
+        chunk_slices = tuple(expert_slices[start : start + num_slots])
+        phases.append(
+            MoEPhase(
+                phase_index=wave_index,
+                expert_indices=tuple(int(e) for e in chunk_ids),
+                token_slices=chunk_slices,
+                is_hit=False,
+            )
+        )
+
+    return MoEPhasePlan(
+        phases=tuple(phases),
+        total_phases=len(phases),
+        hit_phases=0,
+        miss_phases=len(phases),
+        total_tokens=total_tokens,
+        reason="capacity_bounded_waves",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Partial MLP execution helpers
 # ---------------------------------------------------------------------------
@@ -347,11 +467,75 @@ def _scatter_phase_output(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Wave staging interface (overlap-ready: separates transfer from compute)
+# ---------------------------------------------------------------------------
+
+
+class WaveStager:
+    """Two-phase staging contract for capacity-bounded waves.
+
+    The contract deliberately splits "move this wave's experts into HBM" into two
+    calls so the executor can pipeline transfer (MTE) against compute (Cube):
+
+      * ``issue(wave_index, expert_indices)`` -- start staging the wave's experts
+        into a fixed slot buffer. May be asynchronous (return before the H2D copy
+        finishes); the serial implementation does it synchronously.
+      * ``wait(wave_index)`` -- block until that wave's slots are READY to be read
+        by the grouped matmul. The serial implementation is a no-op (issue already
+        finished the copy).
+
+    A serial (``prefetch_depth=0``) run calls ``issue`` then ``wait`` then compute
+    for each wave in turn -> identical to the original single-buffer staging. An
+    overlapped run (``prefetch_depth>=1``, double/N-buffered) issues wave k+1
+    BEFORE computing wave k, so the next wave's H2D rides under the current wave's
+    matmul. ``buffer_count`` declares how many waves may be in flight; the executor
+    guarantees it never issues a wave into a buffer whose prior occupant has not
+    yet been consumed (so a single-buffer stager is never asked to overlap).
+
+    This base class is the serial reference. NPU async (separate transfer stream +
+    SetFlag/WaitFlag) is a drop-in subclass that overrides issue/wait -- no change
+    to the executor or the planner.
+    """
+
+    #: How many waves may be resident concurrently. 1 == single buffer (serial).
+    buffer_count: int = 1
+
+    def issue(self, wave_index: int, expert_indices: tuple[int, ...]) -> None:
+        raise NotImplementedError
+
+    def wait(self, wave_index: int) -> None:
+        raise NotImplementedError
+
+
+class _CallbackWaveStager(WaveStager):
+    """Serial stager adapting the simple ``stage_wave_fn(expert_indices)`` callback.
+
+    ``issue`` runs the callback synchronously (the H2D completes before it
+    returns); ``wait`` is a no-op. ``buffer_count=1`` so the executor keeps strict
+    serial order -- preserving the original ``stage_wave_fn`` semantics exactly.
+    """
+
+    buffer_count = 1
+
+    def __init__(self, stage_wave_fn):
+        self._stage_wave_fn = stage_wave_fn
+
+    def issue(self, wave_index: int, expert_indices: tuple[int, ...]) -> None:
+        self._stage_wave_fn(expert_indices)
+
+    def wait(self, wave_index: int) -> None:
+        return None
+
+
 def execute_phased_mlp(
     *,
     mlp_compute_input: "MoEMlpComputeInput",
     phase_plan: MoEPhasePlan,
     _apply_mlp_fn=None,
+    stage_wave_fn=None,
+    wave_stager=None,
+    prefetch_depth: int = 0,
 ) -> "torch.Tensor":
     """Execute MoE MLP in phases according to *phase_plan*.
 
@@ -368,6 +552,23 @@ def execute_phased_mlp(
     _apply_mlp_fn:
         Callable ``(MoEMlpComputeInput) -> Tensor``.  Defaults to
         ``unified_apply_mlp``.
+    stage_wave_fn:
+        Optional callable ``(expert_indices: tuple[int, ...]) -> None`` invoked
+        before each non-empty phase's MLP, used by B2 capacity-bounded waves to
+        stage that wave's experts into the fixed slot bank (eager prefill only).
+        ``None`` (default) preserves the original behavior: weights are assumed
+        already resident. Wrapped in a serial ``_CallbackWaveStager``. Mutually
+        exclusive with ``wave_stager``.
+    wave_stager:
+        Optional :class:`WaveStager` giving the overlap-ready two-phase
+        (issue/wait) staging contract. Lets a subclass run transfer on a separate
+        stream so wave k+1's H2D overlaps wave k's matmul. ``buffer_count`` caps
+        in-flight waves.
+    prefetch_depth:
+        How many waves to issue ahead of the one being computed. ``0`` (default)
+        == serial (issue, wait, compute per wave). ``>=1`` enables software
+        pipelining; clamped so issued-ahead waves never exceed the stager's
+        ``buffer_count`` (no buffer is reused before its wave is consumed).
 
     Returns
     -------
@@ -375,13 +576,19 @@ def execute_phased_mlp(
     """
     import torch
 
+    if stage_wave_fn is not None and wave_stager is not None:
+        raise ValueError("pass at most one of stage_wave_fn / wave_stager")
+    if wave_stager is None and stage_wave_fn is not None:
+        wave_stager = _CallbackWaveStager(stage_wave_fn)
+
     if _apply_mlp_fn is None:
         from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp as _default
 
         _apply_mlp_fn = _default
 
-    # Single phase → fast-path (no slicing overhead).
-    if phase_plan.total_phases == 1:
+    # Single phase → fast-path (no slicing overhead). Skipped when a stager is
+    # present: B2 needs the per-wave stage call to run even for a lone wave.
+    if phase_plan.total_phases == 1 and wave_stager is None:
         return _apply_mlp_fn(mlp_compute_input=mlp_compute_input)
 
     from vllm_ascend.ops.fused_moe.moe_stage_contracts import MoEMlpComputeInput as _MoEMlpComputeInput
@@ -400,19 +607,13 @@ def execute_phased_mlp(
         device=device,
     )
 
-    for phase in phase_plan.phases:
-        if phase.total_tokens == 0:
-            continue
+    # Only non-empty waves participate (0-token waves are pure no-ops).
+    waves = [p for p in phase_plan.phases if p.total_tokens > 0]
 
-        # Extract tokens
+    def _compute_wave(phase) -> None:
         phase_hidden = _extract_phase_tokens(hidden_states, phase.token_slices)
-
-        # Build phase group_list
         phase_group_list = _build_phase_group_list(group_list, group_list_type, phase.expert_indices)
-
-        # Slice weights
         phase_weights = _slice_expert_weights(mlp_compute_input.weights, phase.expert_indices)
-
         phase_input = _MoEMlpComputeInput(
             hidden_states=phase_hidden,
             group_list=phase_group_list,
@@ -426,11 +627,32 @@ def execute_phased_mlp(
             need_trans=mlp_compute_input.need_trans,
             dynamic_eplb=mlp_compute_input.dynamic_eplb,
         )
-
         phase_output = _apply_mlp_fn(mlp_compute_input=phase_input)
-
-        # Scatter back
         _scatter_phase_output(full_output, phase_output, phase.token_slices)
+
+    if wave_stager is None:
+        # No staging contract: plain per-wave compute (weights already resident).
+        for phase in waves:
+            _compute_wave(phase)
+        return full_output
+
+    # Software-pipelined staging. ``ahead`` = how many waves are issued but not yet
+    # computed; capped by both prefetch_depth and the stager's buffer_count so a
+    # buffer is never reused while its wave is still in flight (correctness guard
+    # that lets a single-buffer/serial stager stay strictly serial).
+    max_in_flight = min(max(prefetch_depth, 0) + 1, max(wave_stager.buffer_count, 1))
+    issued = 0
+    # Prime: issue the first ``max_in_flight`` waves.
+    while issued < min(max_in_flight, len(waves)):
+        wave_stager.issue(issued, waves[issued].expert_indices)
+        issued += 1
+    for compute_idx in range(len(waves)):
+        wave_stager.wait(compute_idx)
+        _compute_wave(waves[compute_idx])
+        # After consuming this wave's buffer, issue the next not-yet-issued wave.
+        if issued < len(waves):
+            wave_stager.issue(issued, waves[issued].expert_indices)
+            issued += 1
 
     return full_output
 

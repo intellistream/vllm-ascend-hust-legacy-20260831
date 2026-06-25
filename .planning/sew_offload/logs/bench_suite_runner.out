@@ -1,0 +1,30 @@
+==================================================================
+[suite] CONFIG cfg1_fullresid_aclgraph  eager=0  extra='VLLM_ASCEND_MOE_OFFLOAD_ENABLED=0'  DEV=5 PORT=8020
+==================================================================
+[suite] server pid=1405392 -> .planning/sew_offload/logs/server_cfg1_fullresid_aclgraph.log
+[suite] cfg1_fullresid_aclgraph HEALTHY. weights:  06-19 11:47:13 [model_runner_v1.py:3064] Loading model weights took 56.9001 GB
+[suite] client cfg=cfg1_fullresid_aclgraph conc=1 num_prompts=100 -> benchmarks/results/bench_suite_4cfg/bench_cfg1_fullresid_aclgraph_conc1.json
+   TTFT mean/med=317.2/301.0ms TPOT mean/med=41.81/41.21ms out_tok/s=22.6 req/s=0.113
+[suite] client cfg=cfg1_fullresid_aclgraph conc=10 num_prompts=100 -> benchmarks/results/bench_suite_4cfg/bench_cfg1_fullresid_aclgraph_conc10.json
+   TTFT mean/med=75521.2/77547.6ms TPOT mean/med=44.35/45.27ms out_tok/s=21.5 req/s=0.109
+[suite] cfg1_fullresid_aclgraph PEAK HBM (npu-smi proc-mem) = 59195 MB
+[suite] killing server pid=1405392 (+ its process group)
+[suite] DEV=5 released
+==================================================================
+[suite] CONFIG cfg2_fullresid_eager  eager=1  extra='VLLM_ASCEND_MOE_OFFLOAD_ENABLED=0'  DEV=5 PORT=8020
+==================================================================
+[suite] server pid=1427800 -> .planning/sew_offload/logs/server_cfg2_fullresid_eager.log
+[suite] cfg2_fullresid_eager HEALTHY. weights:  06-19 12:14:48 [model_runner_v1.py:3064] Loading model weights took 56.9001 GB
+[suite] client cfg=cfg2_fullresid_eager conc=1 num_prompts=100 -> benchmarks/results/bench_suite_4cfg/bench_cfg2_fullresid_eager_conc1.json
+   TTFT mean/med=407.0/399.7ms TPOT mean/med=180.52/184.00ms out_tok/s=5.4 req/s=0.027
+[suite] client cfg=cfg2_fullresid_eager conc=10 num_prompts=100 -> benchmarks/results/bench_suite_4cfg/bench_cfg2_fullresid_eager_conc10.json
+   TTFT mean/med=306391.4/309832.3ms TPOT mean/med=180.72/184.43ms out_tok/s=5.4 req/s=0.027
+[suite] cfg2_fullresid_eager PEAK HBM (npu-smi proc-mem) = 59165 MB
+[suite] killing server pid=1427800 (+ its process group)
+[suite] DEV=5 released
+==================================================================
+[suite] CONFIG cfg3_gb14_eager_slot8  eager=1  extra='VLLM_ASCEND_MOE_OFFLOAD_GB=14'  DEV=5 PORT=8020
+==================================================================
+[suite] server pid=1481939 -> .planning/sew_offload/logs/server_cfg3_gb14_eager_slot8.log
+[suite] cfg3_gb14_eager_slot8 HEALTHY. weights:  06-19 13:59:14 [model_runner_v1.py:3064] Loading model weights took 44.2438 GB
+[suite] client cfg=cfg3_gb14_eager_slot8 conc=1 num_prompts=100 -> benchmarks/results/bench_suite_4cfg/bench_cfg3_gb14_eager_slot8_conc1.json

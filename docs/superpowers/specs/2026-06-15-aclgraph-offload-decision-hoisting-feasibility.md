@@ -259,3 +259,31 @@ so grouped-matmul is its own captured segment; pad-to-capacity fixed-shape `grou
 to avoid recompile. **The NPU claim — offload captures under ACLGraph once the D2H
 decision is hoisted — is therefore designed and unit-grounded but not yet hardware-verified.**
 
+## 11. Experiment A — capture-pass VERIFIED on real NPU (2026-06-16)
+
+Run on NPU 5, Qwen3-30B-A3B, offload 14GB → 8 slots / 128 experts, ACLGraph
+PIECEWISE. Single controlled variable: `VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE`.
+
+| Config | capture phase | evidence |
+|---|---|---|
+| offload + ACLGraph, **flag=0** | **CRASH** `107027 synchronize stream failed` + `107030 synchronized memcpy failed, kind=2` (`aclrtMemcpy`, D2H) inside `capture_model` (model_runner_v1.py:3893) | `logs/C_control_offloadON_flag0.log` |
+| offload + ACLGraph, **flag=1** | **PASS** `Graph capturing finished in 10 secs, took 0.03 GiB`, no 107027/107030 | `logs/D_test_offloadON_flag1.log` |
+
+Flipping only the flag turns offload+ACLGraph capture from hard crash to pass. The
+core paper claim of §9 (control-plane D2H decision is what breaks capture, and hoisting
+it via the capture-safe path unblocks ACLGraph) is now **empirically confirmed on
+hardware**, not merely code-inferred.
+
+**Milestone 2 boundary, exposed by the flag=1 run's generate phase:** after capture
+passes and LOAD_OK, generation raises `Expected all tensors to be on the same device,
+got weight is on cpu ... wrapper__npu_grouped_matmul`. Offload keeps expert weights on
+the host; the capture-safe path points the captured graph at fixed slots, but with **no
+staging hook** to load experts into NPU slots / write log2phy, replay's grouped-matmul
+reads host weights. So **Milestone 1 (capture passes) = verified; Milestone 2 (replay
+correctness) = needs the model_runner `stage_fixed_slot_plan` hook before replay**
+(token-id parity is strict only in the full-residency num_slots≥128 degenerate config;
+partial residency needs the full Option-2 split boundary).
+
+Harness: `tools/sew_offload/run_graph_compat_capture_probe.py` (single-config probe) +
+`tools/sew_offload/race_launch.sh` (claim-on-free retry for the contended shared host).
+

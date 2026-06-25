@@ -329,6 +329,53 @@ class MoeOffloadRuntime:
             return False
         return not self.is_resident_layer(int(layer_id))
 
+    def is_static_residency_regime(self, num_logical_experts: int) -> bool:
+        """Regime A iff num_slots >= num_logical_experts.
+
+        Under Regime A every logical expert owns a fixed slot, so the
+        logical->physical (log2phy) mapping is *static* (step-independent): it is
+        staged ONCE for all experts before ACLGraph capture
+        (``stage_full_residency_slot_plan``) and must NOT be re-derived per step.
+        The per-step ``moe_offload_stage`` seam (which overwrites log2phy with
+        only the current active subset, resetting inactive experts to -1) is a
+        no-op here — restaging would corrupt the static mapping and make the
+        captured gather read slot[-1] (MTE out-of-range) for any expert active in
+        a later step but not the staging step.
+
+        Regime B (num_slots < num_logical_experts) is the inverse: the mapping is
+        data-dependent, full-residency staging is rejected by the working-set
+        guard, and the per-step seam owns staging.
+        """
+        return int(self.config.num_slots) >= int(num_logical_experts)
+
+    def should_use_b2_wave_prefill(
+        self,
+        *,
+        layer_id: int,
+        active_expert_count: int,
+        is_prefill: bool,
+    ) -> bool:
+        """Gate for B2 wave-streamed prefill (capacity-bounded waves).
+
+        True iff ALL of:
+          * config.b2_wave_prefill is on (default off),
+          * this is a prefill call (decode keeps the single-wave B1 path),
+          * the layer is offloaded under fixed slots (resident layers untouched),
+          * the call's distinct active expert set exceeds num_slots (otherwise B1
+            single-wave already fits and is cheaper).
+
+        When False the caller keeps its existing path (B1 single wave, or the
+        fail-closed working-set guard). This predicate performs no device work and
+        is pure-Python testable.
+        """
+        if not self.config.b2_wave_prefill:
+            return False
+        if not is_prefill:
+            return False
+        if not self.should_use_fixed_slot_plan_for_layer(int(layer_id)):
+            return False
+        return int(active_expert_count) > int(self.config.num_slots)
+
     def memory_ledger(self) -> MoeOffloadMemoryLedger:
         original_bytes = sum(
             bytes_
@@ -626,6 +673,52 @@ class MoeOffloadRuntime:
             active_slot_ids=(),
         )
         return PreparedSlotWeights.from_slot_bank(slot_bank=slot_bank, mapping=mapping)
+
+    def stage_full_residency_slot_plan(self, *, layer_id: int) -> bool:
+        """Regime A staging hook: one-time fill of slots + log2phy before capture.
+
+        Precondition (Regime A): ``num_slots >= num_logical_experts`` so every
+        logical expert owns a fixed slot and the log2phy mapping is *static*
+        (independent of any step's active set). Under this condition the
+        control-plane/data-plane ring dependency (need active_experts to stage,
+        need replay to learn active_experts) is broken: we can stage ALL experts
+        once, after weight loading and before ACLGraph capture.
+
+        This is the missing wire that makes the captured graph token-correct: it
+        writes the real logical->physical mapping into the persistent (fixed
+        address) log2phy buffer that ``capture_safe_slot_weights`` exposes to the
+        captured gather. Without it the buffer stays at its ``-1`` init and the
+        captured graph mis-routes offloaded layers.
+
+        Returns ``True`` if staging ran, ``False`` if it was a no-op (feature off,
+        resident layer, layer not registered, or not graph-compatible mode). Only
+        valid in Regime A; ``num_slots < num_logical_experts`` is rejected by the
+        underlying ``prepare_fixed_slot_plan`` working-set guard (fail-closed).
+
+        Must run eager (outside graph capture) — it performs host decision + H2D.
+        """
+        layer_id = int(layer_id)
+        if not (self.should_use_fixed_slots and self.config.graph_compatible_offload):
+            return False
+        if self.is_resident_layer(layer_id):
+            return False
+        if not self.is_layer_registered(layer_id):
+            return False
+        if _is_current_graph_capturing():
+            # Staging performs host decision + H2D; forbidden on a captured
+            # stream. In the canonical flow staging already ran eager at load
+            # time, so during capture this is a safe no-op.
+            return False
+        buf = self._log2phy_buffers.get(layer_id)
+        if buf is None:
+            return False
+        num_logical_experts = int(buf.numel())
+        self.stage_fixed_slot_plan(
+            layer_id=layer_id,
+            active_experts=tuple(range(num_logical_experts)),
+            num_logical_experts=num_logical_experts,
+        )
+        return True
 
     def prepare_weights_for_execution(
         self,

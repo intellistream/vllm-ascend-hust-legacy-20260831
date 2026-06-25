@@ -1,0 +1,2 @@
+[race-sew-eager try=1] NPU5 at 5% (<15%) — launching (SEW-only, NoopOffloader)
+[race-sew-eager try=1] non-OOM exit — stopping for inspection

@@ -17,6 +17,7 @@ from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
+from vllm.model_executor.offloader import get_offloader
 from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -154,9 +155,25 @@ class ACLGraphWrapper:
 
                 # mind-exploding: carefully manage the reference and memory.
                 forward_context.capturing = True
+                # Sync offloader's copy stream before capture so any
+                # pre-capture prefetches are complete (parity with stock
+                # vLLM CUDAGraphWrapper, cuda_graph.py). Inert under
+                # NoopOffloader.
+                get_offloader().sync_prev_onload()
                 with torch.npu.graph(aclgraph, pool=self.graph_pool):
                     # `output` is managed by pytorch's aclgraph pool
                     output = self.runnable(*args, **kwargs)
+                    # Join the offloader's copy stream into the capture
+                    # stream before capture ends, otherwise the last
+                    # prefetch's forked copy_stream stays unjoined and
+                    # AclmdlRICaptureEnd fails with 107025 ("stream not
+                    # joined"). NOTE: we must use sync_prev_onload()
+                    # (unconditional wait_stream) rather than
+                    # join_after_forward(): the latter is gated on
+                    # torch.cuda.is_current_stream_capturing(), which is the
+                    # un-aliased CUDA symbol and returns False under NPU
+                    # ACLGraph capture, so it would no-op here.
+                    get_offloader().sync_prev_onload()
                     if self.aclgraph_options.weak_ref_output:
                         # by converting it to weak ref,
                         # the original `output` will immediately be released
@@ -197,6 +214,10 @@ class ACLGraphWrapper:
             )
 
         logger.info_once("Replaying aclgraph")
+        # Sync offloader before replay so any external dependencies from
+        # pre-replay prefetches are satisfied (parity with stock vLLM
+        # CUDAGraphWrapper). Inert under NoopOffloader.
+        get_offloader().sync_prev_onload()
         # In async scheduling or multi-threaded (MT) scenarios, it is possible that
         # the CPU's record event (from update_attn_params) for the iteration i completes
         # before the grph replay of iteration i-1.

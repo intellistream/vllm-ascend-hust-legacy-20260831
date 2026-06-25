@@ -45,6 +45,10 @@ _AUTOCONFIG_ENV_VARS = (
     "VLLM_ASCEND_MOE_OFFLOAD_LAYERED_RUNTIME",
     "VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD",
     "VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS",
+    "VLLM_ASCEND_MOE_OFFLOAD_SEW_DATAPLANE",
+    "VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE",
+    "VLLM_ASCEND_MOE_OFFLOAD_STAGE_SEAM",
+    "VLLM_ASCEND_MOE_OFFLOAD_B2_WAVE_PREFILL",
 )
 
 
@@ -104,9 +108,39 @@ def test_moe_offload_autoconfig_sets_prefetch_and_moe_defaults(monkeypatch):
     assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD"] == "8"
 
 
+def test_moe_offload_autoconfig_sew_dataplane_arms_seam_and_b2(monkeypatch):
+    monkeypatch.setenv(MOE_OFFLOAD_GB_ENV, "14")
+    monkeypatch.setenv("VLLM_ASCEND_MOE_OFFLOAD_SEW_DATAPLANE", "1")
+    monkeypatch.delenv("VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS", raising=False)
+    engine_args = type("EngineArgsStub", (), {})()
+
+    assert apply_moe_offload_defaults(engine_args) is True
+
+    # SEW data plane: seam + B2 armed, PrefetchOffloader NOT wired.
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE"] == "1"
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_STAGE_SEAM"] == "1"
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_B2_WAVE_PREFILL"] == "1"
+    assert not hasattr(engine_args, "offload_backend")
+    assert engine_args._ascend_moe_offload_sew_dataplane is True
+    # Shared defaults + resident layers still derived from the GB budget.
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_NUM_SLOTS"] == "8"
+    assert os.environ["VLLM_ASCEND_MOE_OFFLOAD_RESIDENT_LAYER_IDS"]
+
+
+def test_moe_offload_autoconfig_default_dataplane_is_prefetch(monkeypatch):
+    monkeypatch.setenv(MOE_OFFLOAD_GB_ENV, "14")
+    monkeypatch.delenv("VLLM_ASCEND_MOE_OFFLOAD_SEW_DATAPLANE", raising=False)
+    engine_args = type("EngineArgsStub", (), {})()
+
+    assert apply_moe_offload_defaults(engine_args) is True
+    # Default path unchanged: PrefetchOffloader wired, seam/B2 NOT auto-armed.
+    assert engine_args.offload_backend == "prefetch"
+    assert engine_args._ascend_moe_offload_sew_dataplane is False
+    assert "VLLM_ASCEND_MOE_OFFLOAD_STAGE_SEAM" not in os.environ
+
+
 def test_moe_offload_gb_derives_prefetch_amount_from_model_config():
     defaults = derive_prefetch_defaults(14, QWEN3_30B_A3B_CONFIG)
-
     assert defaults["offload_group_size"] == 4
     assert defaults["offload_num_in_group"] == 1
     assert defaults["estimated_offloaded_layers"] == 12

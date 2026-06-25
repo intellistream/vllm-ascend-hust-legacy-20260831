@@ -17,6 +17,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import wraps
+import os
 
 import torch
 import torch.nn.functional as F
@@ -49,6 +50,15 @@ from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_expe
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.moe_offload.runtime import get_moe_offload_runtime
+# Registers vllm::moe_offload_stage (Regime B path ① splitting-op seam). Import
+# for its registration side effect; the op is invoked via torch.ops below.
+import vllm_ascend.ops.fused_moe.moe_offload_stage_op  # noqa: F401
+# Registers vllm::moe_router / vllm::moe_router_indirect (Option B piece 1) and
+# provides the B1 topk-injection registry used by the apply-path short-circuit.
+import vllm_ascend.ops.fused_moe.moe_router_op  # noqa: F401
+# Registers vllm::moe_mlp (Option B piece 3). Import for registration side effect.
+import vllm_ascend.ops.fused_moe.moe_mlp_op  # noqa: F401
+from vllm_ascend.ops.fused_moe import moe_seam_inject
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
@@ -167,6 +177,41 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 layer,
                 slot_device=_fixed_slot_device_for_processed_weight(layer.w13_weight),
             )
+            # Option 2 (Regime A): one-time fill of fixed slots + persistent
+            # log2phy buffer before ACLGraph capture, so the captured gather reads
+            # the real mapping instead of the -1 init. No-op unless
+            # graph_compatible_offload is on and num_slots >= num_logical_experts.
+            # Staged from the host store's independent CPU copy, so it survives a
+            # subsequent original-weight release. Eager-only (capture not active
+            # here). Does not touch router / top-k / gate / combine semantics.
+            #
+            # Regime-gated, NOT seam-gated: full-residency staging is REQUIRED in
+            # Regime A (num_slots >= n) even when offload_stage_seam is on, because
+            # the static log2phy mapping is what the captured moe_mlp reads; the
+            # per-step seam op is a no-op in Regime A (see moe_offload_stage_op).
+            # It is skipped only in Regime B (num_slots < n), where it would trip
+            # the working-set guard and per-step seam staging owns the mapping.
+            _num_logical_experts = int(layer.w13_weight.shape[0])
+            if moe_offload_runtime.is_static_residency_regime(_num_logical_experts):
+                moe_offload_runtime.stage_full_residency_slot_plan(layer_id=layer_id)
+            if os.environ.get("SEW_OFFLOAD_LEDGER"):
+                # V2 verification probe (env-gated, inert by default): confirm
+                # this offload layer's slot bank is filled and log2phy is no
+                # longer the -1 sentinel. Eager (load-time), so reading the
+                # buffer is sync-safe here. Machine-greppable single line.
+                _buf = moe_offload_runtime.log2phy_buffer(layer_id)
+                _ledger = moe_offload_runtime.memory_ledger()
+                _staged = None if _buf is None else int((_buf >= 0).sum().item())
+                print(
+                    f"SEW_LEDGER layer={layer_id} "
+                    f"log2phy_staged={_staged}/{None if _buf is None else _buf.numel()} "
+                    f"registered_layers={_ledger.registered_layers} "
+                    f"host_experts={_ledger.host_experts} "
+                    f"slot_bank_bytes={_ledger.slot_bank_bytes} "
+                    f"host_store_bytes={_ledger.host_store_bytes} "
+                    f"original_weight_bytes={_ledger.original_expert_weight_bytes}",
+                    flush=True,
+                )
             if moe_offload_runtime.config.release_original_expert_weights:
                 moe_offload_runtime.release_original_expert_weights_if_ready(layer)
 
@@ -219,6 +264,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             num_experts=num_logical_experts,
         )
+        # B1 seam short-circuit (Option B three-way split): when the seam path is
+        # active, vllm::moe_router already computed (topk_weights, topk_ids) as a
+        # top-level op and stashed them here; consume them instead of the value
+        # just produced above. Faithful: the router op runs the IDENTICAL
+        # select_experts call (moe_router_op.py), so on identity-prepare topology
+        # this is byte-equivalent. Registry is empty when seam is off -> no-op.
+        _seam_layer_id = int(getattr(layer, "layer_id", -1))
+        if moe_seam_inject.has_injected_topk(_seam_layer_id):
+            topk_weights, topk_ids = moe_seam_inject.peek_injected_topk(_seam_layer_id)
         moe_offload_runtime = get_moe_offload_runtime()
         topk_ids, topk_weights = moe_offload_runtime.trace_logical_active_experts(
             layer_id=getattr(layer, "layer_id", -1),
@@ -303,9 +357,48 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     layer,
                     slot_device=_fixed_slot_device_for_processed_weight(layer.w13_weight),
                 )
+                # Option 2 (Regime A): stage slots + log2phy on first eager touch
+                # if this layer was registered lazily here rather than at load
+                # time. No-op while capturing (must have staged eager already).
+                # Regime-gated (NOT seam-gated): required in Regime A even with the
+                # seam on; skipped only in Regime B where the per-step seam stages.
+                _num_logical_experts_lazy = int(layer.w13_weight.shape[0])
+                if moe_offload_runtime.is_static_residency_regime(_num_logical_experts_lazy):
+                    moe_offload_runtime.stage_full_residency_slot_plan(layer_id=layer_id)
                 if moe_offload_runtime.config.release_original_expert_weights:
                     moe_offload_runtime.release_original_expert_weights_if_ready(layer)
             offload_enabled = True
+
+        # Regime B path ①: route topk_ids through the splitting-op seam so the
+        # data-dependent active-set staging (D2H + H2D + log2phy write) runs eager
+        # between the router piece and the grouped-MLP piece. The op is registered
+        # in compilation_config.splitting_ops (platform.py), so the FX splitter
+        # cuts the captured region here. Returns a clone of topk_ids to force the
+        # grouped MLP's data dependency on the completed staging. No-op for resi-
+        # dent / non-offload layers. Does not touch router / top-k / gate / combine.
+        #
+        # MUTUAL EXCLUSION with the P2c three-way seam: when topk was injected by
+        # vllm::moe_mlp (has_injected_topk above), this apply() body is running
+        # INSIDE the captured moe_mlp op, where a moe_offload_stage call would be
+        # frozen at capture (the R3-NEGATIVE position). In that path the top-level
+        # vllm::moe_offload_stage (run eager between the router/mlp pieces) already
+        # owns staging, so the in-apply seam must NOT fire again. It fires only on
+        # the monolithic-fallback path (no injection), where it is the sole seam.
+        _seam_three_way = moe_seam_inject.has_injected_topk(_seam_layer_id)
+        if (
+            offload_enabled
+            and moe_offload_runtime.config.offload_stage_seam
+            and not _seam_three_way
+        ):
+            # Side-effect-only (mutates log2phy/slots in place, returns None). On
+            # the monolithic-fallback path topk_ids is a plain local, so address
+            # stability is moot here -- but keep the no-reassign call contract
+            # uniform with the three-way seam path.
+            torch.ops.vllm.moe_offload_stage(
+                topk_ids,
+                layer_id,
+                num_logical_experts,
+            )
 
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
@@ -403,6 +496,165 @@ class AscendMoERunner(MoERunner):
                 router_logits,
                 shared_experts_input,
             )
+
+    # ----------------------------------------------------------------------
+    # Option B three-way seam (SEW-Offload, design doc 13). DEFAULT-OFF.
+    #
+    # When VLLM_ASCEND_MOE_OFFLOAD_STAGE_SEAM=1 *and* the config-level guards
+    # pass, _select_forward returns _seam_forward_entry instead of the opaque
+    # torch.ops.vllm.moe_forward. The entry calls three TOP-LEVEL ops --
+    # moe_router_indirect | moe_offload_stage | moe_mlp -- so moe_offload_stage
+    # becomes a real FX split point (it is in splitting_ops). The router + mlp
+    # pieces are captured; staging runs eager between replays. seam=0 (or any
+    # guard failing) -> base MoERunner._select_forward (monolithic moe_forward),
+    # byte-for-byte the current path.
+    #
+    # All three ops receive the REAL layer name (self.layer_name) -> direct
+    # no_compile_layers lookup with NO moe_layer_index increment. The only
+    # runtime reader of moe_layer_index is the static-kernel wrap, which a guard
+    # turns off on the seam path; so uniform real-name use is index-safe.
+    # ----------------------------------------------------------------------
+    def _seam_config_guards_pass(self) -> bool:
+        """Config-level guards checkable at runner __init__ time."""
+        import os as _os
+
+        from vllm_ascend.moe_offload.runtime import get_moe_offload_runtime
+
+        def _probe(reason):
+            if _os.environ.get("SEW_SEAM_PROBE"):
+                print(
+                    f"SEW_SEAM_SELECT layer={getattr(self, 'layer_name', '?')} "
+                    f"config_guard={reason}",
+                    flush=True,
+                )
+
+        runtime = get_moe_offload_runtime()
+        if not runtime.config.offload_stage_seam:
+            _probe("FAIL:offload_stage_seam_off")
+            return False
+        if self._shared_experts is not None:
+            _probe("FAIL:shared_experts")
+            return False
+        # NOTE: a runner-held gate (is_internal_router; Qwen3-MoE always sets it)
+        # is SUPPORTED -- moe_router_indirect applies the same gate to
+        # hidden_states before select_experts, faithfully relocating the matmul
+        # _forward_impl:710 would otherwise run. No gate guard here.
+        mc = self.moe_config
+        if mc.dp_size > 1 or mc.ep_size > 1 or mc.tp_size > 1 or mc.pcp_size > 1:
+            _probe(
+                f"FAIL:multicard dp={mc.dp_size} ep={mc.ep_size} "
+                f"tp={mc.tp_size} pcp={mc.pcp_size}"
+            )
+            return False
+        _probe("PASS")
+        return True
+
+
+    def _select_forward(self):
+        if self._seam_config_guards_pass():
+            return self._seam_forward_entry
+        return super()._select_forward()
+
+    def _seam_forward_entry(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+        input_ids: torch.Tensor | None,
+        layer_name,
+    ) -> torch.Tensor:
+        """Drop-in replacement for the moe_forward custom op, decomposed into
+        three top-level ops. Per-layer guards are resolved on first call and the
+        decision is cached; any failure permanently delegates to moe_forward."""
+        decision = getattr(self, "_seam_active", None)
+        if decision is None:
+            decision = self._resolve_seam_per_layer_guards()
+            self._seam_active = decision
+
+        if not decision:
+            # Permanent fallback: the opaque monolithic op (same as base path).
+            return torch.ops.vllm.moe_forward(
+                hidden_states,
+                router_logits,
+                shared_experts_input,
+                input_ids,
+                layer_name,
+            )
+
+        real_name = self.layer_name
+        topk_weights, topk_ids = torch.ops.vllm.moe_router_indirect(
+            hidden_states,
+            router_logits,
+            real_name,
+        )
+        # Splitting op (in splitting_ops): eager D2H + stage + write log2phy buf.
+        # Side-effect-only (returns None, declares mutates_args=["topk_ids"]): we
+        # thread the SAME router-piece topk_ids tensor straight into moe_mlp so the
+        # captured MLP reads it at the FIXED address recorded at capture. Returning
+        # a clone here would land at a different address on each eager replay and
+        # make the captured gather read a stale buffer -> MTE DDR out-of-range. The
+        # declared mutation gives moe_mlp a real data dependency on the staging
+        # side effect (prevents DCE / reorder) -- same contract as
+        # unified_attention_with_output.
+        torch.ops.vllm.moe_offload_stage(
+            topk_ids,
+            self._seam_layer_id,
+            self._seam_num_logical_experts,
+        )
+        return torch.ops.vllm.moe_mlp(
+            hidden_states,
+            router_logits,
+            topk_weights,
+            topk_ids,
+            shared_experts_input,
+            input_ids,
+            real_name,
+        )
+
+    def _resolve_seam_per_layer_guards(self) -> bool:
+        """Resolve the layer once, check per-layer guards, cache layer_id +
+        num_logical_experts for the seam ops. Returns False (-> fallback) on any
+        unsupported configuration."""
+        from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+            get_layer_from_name,
+        )
+
+        from vllm_ascend.quantization.methods.base import (
+            get_moe_num_logical_experts,
+        )
+
+        try:
+            layer = get_layer_from_name(self.layer_name)
+        except Exception:
+            return False
+
+        # Callable cannot cross an op boundary (decision ②/B1 constraint).
+        if getattr(layer, "custom_routing_function", None) is not None:
+            return False
+        # Decision ④: first version mutually exclusive with multistream gate.
+        if getattr(layer, "multistream_overlap_gate", False):
+            return False
+        # moe_layer_index index-safety: real-name lookups don't advance the
+        # index, so the static-kernel wrap (the only runtime reader) must be off.
+        if getattr(layer, "enable_npugraph_ex_static_kernel", False):
+            return False
+        # zero-expert path is not supported under the fixed-slot seam yet.
+        if getattr(layer, "zero_expert_num", 0) and getattr(
+            layer, "zero_expert_type", None
+        ) is not None:
+            return False
+
+        num_shared_experts = getattr(layer, "n_shared_experts", 0) or 0
+        self._seam_layer_id = int(getattr(layer, "layer_id", -1))
+        self._seam_num_logical_experts = get_moe_num_logical_experts(
+            layer,
+            layer.moe_config.num_experts,
+            global_redundant_expert_num=getattr(
+                layer, "global_redundant_expert_num", 0
+            ),
+            num_shared_experts=num_shared_experts,
+        )
+        return True
 
 
 class AscendFusedMoE(FusedMoE):

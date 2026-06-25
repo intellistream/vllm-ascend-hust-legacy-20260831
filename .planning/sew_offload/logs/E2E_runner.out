@@ -1,0 +1,9 @@
+[e2e] BASE captured (offload OFF) -> .planning/sew_offload/logs/E2E_base_captured.log
+(EngineCore pid=1380769) INFO 06-19 04:42:32 [model_runner_v1.py:3064] Loading model weights took 56.9001 GB
+OUTPUT_TOKENS [3555, 525, 279, 22146, 323, 63625, 315, 1667]
+[e2e] SEW service path GB=14 SEW_DATAPLANE=1 (autoconfig derives rest) -> .planning/sew_offload/logs/E2E_sew_gb14.log
+[e2e] OK: OUTPUT_TOKENS [3555, 525, 279, 22146, 323, 63625, 315, 1667]
+[e2e] weights:  06-19 04:45:13 [model_runner_v1.py:3064] Loading model weights took 44.2438 GB
+[e2e] WAVE_RUN: 12  b2_defer: 12  CAPTURING: 48
+[e2e] distinct offloaded layers in WAVE_RUN: layer=11 layer=15 layer=19 layer=23 layer=27 layer=3 layer=31 layer=35 layer=39 layer=43 layer=47 layer=7 
+[e2e] DONE — base=.planning/sew_offload/logs/E2E_base_captured.log sew=.planning/sew_offload/logs/E2E_sew_gb14.log

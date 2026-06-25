@@ -433,6 +433,14 @@ class NPUPlatform(Platform):
             # If splitting ops does not contain the vllm::mla forward value, this configuration issue will
             # not be detected in advance assert.
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
+            # Regime B path ①: register the MoE offload staging seam as a splitting
+            # op so the FX splitter cuts the captured region between the router and
+            # the grouped MLP, letting vllm::moe_offload_stage run eager (D2H + H2D
+            # + log2phy write) between two captured pieces. Gated on the default-off
+            # seam switch so PIECEWISE behavior is unchanged unless explicitly on.
+            import vllm_ascend.envs as _envs_ascend
+            if _envs_ascend.VLLM_ASCEND_MOE_OFFLOAD_STAGE_SEAM:
+                compilation_config.splitting_ops.extend(["vllm::moe_offload_stage"])
             update_aclgraph_sizes(vllm_config)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
         elif (

@@ -1,0 +1,12 @@
+==================================================================
+[p0] START base (offload OFF, captured) maxtok=32 reps=5 -> .planning/sew_offload/logs/P0_base_latency.log
+==================================================================
+LATENCY case=p0_base n_tokens=32 reps=5 TTFT_MS=189.99 TPOT_MS=44.465 DECODE_TPS=22.49 T1_S=0.1900 TN_S=1.5684
+==================================================================
+[p0] START b1 num_slots=96 nonres={2,3,4,5} maxtok=32 reps=5 -> .planning/sew_offload/logs/P0_b1_slots96_latency.log
+==================================================================
+LATENCY case=p0_b1_slots96 n_tokens=32 reps=5 TTFT_MS=319.21 TPOT_MS=73.688 DECODE_TPS=13.57 T1_S=0.3192 TN_S=2.6035
+[p0] STAGE_MS all: n=924 mean=20.333 median=1.091 max=3601.148
+[p0] STAGE_MS decode-only (n_active<=8): n=876 mean=7.943 median=1.085
+[p0] ALL DONE — compare TTFT_MS / TPOT_MS / DECODE_TPS between base and b1;
+[p0] STAGE_MS decode-only mean x (#offload layers=4) approximates per-step staging tax.

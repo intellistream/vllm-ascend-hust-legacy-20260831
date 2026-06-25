@@ -213,6 +213,22 @@ def _raise_on_uva_conflict(engine_args: Any) -> None:
         )
 
 
+_SEW_DATAPLANE_ENV = "VLLM_ASCEND_MOE_OFFLOAD_SEW_DATAPLANE"
+# Extra env defaults armed only when the SEW graph-compatible data plane is
+# selected. These turn on the three-way seam + B2 wave-streamed prefill so the
+# offloaded layers run captured-decode + wave prefill instead of the eager
+# PrefetchOffloader path.
+_SEW_DATAPLANE_ENV_VARS = {
+    "VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE": "1",
+    "VLLM_ASCEND_MOE_OFFLOAD_STAGE_SEAM": "1",
+    "VLLM_ASCEND_MOE_OFFLOAD_B2_WAVE_PREFILL": "1",
+}
+
+
+def _sew_dataplane_selected() -> bool:
+    return bool(int(os.getenv(_SEW_DATAPLANE_ENV, "0")))
+
+
 def apply_moe_offload_defaults(engine_args: Any) -> bool:
     target_offload_gb = get_moe_offload_gb()
     if target_offload_gb <= 0:
@@ -229,14 +245,24 @@ def apply_moe_offload_defaults(engine_args: Any) -> bool:
         os.environ[_RESIDENT_LAYER_IDS_ENV] = ",".join(
             str(layer_id) for layer_id in prefetch_defaults["resident_layer_ids"]
         )
-    engine_defaults = {
-        **_DEFAULT_ENGINE_ARGS,
-        "offload_group_size": prefetch_defaults["offload_group_size"],
-        "offload_num_in_group": prefetch_defaults["offload_num_in_group"],
-    }
-    for field_name, value in engine_defaults.items():
-        _set_engine_default(engine_args, field_name, value)
+
+    sew_dataplane = _sew_dataplane_selected()
+    if sew_dataplane:
+        # SEW graph-compatible data plane: arm seam + B2, and DO NOT wire the
+        # PrefetchOffloader (it cannot be ACLGraph-captured on NPU). The offloaded
+        # layers are driven by the SEW fixed-slot runtime instead.
+        for env_name, value in _SEW_DATAPLANE_ENV_VARS.items():
+            os.environ.setdefault(env_name, value)
+    else:
+        engine_defaults = {
+            **_DEFAULT_ENGINE_ARGS,
+            "offload_group_size": prefetch_defaults["offload_group_size"],
+            "offload_num_in_group": prefetch_defaults["offload_num_in_group"],
+        }
+        for field_name, value in engine_defaults.items():
+            _set_engine_default(engine_args, field_name, value)
 
     setattr(engine_args, "_ascend_moe_offload_autoconfig_plan", prefetch_defaults)
     setattr(engine_args, "_ascend_moe_offload_autoconfig_applied", True)
+    setattr(engine_args, "_ascend_moe_offload_sew_dataplane", sew_dataplane)
     return True

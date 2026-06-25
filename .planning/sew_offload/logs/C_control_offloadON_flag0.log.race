@@ -1,0 +1,4 @@
+[race try=1] NPU5 at 5% — launching
+[race try=1] lost race (OOM) — retrying
+[race try=2] NPU5 at 5% — launching
+[race try=2] non-OOM exit — stopping for inspection

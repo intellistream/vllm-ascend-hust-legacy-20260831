@@ -103,9 +103,113 @@ python -m vllm.entrypoints.openai.api_server \
   --ascend-moe-offload-gb 14
 ```
 
-MoE offload currently runs through the eager path. Keep `--enforce-eager`
-enabled for this prototype because graph capture cannot record the runtime CPU
-decision path used by the offload scheduler.
+MoE offload also runs through the legacy eager path above. The `--enforce-eager`
+flag dispatches every operator individually, so the runtime CPU decision path of
+the offload scheduler is trivially legal — at the cost of paying full per-operator
+kernel-launch overhead on every decode step.
+
+### Latest progress: graph-compatible expert offload (B1)
+
+The newest prototype removes the `--enforce-eager` constraint: MoE expert offload
+now runs **inside an ACLGraph-captured decode**, while the model still fits in
+less HBM than full residency. We call the current milestone **B1**.
+
+**The problem.** Expert offload is data-dependent: which experts to stage into
+HBM is only known after the router runs, and that decision needs a device→host
+sync (`torch.unique(topk_ids).cpu()`) plus a conditional host→device copy — both
+forbidden on a captured stream. Eager mode sidesteps this but loses graph capture
+entirely.
+
+**The idea — decouple the control plane from the data plane at a splitting seam.**
+The MoE body is cut into three top-level ops:
+
+```
+moe_router_indirect  |  moe_offload_stage  |  moe_mlp
+  (captured piece)      (splitting op,        (captured piece)
+                         runs EAGER between
+                         the two captured pieces)
+```
+
+`moe_offload_stage` is registered as a `splitting_op`, so the FX graph splitter
+excludes it from capture and it runs **eager between two captured pieces**. It
+performs the host decision + synchronous staging of the active experts into a
+fixed-address **slot bank**, then writes the logical→physical mapping in place
+into a persistent (fixed-address) `log2phy` buffer. The captured `moe_mlp` only
+ever reads fixed slot tensors + the fixed buffer, so the graph replays safely
+while the *contents* change every step. Expert weights for offloaded layers live
+on CPU (host store) and are streamed into the `num_slots` HBM slots on demand.
+
+**Correctness (Qwen3-30B-A3B, single NPU, `num_slots=96 < 128` experts, offload
+layers {2,3,4,5}).** Output tokens and the full per-position top-20 logprobs are
+**bit-identical to the full-residency baseline to 1e-5** — the offload path
+changes only *where expert weights live and how they are accessed*, never the
+router / top-k / gate / combine semantics. The slot bank holds 96 experts while
+the host store holds all 128, so 32 experts per offloaded layer never reside in
+HBM (genuine `num_slots < n`).
+
+**Performance — same offload footprint (55.78 GB HBM), only variable is graph
+capture.** Compared against the eager single-op offload baseline at identical
+`num_slots=96`, prompt, and concurrency=1:
+
+| Config (slots=96, 32 tokens) | TTFT (prefill) | TPOT (per decode step) | Decode tok/s |
+|------------------------------|----------------|------------------------|--------------|
+| Eager single-op offload      | 242.8 ms       | 212.3 ms               | 4.71         |
+| **B1 graph-captured offload**| 308.0 ms       | **69.1 ms**            | **14.5**     |
+
+Graph capture collapses the 48-layer per-operator launch overhead that dominates
+eager decode, making **decode 3.07× faster** and the **end-to-end 32-token run
+2.79× faster** (2450 ms vs 6824 ms). TTFT is currently higher because prefill has
+variable shape and is *not* captured in either config, so B1's prefill only pays
+extra staging without a capture benefit — the next milestone (predictive /
+overlapped prefetch) targets exactly this.
+
+> Status: research prototype. All offload features are env-gated and default-off;
+> the main vLLM Ascend serving paths are unchanged.
+
+### B2: wave-streamed prefill (real HBM savings at a small slot budget)
+
+B1 keeps `num_slots` close to the expert count, so it saves little HBM (offloading
+4 layers at `num_slots=96` only frees ~1.1 GB). **B2** pushes `num_slots` far below
+the per-call active-expert union (e.g. 8 vs a ~51-expert prefill union) and is the
+milestone that delivers real HBM savings.
+
+**The problem.** A prefill forward touches ~51 distinct experts per offloaded
+layer, but only `num_slots=8` fit in HBM at once, so a single grouped matmul can't
+run — B1 fail-closes (`active expert working set exceeds num_slots`).
+
+**The idea.** Run the prefill MLP in **capacity-bounded waves**. Partition the
+active experts into `ceil(N / num_slots)` waves of ≤ `num_slots` each; per wave,
+stage that wave's experts into the slot bank, run dispatch → partial grouped
+matmul → combine on just those experts (others masked to zero weight), and
+accumulate. Because a token's MoE output is a *sum* over its top-k experts and
+addition is associative, summing the per-wave contributions reproduces the full
+output. Prefill runs eager (it isn't ACLGraph-captured), so the seam defers to the
+wave loop there; decode (active set ≤ `num_slots`) keeps the captured single-wave
+B1 path, preserving the 3.07× decode speedup.
+
+**End-to-end through the service command.** Set
+`VLLM_ASCEND_MOE_OFFLOAD_SEW_DATAPLANE=1` alongside `--ascend-moe-offload-gb` and
+**drop `--enforce-eager`**. Autoconfig then derives the slot budget and offloaded
+layers, arms the seam + B2, and skips the (non-capturable) PrefetchOffloader.
+Validated on Qwen3-30B-A3B, single NPU, `--ascend-moe-offload-gb 14` (12 offloaded
+layers, `num_slots=8`), ACLGraph capture on:
+
+| Config | Model weights on HBM | Decode | Output |
+|--------|----------------------|--------|--------|
+| Full residency (captured) | 56.90 GB | captured | baseline |
+| **SEW data plane (B2 + seam)** | **44.24 GB** | **captured** | tokens == baseline |
+
+**12.66 GB (22%) of HBM freed** while keeping graph-captured decode (so the 3×
+decode speedup carries over) and never fail-closing on prefill. Output tokens are
+identical to the full-residency baseline; top-1 agrees at every position, with
+~0.24 nat logprob drift — the expected, harmless cost of re-associating one grouped
+matmul into several bf16-summed waves (the algorithm is exact in fp32 / unit tests;
+no token flips). The wave executor exposes a two-phase `issue`/`wait` staging
+interface (`prefetch_depth`, multi-buffer) so transfer/compute overlap can be added
+without changing the planner.
+
+> Status: research prototype. All offload features are env-gated and default-off;
+> the main vLLM Ascend serving paths are unchanged.
 
 ## Contributing
 

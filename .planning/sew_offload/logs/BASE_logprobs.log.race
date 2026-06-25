@@ -1,0 +1,2 @@
+[base try=1] NPU5 free — launching baseline (no offload)
+[base try=1] WON on NPU5 — tokens captured

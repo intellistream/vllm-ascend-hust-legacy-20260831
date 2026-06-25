@@ -1011,3 +1011,455 @@
 ## 下一步（2026-06-15 c）
 - B 的 NPU 验证：在 model_runner 加 stage_fixed_slot_plan 的 replay-前钩子，开 `VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE=1` 跑 offload+ACLGraph，验证 capture 通过 + token-id 与 eager offload 一致。
 - 若 capture 通过：补 async staging（MVP-E），量化 exposed-stall。
+
+## 2026-06-16 — 实验 A：B 的 capture-pass 在真实 NPU 实证（决定性）
+归档分支 `feature/moe-offload-runtime`（commit a167b355）。完整性核对：moe_offload 全套 183 passed/1 skip、ops 30 passed+35 subtests、9 个核心文件 AST 干净、B 原语方法体完整、Feature-2 GMM 探针已干净剔除。
+
+### 环境与坑
+- NPU 共享机争用对抗性极强：一张卡空窗 <60s，30B 加载需 60-235s，普通启动屡屡在内存检查点（启动后~30-45s）被抢 → `Free memory 4.x/60.96 GiB` OOM。
+- `npu-smi info`（全局滚动表）行号映射不可靠；权威读数用 `npu-smi info -t usages -i <d> -c 0 | grep "HBM Usage Rate"`。
+- 离线 `LLM()` + 仅设 `VLLM_ASCEND_MOE_OFFLOAD_GB` **不激活 offload**：autoconfig 的 `os.environ.setdefault` 在父进程，spawn 子进程未继承全部门控。修复：harness 直接显式设 `VLLM_ASCEND_MOE_OFFLOAD_ENABLED=1/NUM_SLOTS=8/LAYERED_RUNTIME=1/FANOUT_THRESHOLD=8/MAX_PHASES=1`（真实 env 变量，spawn 继承）。
+- 工具：`tools/sew_offload/run_graph_compat_capture_probe.py`（单配置 probe，token-id 输出）+ `tools/sew_offload/race_launch.sh`（抢卡重试：检测 <10% 即发，OOM 重试，非-OOM 崩溃停下待查）。
+
+### 决定性一对照实验（NPU 5，Qwen3-30B-A3B，offload 14GB→8 slots / 128 experts，ACLGraph PIECEWISE，唯一变量 = graph_compatible flag）
+- **控制组 flag=0**：`capture_model`（model_runner_v1.py:3893）内**崩溃**——`107027 synchronize stream failed` + `107030 synchronized memcpy failed, kind=2`（`copy_between_host_and_device_opapi / aclrtMemcpy`）。即 `torch.unique(topk_ids.detach().cpu())` 的 D2H 在捕获流被禁。日志 `.planning/sew_offload/logs/C_control_offloadON_flag0.log`。
+- **实验组 flag=1**：capture **通过**——`Capturing CUDA graphs (PIECEWISE): 100%` + `Graph capturing finished in 10 secs, took 0.03 GiB`，**无 107027/107030**。capture-safe 路径绕过 D2H。日志 `.planning/sew_offload/logs/D_test_offloadON_flag1.log`。
+- **结论**：仅翻转 flag，offload+ACLGraph 的 capture 从硬崩溃→通过。**论文 track 2 核心论点首次在真实硬件证实**（此前为代码推断 + CPU 单测）。
+
+### Milestone 2 边界（实验组 generate 阶段精确暴露）
+- 实验组 capture 通过、LOAD_OK 后，generate 报 `RuntimeError: Expected all tensors to be on the same device, but got weight is on cpu ... wrapper__npu_grouped_matmul`。
+- 根因：offload 把专家权重放 host，capture-safe 路径让捕获图指向固定 slot，但**无 staging 钩子把专家装进 NPU slot / 写 log2phy**，replay 时 grouped_matmul 读到 host 权重。这正是文档已声明"未做"的 Milestone 2。
+- 即 **Milestone 1（capture 通过）= ✓ 真实 NPU 证实；Milestone 2（replay 正确性）= 需 model_runner staging 钩子**。下一步：在 replay 前为每个注册 MoE 层调 `stage_fixed_slot_plan`（类比 update_attn_params），再验证 token-id 一致（严格一致仅在全驻留 num_slots≥128 退化配置成立；部分驻留需完整 Option 2 的 split boundary）。
+
+## 2026-06-16 (续) — M2 启动即触发根因修正
+
+- 读码确认 generate 崩溃（D-run, flag=1）根因：offline 探针**未触发 autoconfig→PrefetchOffloader**
+  （C/D 日志无 autoconfig 行、无 PrefetchOffloader init、GB 被当作 Unknown env），
+  导致非驻留层 w13 停在 CPU，高 fanout prefill 走 FULL_WEIGHT_PATH 读 CPU 权重而崩。
+  **非** M2 staging 边界。详见 findings.md「2026-06-16 — M2 根因诊断」。
+- 确认 PrefetchOffloader（设备驻留，graph-compatible by design）与 SEW fixed-slot（控制面）
+  并存且作用于同一批非驻留层；验证命令(--enforce-eager)跑通正是靠 PrefetchOffloader 让 w13 设备驻留。
+- 确认 staging hook 仍是 M2 真缺口（持久 log2phy 仅由 stage_fixed_slot_plan 写入），
+  但它落在 model_runner 主路径 —— 触及项目规则「model_runner 变化需严格架构审查」。
+- 因此在改 model_runner 前先与用户对齐：下一步实验路径选择（见对话）。
+
+## 2026-06-16（续3）— Path A: SEW-only 捕获验证跑通 + 后续边界确认
+
+### 已完成
+- 诊断 E-run 107025 / F-run 107024 根因：均来自 PrefetchOffloader copy_stream（数据面），
+  其 graph-capture 逻辑 gate 在未被 NPU 别名化的 `torch.cuda.is_current_stream_capturing()`（捕获期恒 False），
+  copy_stream 对 NPU ACLGraph 不可捕获，wrapper 级无法修。详见 findings.md。
+- acl_graph.py 补回 stock vLLM 漏移的 `get_offloader().sync_prev_onload()`（capture 前/内、replay 前三处）；
+  NoopOffloader 下惰性，对非 offload 主路径零影响。
+- 用户决策：走 Path A（SEW-only 捕获验证，论文主线）。
+- 新增 `tools/sew_offload/race_launch_sew_only.sh`（不设 GB→NoopOffloader，直设 SEW env；
+  FANOUT_THRESHOLD=128 强制 eager profile 走 SLOT_CACHE，规避读 CPU 权重崩溃）。
+- **G-run（SEW-only, flag=1）capture 通过 + generate 跑通**：LOAD_OK / Capturing PIECEWISE 100% /
+  GENERATE_OK / OUTPUT_TOKENS [3555,525,279,1376,6813,315,1741,4119]。107024/25/27/30 全消失。
+  独立 from_env 验证 SEW 真激活（enabled/num_slots=128/graph_compatible/46层驻留/层2,3非驻留）。
+  **论文主线（capture 维度）坐实：SEW 控制面 primitives 在 ACLGraph 下可捕获，无需 PrefetchOffloader/enforce_eager。**
+
+### 进行中
+- token-id parity 对照：`race_launch_baseline.sh`（无 offload 全驻留 + ACLGraph，扫描全卡抢空闲）
+  取 ground-truth token。当前 8 卡全忙（86-93%），race 在后台轮询等卡。
+
+### 已确认的下一边界（M2 真缺口）
+- 源码链路确认：`log2phy[topk_ids]` gather（moe_comm_method.py:149/529）被录进捕获图固定地址，
+  replay 重读持久 buffer 当前内容。持久 buffer 仅由 `stage_fixed_slot_plan` 写（需 model_runner staging hook，未装）→
+  capture 时恒 -1 → replay 时层 2,3 路由到 slot[-1] → 该 2 层算错，但 46 驻留层正确 → 输出仍连贯。
+- 故 **capture-pass ≠ token-correct**；token 正确性需 staging hook 写对持久 buffer。
+  staging hook 落 model_runner 主路径（受严格架构审查约束）→ 实装前需与用户对齐。
+
+## 2026-06-16（续4）— 当前代码 no-offload baseline 复现 + eager-SEW 对照
+
+### 已完成
+- **当前代码 no-offload baseline（BASE_nooffload_aclgraph，NPU5）跑通**：
+  `OUTPUT_TOKENS [3555, 525, 279, 22146, 323, 63625, 315, 1667]`
+  与早前 carried-over A baseline **逐 token 完全一致** → 证明本次 acl_graph.py 改动在 NoopOffloader 下确属惰性，不影响默认路径。A 可作合法 baseline。
+- 三方对比定稿（前 3 token 同，第 4 起分叉）：
+  ```
+  BASE/A (no offload):    [3555, 525, 279, 22146, 323, 63625, 315, 1667]
+  G (captured SEW flag1): [3555, 525, 279, 1376,  6813, 315,   1741, 4119]
+  ```
+- 厘清 RESIDENT_LAYER_IDS 语义：列出的是**驻留**层；`should_use_fixed_slot_plan_for_layer = should_use_fixed_slots AND NOT is_resident_layer`。
+  G 的 resident=46 层（0–47 去掉 2,3）→ 仅层 2,3 offload。
+
+### 进行中
+- **eager-SEW 对照（H_sew_eager_flag1）**：--enforce-eager + 同一组 SEW env + 同 resident CSV。
+  后台 race PID 775169 轮询 NPU5（40 tries）等空闲卡。
+  - 判定逻辑：eager 路径每步 `prepare_fixed_slot_plan` 写 fresh log2phy（正确）。num_slots=128≥128 expert → 无淘汰。
+    - 若 **H == BASE** → slot 机制本身 token 正确 → captured 路径唯一缺口 = staging hook 未写持久 log2phy buffer。
+    - 这将把"capture-pass ≠ token-correct"的根因**精确隔离**到一个缺失的 model_runner staging hook（M2 真边界）。
+
+### 阻塞
+- 8 卡被其他容器占满（86-94%）。baseline 靠 NPU5 瞬时空窗抢到；eager 对照在后台轮询等下一个空窗。
+- 不可 kill 其他容器 NPU 进程；不可动 port 8016。
+
+## 2026-06-16（续5）— launcher 修复 + hook 设计稿 + eager 对照推翻诊断
+
+### 已完成
+1. **修复 race launcher fall-through 缺陷**（`race_launch_sew_eager.sh` + `race_launch_sew_only.sh`）：
+   等不到 `<15%` 空窗时 `continue` 跳过本 try，不再硬启动 OOM 空转。新增 `FREE_THRESHOLD=15`。
+   实测生效：H 在 NPU5 "at 5% (<15%) — launching" → "WON"，无 OOM 噪声。
+2. **起草 hook 设计稿** `docs/sew-offload/12-eager-staging-hook-design.md`（含 `-1` buffer 代码事实、
+   控制面/数据面环形依赖、Regime A/B 分层、接线点 (a)/(b)、不变量 checklist、验证计划 V0-V4）。
+3. **eager-SEW 对照 H 跑通**（决定性 oracle）：**H == G ≠ BASE**，推翻"`-1` buffer 是分叉成因"。
+
+### 关键转折
+- staging hook **必要但不充分**：落地后只会 captured == eager == 仍错。
+- **已冻结 hook 实现**（设计稿顶部标 FROZEN）。
+- 真正缺陷：fixed-slot staging/remap 本身使 offload 层 MoE 输出偏离全驻留 baseline（eager 也错）。
+
+### 下一步（根因化 eager-SEW 分叉，findings.md 末尾列了 4 条候选）
+- 优先级 1：抓 BASE 首个分叉 step 的 top-2 logit 间距 → 判数值 vs 逻辑。
+- 优先级 2：layers 2,3 设 resident 跑 SEW 应 == BASE（确认非 offload 层无回归）+ 单层二分。
+- 优先级 3/4：核对 slot 权重逐元素无损 + remap 数学。
+
+### 工具状态
+- 修复版 launcher 已可靠抢瞬时空窗（无空转）。
+- eager 对照 H 已得结果，PID 已自然退出。
+
+## 续6 — 数值 tiebreak 实测闭环（2026-06-16）
+
+- 顺序链（PID 823911）跑完：eager-SEW + baseline 双 logprob 输出已取。
+- pos=3 完美镜像：BASE 22146(r1,-1.44021)/1376(r2,-1.56521) gap0.125；EAGER 1376(r1,-1.52263)/22146(r2,-1.52263) gap0.000。
+- pos=2 一致到 ~0.0016 nat，margin 0.625 不翻。
+- 判定：数值近简并 greedy tiebreak，非逻辑 bug。SEW 与全驻留数值等价（~0.08 nat）。详见 findings.md 同日条目。
+- 张力待查：G(captured)==H(eager) 与 "-1 buffer 应出乱码" 矛盾，下一阶段独立排查 captured 路径实际是否读 stale buffer。
+- TODO 状态：本节关闭数值/逻辑判别；hook 设计稿仍 FROZEN，待 captured 张力厘清后再决定 reframe/unfreeze。
+
+## 续7 — NPU 探针实证：captured 真读 -1 buffer（2026-06-16）
+
+- 加 env 门控探针 `SEW_OFFLOAD_PROBE` 于 `_maybe_apply_moe_offload_plan` 两分支（默认惰性，只动 offload 算子文件）。
+- NPU5 graph 模式跑 G 同配置。探针序列：warmup=EAGER → capture=CAPTURE_SAFE(wire -1 buf) → prefill=EAGER → decode=零行(纯 replay)。
+- 决定性：decode 零探针行 ⟹ captured 图真读 -1 buffer 并 mis-route layers{2,3}。
+- 输出 pos6 才偏离 BASE（原 G 在 pos3）= 同配置不同翻转位 = run-to-run 非确定性。
+- **修正**：-1 buffer 不是无害；2 层污染被 greedy 近简并掩蔽。eager-SEW 才数值等价；captured-SEW 需 staging hook。
+  FROZEN hook 稿前提被坐实，应 unfreeze。详见 findings.md 同日续条目。
+- 探针代码保留（env 门控），后续 scaling 实验复用。下一步：offload 层数 scaling（验掩蔽 vs 正确）+ unfreeze hook 稿。
+
+## 续8 — offload-层数 scaling 实验完成（2026-06-16）
+
+- 脚本 `tools/sew_offload/run_offload_scaling.sh`：NPU5 顺序链 6 配置（BASE + captured N=1/2/4/6 + eager-SEW N=4 对照），--logprobs 20。
+- 结果：captured 发散随非驻留层数单调增大 pos7→pos7→**pos2**→退化重复；eager_N4 仅 pos3 近简并翻转。
+- 决定性 A/B（pos2，margin 0.625 nat 的决定性位）：BASE/eager_N4 选 279 一致到 0.002 nat；cap_N4 翻成 862（279 被贬 ~0.6 nat，~1 nat 重排）。
+- ⟹ captured `-1` 是真 mis-route（非数值噪声）；缺陷专属捕获路径（同 N eager 正确）；staging hook 必须，应 unfreeze。详见 findings.md 续2。
+- 全部跑通无 OOM（N=6 也通过），无泄漏进程，NPU5 已释放。探针代码 env 门控保留。
+- 下一步：unfreeze docs/sew-offload/12 staging hook 设计稿，作为 M2 收口实现方向。
+
+## 续9（2026-06-16）：V1 Regime A staging hook 落地（CPU 侧完成，NPU 待资源）
+
+- 决策：挂点选 **SEW 自有 fused_moe.py 注册点之后**，而非原设计稿推荐的 model_runner
+  `capture_model` 前置 pass —— 完全不碰 model_runner，规避架构评审门槛。
+- runtime.py 新增薄封装 `stage_full_residency_slot_plan(layer_id) -> bool`：
+  四道门控（fixed_slots∧graph_compat、非resident、已注册、非捕获期）后从 buffer.numel()
+  取 n、对全专家调既有 `stage_fixed_slot_plan`。捕获期安全 no-op（返回 False 不抛错）。
+- fused_moe.py 两处接线（load-time 主路径 + lazy-forward 兜底），均在 register 之后、
+  release 之前。从 host_store 独立 CPU 副本 staging，顺序安全。
+- 单测：test_graph_compatible_offload.py +5 例（fill / off / capturing / unregistered /
+  fail-closed），11 例全绿；邻近 fixed-slot + moe_comm_method 套件 50 例无回归。
+- docs/sew-offload/12 §5 重写为"已落地"、§6 验证表标 V0/V3 ✅，V1/V2/V4 ⬜待 NPU。
+- 下一步（待 NPU 资源）：V1 captured-SEW Regime A 实测，验证 pos2 决定性位回到 BASE
+  （不再 279→862）；model_runner 一行未动，无需架构评审。
+
+## 续10（2026-06-16）：V1 NPU 实测决定性通过(after-hook)
+
+- NPU5 顺序重跑 scaling 全 6 配置(hook 已在源码,graph_compat=1∧num_slots=128 自动触发)。
+- before-hook 日志已备份 .planning/sew_offload/logs/before_hook/(论文对照左半张)。
+- 结果:cap_N1/N2/N4/N6 **逐 token 完全等于 BASE**,before-hook 的单调发散全部塌平。
+- 决定性位 pos2:cap_N4 BEFORE chosen=862(mis-route) → AFTER chosen=279(修复)。
+- 强于判据:after cap_N4 pos2 logprob 逐位精确等于 BASE 到 1e-5(279:-0.68338 vs -0.68338)
+  → captured 路径与全驻留**数值等价**,非近似。
+- eager_N4_control pos2 仍 279 → 印证缺陷专属捕获路径,hook 补的就是缺失接线。
+- NPU5 已释放,无泄漏进程。⟹ V1 ✅ 通过。docs/sew-offload/12 §6 V1 标 ✅。
+- 论文 before/after 对照图(before_hook/ vs SCALE_*.log)数据齐备。
+
+## 续11（2026-06-16）：V2 ledger 实测通过 + Regime B 难点勘验
+
+- V2(NPU5,cap_N4 配置 + SEW_OFFLOAD_LEDGER=1):每个 offload 层 {2,3,4,5}
+  **log2phy_staged=128/128**(无 -1 残留)→ hook 确实把全专家映射写进持久 buffer。
+  OUTPUT_TOKENS 再次 == BASE。⟹ V2 ✅,Regime A 验证表(V0/V1/V2/V3/V4 除 V4)收口。
+- HBM 账本(Qwen3-30B-A3B,num_slots=128):每层每副本 1.125 GiB;slot_bank ==
+  host_store == original_weight(逐层相等)。⟹ Regime A 同层在 NPU 同时有
+  original + slot 两副本(未 release 时 2.25 GiB/层),**不省 HBM 反增**;全 48 层
+  offload 仅 slot_bank 即 54 GiB > 64GB 卡。**这是 Regime B(淘汰式真 offload)的动机数据。**
+- Regime B router 暴露勘验(读代码 qwen3_moe.py:226 SparseMoeBlock.forward + fused_moe
+  apply:235 select_experts):gate(ReplicatedLinear)+top-k 廉价,但**第 N 层 router 输入
+  = 第 N-1 层 MoE 输出(在捕获图内)**。⟹ "replay 前一次性预跑全层 router"不可行
+  (拿不到深层输入),除非 eager 跑完整模型(=最慢的两遍 forward)。这正是 Regime B
+  核心难点,非工程小补丁,印证论文贡献定位。
+- 下一步候选(Regime B):①逐层 capture 段切分(每 MoE 层单独 capturable,层间 eager
+  做 router 预跑+stage) ②上一步 routing 预测下一步(时间局部性,fail-closed 回退 eager)。
+  需进一步读 acl_graph 切分粒度 + phase_split.py 现有原型再定。
+
+## 续12（2026-06-16）：Regime B 路径① 阶段1落地(custom op 骨架,纯CPU)
+
+- 新建 vllm_ascend/ops/fused_moe/moe_offload_stage_op.py:注册 vllm::moe_offload_stage
+  custom op(direct_register_custom_op,dispatch_key=PrivateUse1)。
+  - 签名:moe_offload_stage(topk_ids, layer_id, num_logical_experts) -> Tensor。
+  - 返回 topk_ids.clone() 强制下游 grouped MLP 数据依赖(fx 不重排/不消除)。
+  - impl:capturing→clone(no-op);未注册/非fixed-slot层→clone(透传);否则 D2H
+    unique(topk_ids)→stage_fixed_slot_plan 写持久log2phy→clone。
+  - fake_impl 返回 empty_like(topk_ids)。
+- 单测 +5(test_graph_compatible_offload.py):registered / pass_through_unregistered /
+  noop_during_capture / stages_active_set(active{1,2,3}→log2phy>=0,地址稳定) /
+  fail_closed_when_active_exceeds_slots。全文件 16/16 通过(0.17s)。
+- 边界:仅落地 op+fake+CPU单测。**未接线 fused_moe.apply、未加入 splitting_ops**。
+  零运行时影响、完全可逆。
+- 阶段2(待用户拍板,动编译路径+耗NPU):①在 fused_moe.apply 图兼容分支把 select_experts
+  输出经此 op 再喂 fused_experts;②platform.py:436 旁 splitting_ops.extend
+  (["vllm::moe_offload_stage"]);③NPU5 捕获验证 R3——piece 是否在此 op 处断开、
+  eager 段 D2H/H2D 是否合法、token 是否==BASE。
+
+## 续13（2026-06-17）：Regime B 路径① 阶段2 接线 + R3 NPU 首测
+
+接线(SEW自有文件,默认关闭):
+- envs.py:+VLLM_ASCEND_MOE_OFFLOAD_STAGE_SEAM(默认0)。
+- config.py:+offload_stage_seam 字段 + from_env。
+- fused_moe.py:import op(注册);load-time & lazy 两处 stage_full_residency 钩子在
+  seam on 时跳过;apply 在 offload_enabled && seam 时 topk_ids=torch.ops.vllm.moe_offload_stage(...)。
+- platform.py:436 旁 seam on 时 splitting_ops.extend(["vllm::moe_offload_stage"])。
+
+NPU1 实测(Qwen3-30B-A3B,128 experts top_k=8,nonres={2,3,4,5}):
+- **R3-a slots=128**:LOAD_OK+GENERATE_OK,**capture 成功**(config dump 确认
+  splitting_ops 含 vllm::moe_offload_stage;"Capturing ... PIECEWISE" + "Replaying aclgraph")。
+  → **FX 切分机制 R3 成立**:自定义 op 被splitter接受、能作为捕获 piece 边界。
+  但 **tokens 错**:[3555,525,279,1887,11,279,279,374] vs BASE[...279,22146,323,63625,315,1667],
+  pos=3 起发散 + 重复("the the")= 与 -1 mis-route 同签名。→ eager staging 未达捕获 gather。
+- **R3-b slots=16**:fail-closed "active expert working set size 51 exceeds num_slots=16"。
+  prefill 512 token 的 expert 并集=51 ≫ decode top_k=8 ≫ 16 slot。证实 fixed-slot Regime B
+  需 eager-prefill 回退或淘汰(=R4),guard 正确未静默corrupt。
+
+数据流定位:捕获 piece B 的 gather 经 capture_safe_slot_weights 读**持久 log2phy buffer
+固定地址**(moe_comm_method.py:342)。正确性要求 eager seam op 在 piece A replay 与 piece B
+replay 之间把决策写入该 buffer。tokens 错 → 假设:seam op 未真正 eager 跑(疑被捕获进 piece
+成 no-op clone)。已加 SEW_SEAM_PROBE 探针重跑 R3-a 取证(capturing vs eager_staged 计数)。
+
+## 续14 — Option B 三段拆分设计稿 (评审门控)
+- 执行用户 "执行B"。先彻底读 moe_forward 调用链 (代码事实):
+  - AscendFusedMoE.forward(fused_moe.py:610) -> runner.forward -> MoERunner.forward(core:531)
+    -> _forward_entry=torch.ops.vllm.moe_forward (不透明 op) -> _forward_impl -> AscendMoERunner.forward_impl -> layer.forward_impl(fused_moe.py:615)
+  - 决定性事实1: AscendMoERunner(MoERunner) override forward_impl/_forward_impl, 但未 override forward/_select_forward
+    => 三段编排可全落 vllm-ascend (override AscendMoERunner.forward), 不碰 vllm core moe_runner.py。
+  - 决定性事实2: select_experts 在 quant_method.apply 内 (fused_moe.py:690), 即不透明 op 内 => 拆分最难子任务=把 router 提到顶层。
+  - 脚手架已就位: MoEFusedExpertsInput.topk_weights/topk_ids (moe_stage_contracts.py:68) 已预期传入预算 topk。
+- 产出 docs/sew-offload/13-moe-forward-split-design.md (状态: 设计评审中, 未实现)。
+  拓扑: vllm::moe_router(captured) | vllm::moe_offload_stage(splitting/eager) | vllm::moe_mlp(captured)。
+  全程 default-off (VLLM_ASCEND_MOE_OFFLOAD_STAGE_SEAM=0 走 super().forward() 回退)。
+- 5 个待评审决策: ①覆写子类 forward 不碰 core; ②select_experts 外提 B1(topk 注入短路,推荐)/B2/B3; 
+  ③stage 置于 prepare 前; ④首版与 multistream_gate 互斥; ⑤首版仅 _shared_experts is None。
+- 验证矩阵 V-A..V-E; V-D(decode 每步 eager staging probe≠R3 的0行)/V-E(graph dump 顶层节点) 为成败判据。
+- 等用户评审确认后再进 P1。未改任何 vllm core / AscendMoERunner。
+
+## 续15 — P1: moe_router op 落地 (评审通过后)
+- 6 决策拍板: ②=B1(topk 注入短路); ⑥=首版限单卡 identity-prepare; ①③④⑤=默认。
+  - 决策⑥ 依据(代码实测): 标准路径 select_experts 吃 post-prepare logits;AllGather prepare
+    多卡时改写 logits(prepare_finalize.py:354/395-399)。单卡 TP=DP=PCP=EP=1 时 prepare 对
+    logits 恒等(dp_size>1 False;ep all_gather 恒等)=> router-before-prepare 逐位等价。
+    匹配已验证服务命令。多卡(prepare 折进 router op)列后续。
+- 新增 vllm_ascend/ops/fused_moe/moe_router_op.py: 注册 vllm::moe_router(不透明, PrivateUse1)。
+  忠实包装 apply 路径 select_experts 调用(fused_moe.py:244-257), custom_routing_function 钉死 None。
+  fake impl 返回 (num_tokens,top_k) topk_weights(logits.dtype)+topk_ids(int32)。
+- 新增 4 UT(test_graph_compatible_offload.py): registered / forwards_every_arg_1to1(关键字集逐项核)/
+  bit_equivalent_to_direct_select_native(native 路径逐位等价=V-B CPU 半)/ fake_shapes_and_dtypes。
+- 全量 20/20 绿(16 旧 + 4 新)。未接线 runner.forward(P2)。未碰 vllm core / AscendMoERunner。
+
+## 续16 — P2a/P2b: moe_router_indirect + moe_mlp + B1 注入 (主路径前置件)
+- 决策: 三段 op 全用 layer_name 间接查表(_USE_LAYERNAME=False, torch 2.9)。索引安全关键:
+  _encode_layer_name 的 "from_forward_context" 哨兵会自增 moe_layer_index;真实 layer 名查表不增。
+  => P2c seam 入口须解析真实 layer 名一次, 传给三个 op(均不增), 替换单个 moe_forward 索引一致。
+- P2a: moe_router_op.py 新增 vllm::moe_router_indirect(解析 layer, 读 apply 路径同源标量
+  top_k/use_grouped_topk/.../e_score_correction_bias, 用 get_moe_num_logical_experts 同法算
+  num_logical_experts, 委托显式标量核)。custom_routing_function!=None fail-closed。
+- P2b: moe_seam_inject.py(layer_id->topk 注入注册表, moe_mlp 设/清, finally 清)。
+  moe_mlp_op.py 新增 vllm::moe_mlp(解析 layer, 注入 topk, 调与 _moe_forward 同款 runner._forward_impl,
+  finally 清; tuple 返回=带共享专家 fail-closed)。
+  fused_moe.py apply select-site(244-257 后)加 B1 短路: has_injected_topk 则消费注入 topk, 否则原
+  select_experts。注册表空(seam 关)=字节不变。imports: moe_router_op/moe_mlp_op/moe_seam_inject。
+- UT: 29/29 绿(23 + 6 新: mlp registered/注册表默认空/set-peek-clear/设清环绕 forward/异常仍清/
+  带共享专家 fail-closed)。fused_moe 导入 OK, 三 op 全注册。
+- 未碰 vllm core / AscendMoERunner.forward(_select_forward)。P2c 接线待做。
+
+## 续17 — P2c: AscendMoERunner._select_forward 接线三段 seam (主路径, 默认关)
+- 接线点: 覆写 AscendMoERunner._select_forward。config 守卫过 -> 返回 _seam_forward_entry,
+  否则 super()._select_forward()(原 opaque moe_forward 不变)。
+- _seam_config_guards_pass(__init__ 期可查): offload_stage_seam 关 / _shared_experts!=None(决策⑤) /
+  runner.gate!=None(否则 _forward_impl 内重算 logits 致 stale topk) / dp|ep|tp|pcp>1(决策⑥单卡 identity-prepare)
+  任一 -> False。__init__ 顺序已核(moe_config@217/gate@222/_shared_experts@226/layer_name@241 均在 _select_forward@243 前)。
+- _seam_forward_entry: 首调 _resolve_seam_per_layer_guards 解析真实 layer 一次并缓存 _seam_active;
+  失败 -> 永久回退 torch.ops.vllm.moe_forward(与 base 同)。通过 -> moe_router_indirect -> moe_offload_stage
+  (splitting/eager, 返回 topk_ids clone 建数据依赖防 DCE/重排) -> moe_mlp, 三 op 均传真实 self.layer_name。
+- _resolve_seam_per_layer_guards 逐层 fail-closed: custom_routing_function!=None / multistream_overlap_gate /
+  enable_npugraph_ex_static_kernel(moe_layer_index 读者, 须关保索引安全) / zero-expert;
+  通过则缓存 _seam_layer_id + _seam_num_logical_experts(get_moe_num_logical_experts 同法)。
+- 新增 13 UT: select_forward seam 关用 base / seam 开单卡选 seam / 带 shared|gate 回退 /
+  4x 多卡(dp|ep|tp|pcp)回退 / per-layer 守卫 OK 缓存 layer_id+n / 3x fail-closed(custom_routing/
+  multistream/static_kernel) / seam 入口守卫失败永久回退且 3 次全走 moe_forward(_seam_active=False)。
+- 全量 42/42 绿(29 + 13)。未碰 vllm core。NPU 验证(P2d V-C/V-D/V-E)待做。
+
+## 续18 — P2d: NPU4 实测 P2c 三段 seam (Regime A V-C/V-E 决定性通过)
+- 三个根因→修复(全代码事实坐实):
+  1. gate 守卫使 seam 全模型死代码(run1 mis-route pos3): 移除 _seam_config_guards_pass 的
+     `if self.gate is not None: return False`; moe_router_indirect 补 `runner.gate(hidden_states)`
+     (Qwen3 internal-router 传 placeholder logits)。
+  2. Regime A 漏 log2phy 全量 staging(run3 MTE 越界): fused_moe.py:192,362 原 seam-gated 跳过
+     load-time stage_full_residency_slot_plan + per-step seam 全覆写砸回 -1。改 regime-gated:
+     新增 runtime.is_static_residency_regime(n)=(num_slots>=n); Regime A 无条件 load-time 全量 staging
+     + seam op 在 Regime A 是 no-op(EAGER_PASSTHROUGH reason=regime_a); Regime B 才 per-step staging。
+  3. 【主根因】splitting op 返回 clone 破坏固定地址契约(run4 log2phy 128/128 仍崩):
+     moe_offload_stage 原 return topk_ids.clone() → 每次 eager replay 落不同地址,捕获 moe_mlp 读冻结
+     capture-期地址 = stale → MTE DDR out-of-range 507011。改 mutate-in-place+return None
+     (mutates_args=["topk_ids"], 同 unified_attention_with_output 契约),同一 topk_ids 直穿 moe_mlp。
+     call site 不再 reassign。
+- NPU4 实测(r3a_slots128, nonres={2,3,4,5}):
+  - V-C: tokens==BASE 且 pos0-7 全 top-20 logprob 逐位等于 BASE 到 1e-5 (真数值等价)。
+  - load-time fill: offload 层 {2,3,4,5} 全 log2phy_staged=128/128。
+  - V-E: 首次 Replaying aclgraph 后 336 EAGER_PASSTHROUGH = 48 层×7 步, 证 seam 每层每步 eager 跑
+    于捕获 router/mlp piece 间 (R3 此处为 0)。
+- UT 45/45 绿(+ is_static_residency_regime predicate + Regime-A no-op; stage op 改 None-return 契约,
+  4 个 stage UT 同步更新)。脚本 tools/sew_offload/run_p2d_seam_validation.sh (DEV=4)。
+- 未碰 vllm core / scheduler / model_runner 主路径。NPU4 释放无泄漏。
+- 下一步: Regime B (V-D 真 per-step staging) 需 R4 eviction (prefill active 并集 > num_slots
+  触发 working-set 守卫), 独立下游工作。
+
+## 续19 — P2d V-D: 真 Regime B per-step staging 达成 + Tier-1 假设证伪 (NPU4)
+- 续18 "V-D 需 R4 eviction" 表述被代码事实纠正。两处误判:
+  1. LRU 淘汰早已存在 (slot_bank.py:122 _lru_evictable_slot); 缺的从来不是淘汰。
+  2. 真根因: 三路 seam 的 moe_offload_stage 无条件调 stage_fixed_slot_plan (fused_moe.py:599),
+     从不查 decide_layered_path → prefill ~51 active 直撞 runtime.py:538 working-set 守卫。
+- Tier-1 修法 (seam 接 decide_layered_path, prefill 高 fanout 走 FULL_WEIGHT_PATH eager 原始权重)
+  在架构上对 offload 层【不可行】: 子代理坐实 fused_moe.py:107-118,153-157 —— 非驻留层 w13/w2 在
+  load 时被搬到 CPU, 只 gate 在非驻留、与 release_original_expert_weights 标志无关。offload 层 NPU 上
+  只有 num_slots 份 slot 权重、无完整副本。decide_layered_path 的 FULL_WEIGHT_PATH 用 "未释放" 当
+  "NPU 可用" 是潜伏 bug; 我的改动首次点燃 → slots=16 run 崩 "weight is on cpu" (grouped matmul
+  吃到 CPU w13)。已回退该改动。
+- 正确框架: offload 层任何计算(prefill+decode)只能过 slot bank, 单次 forward 最多 num_slots 专家。
+  Regime B 分两子区:
+  - B1 (每次 forward 的 active 并 ≤ num_slots < n): prefill(并~51)与 decode(≤8)各自 stage 进 slots,
+    全程 NPU, 无需 FULL_WEIGHT —— 纯配置即可 (num_slots ≥ 单次最大 fanout 且 < n)。
+  - B2 (num_slots ≪ prefill 并集): prefill 必须分波流式 (每波 stage ≤num_slots + partial grouped
+    matmul + 累加)。phase_split.py 现成 execute_phased_mlp/plan_hit_miss_phases 已接 live 路径, 但
+    现仅 hit/miss 二相、非容量分波, 需新 capacity-bounded planner。
+- V-D NPU 实测 (B1, NPU4, num_slots=96<n=128, nonres={2,3,4,5}):
+  - ledger 算得 slot_bank 持 96 专家、host_store 持 128 → 32 专家永不驻留 (真 Regime B)。
+  - staging 序列 (SEW_SEAM_PROBE, EAGER_STAGED 共 40): 2 轮 warmup(n_active=8) → 真 prefill 每层并集
+    n_active=51/45/43/39 (≤96 全 staged、n_mapped==n_active、跑 NPU slots) → 7 解码步×4 层=28 次
+    per-step staging(n_active=8) = V-D 核心。
+  - 数值等价: tokens==BASE [3555,525,279,22146,323,63625,315,1667]; pos0-7 全 top-20 logprob 逐位
+    等于 BASE 到 1e-5 (pos0 3555:-0.92324、pos3 22146:-1.44021、pos5 63625:-0.08265 两侧一字不差)。
+- UT 47/47 绿 (stage op 回干净无条件 staging + 清晰 fail-closed; 新增 B1 fit→stage / B2 exceed→
+  fail-closed 两例)。脚本新增 run_seam b1_slots96 96。NPU4 跑后 "No process in device" 无泄漏。
+- 未碰 vllm core / scheduler / model_runner 主路径。
+- 下一步: B2 容量分波 prefill (真 HBM 节省故事) + V4 resident 全路径回归。
+
+## 续20 — 下一步设计源码核对（只读分析）
+- 已对照源码复核 V-D 后的设计边界：
+  - `slot_bank.py` 已有 READY slot LRU eviction；B2 的缺口不是淘汰，而是单次 active 并集大于 `num_slots` 时缺少 capacity-bounded wave execution。
+  - `runtime.py` 的 `prepare_fixed_slot_plan`/`stage_fixed_slot_plan` 仍以“本次调用 active experts 必须一次装入 slot bank”为不变量；B1 正是满足该不变量，B2 必须改为多波。
+  - `moe_offload_stage_op.py` 当前正确契约是 side-effect-only、`returns None`、`mutates_args=["topk_ids"]`；顶层 docstring 与 `moe_mlp_op.py` 仍残留“clone”旧叙述，后续应随设计文档一并修正。
+  - offload 层 processed `w13/w2` 在 load 后会被搬到 CPU；因此 fixed-slot 非驻留层没有安全的 FULL_WEIGHT_PATH，`decide_layered_path` 里“未 release 即 full weights available”的旧判定应先收口为 device-resident 判定或对 non-resident offload 层禁用。
+  - `phase_split.py` 已有 post-dispatch token slicing / phase group_list / scatter 等价性底座，但现有 planner 是 hit/miss 二相，不是容量分波；B2 应复用执行骨架，不应直接复用 planner。
+- 初步建议顺序：先做 V4 resident/full-path 回归 + FULL_WEIGHT_PATH guard 清债，再启动 B2 prefill capacity waves。B2-MVP 只覆盖 eager prefill active 并集 > slots；decode 仍走已验证 B1 seam。 
+
+## 续21 — P0: B1 vs 全驻留延迟实测 + decode 瓶颈归因 (NPU4, Qwen3-30B-A3B)
+背景: 续19 只证 B1 数值正确, 无延迟数据。P0 用差分法补测 (T(1)≈TTFT, TPOT=(T(N)-T(1))/(N-1),
+MAXTOK=32 REPS=5 取中位数), seam 内 env-gated synchronize 包夹打 STAGE_MS。不碰主路径。
+- 探针/脚本 (全 env-gated, 默认关, 可逆):
+  - moe_offload_stage_op.py: SEW_SEAM_PROBE 分支加 torch.npu.synchronize 包夹 + STAGE_MS。
+  - run_graph_compat_capture_probe.py: --latency/--latency-repeats 差分 TTFT/TPOT/DECODE_TPS。
+  - tools/sew_offload/run_p0_latency.sh: base(offload OFF) + b1_slots96。UT 47/47 绿。
+- 宏观实测 (base 全驻留 vs B1 slots=96, nonres={2,3,4,5}):
+  - TTFT: 190ms → 319ms (+129ms, +68%)
+  - TPOT: 44.5ms → 73.7ms (+29.2ms, +66%)
+  - decode 吞吐: 22.5 → 13.6 tok/s (−40%)
+- 微观归因 (decode staging 双峰分布, 876 次调用):
+  - 92% (806) <2ms = 命中(slot 已驻留, 仅 bookkeeping + 诊断 synchronize 开销)。
+  - 8% (67) ≥10ms = 真 miss 同步 H2D, sum=6062ms, 单次均~90ms。
+  - mean=7.94ms; 4 offload 层 × 7.94 = 31.8ms ≈ 实测 TPOT delta 29.2ms。
+    ⇒ decode 变慢【几乎全部】由 seam 同步 per-step staging 解释, 即 T_overlap=0、miss 的 H2D
+    全额砸在关键路径上 (实锤了之前"offload 现在一定比全驻留慢"的判断)。
+  - prefill-class (n_active>8) n=48 mean=246ms, max=3601ms(首调用冷启动离群), 解释 TTFT +129ms。
+- 方向数据支撑 (硬数):
+  - P3 热专家钉死: 砍 8% miss 率即直接抹掉 ~6062ms 大头, 高杠杆已被数据坐实。
+  - P1 overlap: 单 miss ~90ms H2D 若与计算重叠即移出关键路径; 命中下限 ~4×1ms=4ms/步,
+    ⇒ TPOT 惩罚 29ms 里约 25ms 是可被 overlap/pinning 回收的 miss-H2D。
+  - 注意: 本测为 ASYNC_LOAD=0 同步路径 = overlap 能回收的【上界基线】(worst case)。
+- NPU4 跑后 "No running processes" 无泄漏。未碰 router/主路径。
+
+## 续22 — P0 修正: 正确基线是 eager 单算子 offload (非全驻留), CPU offload 大小固定
+续21 用全驻留作基线方法论有误(把 offload 代价与图捕获收益混在一起)。正确对照: **同 CPU offload
+footprint 下 eager 单算子 vs B1 图捕获**, 隔离图捕获本身贡献。NPU4 跑 eager-singleop(slots=96,
+nonres={2,3,4,5}, enforce_eager, STAGE_SEAM=0, GRAPH_COMPATIBLE=0)。
+- HBM footprint 三跑实测(model_runner_v1 "Loading model weights took"): base 全驻留 56.90GB /
+  B1 55.78GB / eager-singleop 55.78GB ⟹ **B1 与 eager 完全同 footprint**, 唯一变量=图捕获。
+- slots=96 显存拆解(每专家 9MiB bf16=3×2048×768×2B): offload 4 层 slot_bank=3.375GiB +
+  resident 44 层全权重 49.5GiB = 52.875GiB(全驻留 54GiB, 省 1.125GiB=4层×32逐出×9MiB);
+  host_store on CPU=4.5GiB。实测 55.78 vs 56.90 差 1.125GB 与账本逐字吻合, 印证 offload 层 release NPU 原件。
+- 三跑延迟(MAXTOK=32 REPS=5):
+  | 配置 | TTFT | TPOT | decode tok/s | 图捕获 |
+  | base 全驻留      | 190ms | 44.5ms  | 22.5 | 是 |
+  | B1 offload       | 319ms | 73.7ms  | 13.6 | 是 |
+  | eager 单算子 off | 233ms | 201.3ms | 4.97 | 否 |
+- **核心结论(用户要的对照)**: 同 HBM footprint, B1 图捕获 decode 比 eager 单算子 offload **快 2.73×**
+  (TPOT 201.3→73.7ms; tok/s 4.97→13.6)。这是"图兼容 offload"的真实贡献。
+- 机理: eager TPOT 201 ≫ base 44.5 = 48 层算子逐个 dispatch 的 launch overhead; 图捕获塌掉它。
+  B1=图捕获 launch 已塌(44.5) + 29ms 同步 staging tax(续21 归因)。
+- eager run 真实性: 920 条 SEW_PROBE branch=EAGER(n_active=8)、0 CAPTURE_SAFE ⟹ 真单算子 offload 非退化。
+- TTFT B1(319)>eager(233): B1 prefill 含 seam staging + 首次 captured-graph replay 建立; decode 决定稳态吞吐。
+- 探针 env-gated 默认关; 未碰 router/主路径。NPU4 跑后 shutdown complete 无泄漏。
+
+## 续23 — P0 干净复测 (去掉 synchronize 混淆) + prefill/decode 非对称归因
+续22 的 B1 跑带 SEW_SEAM_PROBE=1 → seam 内 torch.npu.synchronize 包夹只拖慢 B1、eager 没带 =
+混淆变量。新脚本 run_p0_clean_compare.sh 两跑均【无探针】, 唯一变量=enforce_eager(图捕获开关)。
+逐项核对两跑 non-default args 完全一致: prompt="Briefly explain mixture-of-experts models.",
+max_num_seqs=1(并发1), max_tokens=32, max_model_len=512, kv=256MiB, bf16; footprint 均 55.78GB。
+- 干净三量 (slots=96, nonres={2,3,4,5}):
+  | 配置 | TTFT(prefill) | TPOT(单步decode) | decode tok/s |
+  | eager 单算子 off | 242.8ms | 212.3ms | 4.71 |
+  | B1 captured off  | 308.0ms | 69.1ms  | 14.5 |
+  | 比值 | B1 +27%(劣) | **B1 快 3.07×** | 3.07× |
+- 混淆量化: B1 probed→clean: TPOT 73.7→69.1(−4.6ms/6%), TTFT 319→308(−11ms)。去混淆后 B1 更优
+  (decode 倍数 2.73→3.07×)。eager probed/clean 一致(201/212 在 run jitter 内)= eager 本无混淆。
+- 差分法语义澄清: T1(max_tokens=1)=一次 prefill forward(首 token 出自 prefill 末位 logits、无独立
+  decode forward)=TTFT; TPOT=(TN-T1)/(N-1)=一次 decode forward。⟹ TTFT 量 prefill、TPOT 量单步 decode。
+- **用户问题答 (为何 decode 降、prefill 升)**:两阶段在 ACLGraph 下命运不同——
+  1. decode 固定形状(b=1,s=1)【被捕获】: 捕获塌掉 48 层逐算子 launch 开销, eager 212→captured 69ms,
+     省的 143ms 是纯 launch 消除 = 图兼容 offload 核心价值。
+  2. prefill 变长【不被捕获】: 两配置 prefill 都跑 eager。B1 prefill 还多过 seam(unique().cpu() D2H +
+     同步 staging ~178 专家并集 51/45/43/39), 且 warmup/上一次 decode 用 LRU 把这些 prefill 专家挤出
+     96 槽 → 每次新 prefill 重搬 → +65ms vs eager prefill。⟹ prefill 无捕获补偿、只承担 staging 额外开销。
+  证据: V-D probed run 实测 prefill EAGER_STAGED n_active=51/45/43/39(eager)+ decode 捕获 replay。
+- 端到端(32 token): B1 ≈ 308+31×69.1=2450ms vs eager ≈ 242.8+31×212.3=6824ms ⟹ B1 端到端快 2.79×。
+  输出越长 decode 占比越大 B1 越赢; 极短输出(TTFT 主导)B1 略亏。
+- ⟹ P2(预测/重叠预取)价值被指明: prefill 那 65ms TTFT 退化=prefill 专家被 decode 挤掉每次重搬,
+  prefill 阶段提前/重叠 staging(B2 分波+异步)可压回。NPU4 两跑后 "No process in device" 无泄漏。
+
+## 续24 — B2 容量分波 prefill: 实现 + NPU 验证 (用户选独立路径, 分小步)
+目标: 让服务命令真实工作点 (num_slots 小 ≪ prefill 并集) 能跑 offload, 不再 fail-closed。
+B2 分波只在 eager prefill; decode/现有 prefill/主路径全不变; env-gated 默认关。
+- 架构发现: B2 不能只在 MLP 执行器层做。offload prefill 三处"单遍全专家"假设 + fail-closed 在
+  MLP 前 (prepare_fixed_slot_plan runtime.py:538)。token_dispatch 用 log2phy[topk_ids] 单遍重排,
+  51 逻辑专家映射不到 8 槽。⇒ 独立 B2 prefill 路径: 每波局部 dispatch+stage+matmul+combine+累加。
+- 数学 keystone (CPU, fp32): token MoE 输出=Σ_{e∈topk} gate·expert_e, 加法可结合 ⇒ 按专家分不相交波
+  +每波掩码+跨波累加 == 单遍。多组测试逐位==单遍到 1e-6。
+- 实现 (全 CPU 单测先行, 默认关):
+  - phase_split: plan_capacity_bounded_phases (⌈N/slots⌉ 波) + WaveStager 两段式 issue/wait
+    (overlap-ready, buffer_count, prefetch_depth 软件流水, 现实现串行) + build_b2_wave_routing
+    (offload 路径 physical_topk_ids -1→slot0 + 该位权重置0; offload 不自动 zero 故显式). 59 例绿。
+  - config/envs: VLLM_ASCEND_MOE_OFFLOAD_B2_WAVE_PREFILL (默认0) + config.b2_wave_prefill。
+  - runtime.should_use_b2_wave_prefill (config∧prefill∧offload固定槽∧fanout>num_slots). 7 例绿。
+  - moe_comm_method: fused_experts 顶部 _maybe_run_b2_wave_prefill 早分支 (默认关零开销, gate 命中才进,
+    否则 return None 走原路径)。_run_b2_wave_prefill 切波 + 每波 prepare_fixed_slot_plan(wave) stage +
+    _run_b2_single_wave (log2phy remap + build_b2_wave_routing 掩码 + 现有 dispatch/matmul/combine) +
+    累加 routed_out。全 moe_offload UT 262 passed/1 skipped 无回归。
+- NPU5 验证 (eager 非 seam, num_slots=8 ≪ 并集51, nonres={2,3,4,5}):
+  - B2 真触发: WAVE_RUN layer2 51→7波 / layer3 45→6 / layer4 43→6 / layer5 39→5
+    (num_slots=8 远小于 51 = B1 必 fail-closed 的工作点, B2 正常跑)。
+  - tokens 8/8 逐位==BASE; 全 8 位 top-1 一致。
+  - 但 logprob【非】1e-5 位等: top 档 ~0.08-0.16 nat 漂移 (pos6 尾部 token 0.42)。
+    原因(非 bug): captured-B1 跑【同一次】slot-packed matmul→逐位等; B2【重结合】单次 matmul 为
+    7 个 bf16 求和波, bf16 加法非结合 ⇒ 必然漂移。CPU keystone 已证 fp32 算法精确 1e-6; NPU 漂移
+    纯 bf16 reduction order, 量级 ~0.5-1%, top-1 margin~1nat 远大于漂移 ⇒ 无 token 翻转。
+  - 结论: B2 正确性 = "fp32 精确 + NPU top-1 全保持 + 漂移与 bf16 重结合一致", 是 wave-streaming
+    把单次 reduction 拆多波的固有代价, 非缺陷。NPU5 无泄漏。
+- 下一步(可选): fp32/强制单波进一步隔离漂移; B2-with-seam 图捕获集成; autoconfig 接线; README。

@@ -1,0 +1,2 @@
+cfg1_fullresid_aclgraph weights=56.9001 GB peak_hbm=59195 MB
+cfg2_fullresid_eager weights=56.9001 GB peak_hbm=59165 MB

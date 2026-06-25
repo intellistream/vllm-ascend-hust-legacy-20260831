@@ -46,6 +46,15 @@ class MoeOffloadConfig:
     # can record the MoE region; the data-dependent decision + H2D staging is
     # done eager before replay. Default off => current eager-only behavior.
     graph_compatible_offload: bool = False
+    # Regime B path ①: per-step staging seam (vllm::moe_offload_stage splitting
+    # op between router and grouped MLP). Supports num_slots < n. When on, the
+    # load-time full-residency hook is skipped for offloaded layers and staging
+    # happens per-step eager between captured pieces. Default off => Regime A.
+    offload_stage_seam: bool = False
+    # Regime B "B2": wave-streamed prefill when eager-prefill active union exceeds
+    # num_slots (capacity-bounded waves instead of fail-closed). Prefill+eager only;
+    # decode keeps the single-wave B1 path. Default off.
+    b2_wave_prefill: bool = False
     # P1-C scaffold: optional profiling-suite plan for stable grouped compute buckets.
     compute_bucket_plan_path: str = ""
     # Non-offload MoE GroupedMatmul diagnostics and plan inputs.
@@ -75,6 +84,8 @@ class MoeOffloadConfig:
             fanout_threshold=envs.VLLM_ASCEND_MOE_OFFLOAD_FANOUT_THRESHOLD,
             phase_split_enabled=envs.VLLM_ASCEND_MOE_OFFLOAD_PHASE_SPLIT,
             graph_compatible_offload=envs.VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE,
+            offload_stage_seam=envs.VLLM_ASCEND_MOE_OFFLOAD_STAGE_SEAM,
+            b2_wave_prefill=envs.VLLM_ASCEND_MOE_OFFLOAD_B2_WAVE_PREFILL,
             compute_bucket_plan_path=envs.VLLM_ASCEND_MOE_COMPUTE_BUCKET_PLAN_PATH,
             gmm_trace_path=envs.VLLM_ASCEND_MOE_GMM_TRACE_PATH,
             gmm_profile_path=envs.VLLM_ASCEND_MOE_GMM_PROFILE_PATH,

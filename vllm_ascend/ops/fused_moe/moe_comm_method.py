@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -139,6 +140,14 @@ class MoECommMethod(ABC):
             e0 = pipeline_profiler.record()  # before Stage T (offload plan / transfer)
 
         before_dispatch_evt = torch.npu.current_stream().record_event()
+
+        # B2 wave-streamed prefill early branch. Only does extra work when the
+        # b2_wave_prefill config is on AND offload is active; otherwise this is a
+        # couple of cheap attribute checks and the normal path below is untouched.
+        _b2_out = self._maybe_run_b2_wave_prefill(fused_experts_input, before_dispatch_evt)
+        if _b2_out is not None:
+            return _b2_out
+
         fused_experts_input = self._maybe_apply_moe_offload_plan(fused_experts_input)
 
         if do_pipe_profile:
@@ -225,6 +234,174 @@ class MoECommMethod(ABC):
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+    def _maybe_run_b2_wave_prefill(self, fused_experts_input, before_dispatch_evt):
+        """B2 wave-streamed prefill. Returns a FusedExpertsResult when the B2 gate
+        fires, else None (caller continues the normal path).
+
+        Splits the eager-prefill active expert union into capacity-bounded waves
+        of <= num_slots; per wave it stages that wave's experts into the fixed slot
+        bank, remaps topk_ids through the wave's log2phy (non-wave -> -1), zeroes
+        non-wave weights (build_b2_wave_routing), runs the existing dispatch ->
+        matmul -> combine on the staged slot weights, and accumulates the combined
+        outputs. The accumulation reproduces the full single-pass MoE output
+        (proven by the wave-accumulate keystone). Prefill+eager only; decode and
+        every non-B2 layer return None here and keep their existing path.
+        """
+        offload = fused_experts_input.offload
+        if offload is None or not offload.enabled:
+            return None
+        runtime = get_moe_offload_runtime()
+        if not runtime.config.b2_wave_prefill:
+            return None
+        # Never run during graph capture (data-dependent host work); prefill is
+        # eager so this is naturally satisfied, but guard explicitly.
+        if _is_current_graph_capturing():
+            return None
+
+        hidden_states = fused_experts_input.hidden_states
+        is_prefill = hidden_states.shape[0] > 1
+        active_experts = tuple(
+            int(e) for e in torch.unique(fused_experts_input.topk_ids.detach().cpu()).tolist()
+        )
+        if not runtime.should_use_b2_wave_prefill(
+            layer_id=offload.layer_id,
+            active_expert_count=len(set(active_experts)),
+            is_prefill=is_prefill,
+        ):
+            return None
+
+        return self._run_b2_wave_prefill(
+            fused_experts_input=fused_experts_input,
+            active_experts=active_experts,
+            before_dispatch_evt=before_dispatch_evt,
+        )
+
+    def _run_b2_wave_prefill(self, *, fused_experts_input, active_experts, before_dispatch_evt):
+        from vllm_ascend.moe_offload.phase_split import build_b2_wave_routing
+
+        runtime = get_moe_offload_runtime()
+        offload = fused_experts_input.offload
+        num_slots = int(runtime.config.num_slots)
+        device = fused_experts_input.topk_ids.device
+        # Partition the active union into capacity-bounded waves of <= num_slots.
+        uniq = sorted(set(int(e) for e in active_experts))
+        waves = [tuple(uniq[s : s + num_slots]) for s in range(0, len(uniq), num_slots)]
+        if os.environ.get("SEW_B2_PROBE") or os.environ.get("SEW_OFFLOAD_PROBE"):
+            print(
+                f"SEW_B2 branch=WAVE_RUN layer={offload.layer_id} "
+                f"n_active={len(uniq)} num_slots={num_slots} n_waves={len(waves)}",
+                flush=True,
+            )
+
+        accumulated = None
+        last_group_list_type = None
+        last_expert_tokens = None
+        before_combine_evt = before_dispatch_evt
+        for wave_index, wave in enumerate(waves):
+            # Stage this wave's <= num_slots experts; prepared.log2phy maps these
+            # logical experts to physical slot positions and all others to -1.
+            prepared = runtime.prepare_fixed_slot_plan(
+                layer_id=offload.layer_id,
+                active_experts=wave,
+                num_logical_experts=offload.num_logical_experts,
+                device=device,
+            )
+            prepared.validate_backend_ready(expected_device_type=offload.expected_device_type)
+            wave_result = self._run_b2_single_wave(
+                fused_experts_input=fused_experts_input,
+                prepared=prepared,
+            )
+            before_combine_evt = wave_result.before_combine_evt
+            last_group_list_type = wave_result.group_list_type
+            last_expert_tokens = wave_result.expert_tokens
+            if accumulated is None:
+                accumulated = wave_result.routed_out
+            else:
+                accumulated = accumulated + wave_result.routed_out
+
+        if accumulated is None:  # no waves (shouldn't happen under the gate)
+            return None
+        return FusedExpertsResult(
+            routed_out=accumulated,
+            before_dispatch_evt=before_dispatch_evt,
+            before_combine_evt=before_combine_evt,
+            group_list_type=last_group_list_type,
+            expert_tokens=last_expert_tokens,
+        )
+
+    def _run_b2_single_wave(self, *, fused_experts_input, prepared):
+        """Run dispatch -> matmul -> combine for one B2 wave on staged slot weights.
+
+        ``prepared`` is the slot plan for this wave: ``prepared.log2phy`` maps the
+        wave's logical experts to physical slot positions and all others to -1.
+        We remap topk_ids through it, then ``build_b2_wave_routing`` makes -1 safe
+        (-> slot 0) and zeroes those weights so non-wave (token,expert) pairs add 0
+        in combine. Everything else reuses the existing dispatch/matmul/combine.
+        """
+        from vllm_ascend.moe_offload.phase_split import build_b2_wave_routing
+
+        physical_topk_ids = prepared.log2phy[fused_experts_input.topk_ids]
+        safe_ids, masked_weights = build_b2_wave_routing(
+            physical_topk_ids, fused_experts_input.topk_weights
+        )
+
+        wave_input = MoEFusedExpertsInput(
+            hidden_states=fused_experts_input.hidden_states,
+            topk_weights=masked_weights,
+            topk_ids=safe_ids,
+            weights=MoEWeights(
+                w1=prepared.w1,
+                w2=prepared.w2,
+                w1_bias=fused_experts_input.weights.w1_bias,
+                w2_bias=fused_experts_input.weights.w2_bias,
+                w1_scale=fused_experts_input.weights.w1_scale,
+                w2_scale=fused_experts_input.weights.w2_scale,
+                w1_scale_bias=fused_experts_input.weights.w1_scale_bias,
+                w2_scale_bias=fused_experts_input.weights.w2_scale_bias,
+                w1_offset=fused_experts_input.weights.w1_offset,
+                w2_offset=fused_experts_input.weights.w2_offset,
+            ),
+            routing=MoERoutingParams(
+                expert_map=None,
+                global_redundant_expert_num=fused_experts_input.routing.global_redundant_expert_num,
+                mc2_mask=fused_experts_input.routing.mc2_mask,
+                apply_router_weight_on_input=fused_experts_input.routing.apply_router_weight_on_input,
+                log2phy=None,  # already remapped into safe_ids above
+                physical_expert_count=prepared.physical_expert_count,
+                pertoken_scale=fused_experts_input.routing.pertoken_scale,
+            ),
+            quant=fused_experts_input.quant,
+            activation=fused_experts_input.activation,
+            need_trans=fused_experts_input.need_trans,
+            dynamic_eplb=fused_experts_input.dynamic_eplb,
+            offload=fused_experts_input.offload,
+            trace_layer_id=fused_experts_input.trace_layer_id,
+            trace_num_logical_experts=fused_experts_input.trace_num_logical_experts,
+        )
+
+        token_dispatch_output = self.token_dispatcher.token_dispatch(
+            token_dispatch_input=build_token_dispatch_input(fused_experts_input=wave_input)
+        )
+        mlp_compute_input = build_mlp_compute_input(
+            fused_experts_input=wave_input,
+            token_dispatch_output=token_dispatch_output,
+            use_fusion_ops=self.use_fusion_ops,
+            compute_bucket_decision=None,
+        )
+        mlp_output = self._apply_mlp(mlp_compute_input)
+        before_combine_evt = torch.npu.current_stream().record_event()
+        routed_out = self.token_dispatcher.token_combine(
+            hidden_states=mlp_output,
+            combine_metadata=token_dispatch_output.combine_metadata,
+        )
+        return FusedExpertsResult(
+            routed_out=routed_out,
+            before_dispatch_evt=before_combine_evt,
+            before_combine_evt=before_combine_evt,
+            group_list_type=token_dispatch_output.group_list_type,
+            expert_tokens=token_dispatch_output.group_list,
+        )
 
     def _maybe_plan_phase_split(
         self,
@@ -339,6 +516,17 @@ class MoECommMethod(ABC):
         # (eager, no capture) is unchanged.
         if runtime.config.graph_compatible_offload and _is_current_graph_capturing():
             capture_weights = runtime.capture_safe_slot_weights(layer_id=offload.layer_id)
+            if os.environ.get("SEW_OFFLOAD_PROBE"):
+                buf = runtime.log2phy_buffer(offload.layer_id)
+                # NOTE: no .item()/.sum() — device->host sync is forbidden during
+                # capture (107027). Log shape/id only, never read tensor values.
+                print(
+                    f"SEW_PROBE branch=CAPTURE_SAFE layer={offload.layer_id} "
+                    f"capture_weights_none={capture_weights is None} "
+                    f"buf_numel={None if buf is None else buf.numel()} "
+                    f"buf_id={None if buf is None else id(buf)}",
+                    flush=True,
+                )
             if capture_weights is not None:
                 return self._with_prepared_slot_weights(fused_experts_input, capture_weights)
             return fused_experts_input
@@ -346,6 +534,33 @@ class MoECommMethod(ABC):
         active_experts = tuple(
             int(expert_id) for expert_id in torch.unique(fused_experts_input.topk_ids.detach().cpu()).tolist()
         )
+        # B2 (wave-streamed prefill) detection — PROBE ONLY at this step. Mirrors
+        # the prefill/decode classifier (hidden_states.shape[0] > 1 == prefill).
+        # When the gate fires we only emit a marker; the path is unchanged (still
+        # the existing fail-closed / slot-cache flow below). The real wave path is
+        # wired in a following step. Keeps behavior identical while letting NPU
+        # runs confirm the gate fires where expected (num_slots=8, fanout>8).
+        is_prefill = fused_experts_input.hidden_states.shape[0] > 1
+        if runtime.should_use_b2_wave_prefill(
+            layer_id=offload.layer_id,
+            active_expert_count=len(set(active_experts)),
+            is_prefill=is_prefill,
+        ):
+            if os.environ.get("SEW_B2_PROBE") or os.environ.get("SEW_OFFLOAD_PROBE"):
+                print(
+                    f"SEW_B2 branch=GATE_FIRES layer={offload.layer_id} "
+                    f"n_active={len(set(active_experts))} num_slots={runtime.config.num_slots} "
+                    f"is_prefill={is_prefill} (probe-only, path unchanged)",
+                    flush=True,
+                )
+        if os.environ.get("SEW_OFFLOAD_PROBE"):
+            print(
+                f"SEW_PROBE branch=EAGER layer={offload.layer_id} "
+                f"capturing={_is_current_graph_capturing()} "
+                f"graph_compat={runtime.config.graph_compatible_offload} "
+                f"n_active={len(set(active_experts))}",
+                flush=True,
+            )
         use_slot_cache_path = True
         if runtime.should_use_layered_runtime:
             decision = runtime.decide_layered_path(

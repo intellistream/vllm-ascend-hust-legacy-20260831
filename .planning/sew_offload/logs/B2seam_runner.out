@@ -1,0 +1,19 @@
+[b2] BASE (offload OFF, eager) -> .planning/sew_offload/logs/B2_base.log
+OUTPUT_TOKENS [3555, 525, 279, 1376, 6813, 315, 1741, 4119]
+[b2] B2 waves num_slots=8 nonres={2,3,4,5} eager -> .planning/sew_offload/logs/B2_slots8.log
+[b2] OK: OUTPUT_TOKENS [3555, 525, 279, 1376, 6813, 315, 1741, 4119]
+[b2] WAVE_RUN markers: 4
+Processed prompts:   0%|          | 0/1 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s](EngineCore pid=1364585) SEW_B2 branch=WAVE_RUN layer=2 n_active=51 num_slots=8 n_waves=7
+(EngineCore pid=1364585) SEW_B2 branch=WAVE_RUN layer=3 n_active=45 num_slots=8 n_waves=6
+(EngineCore pid=1364585) SEW_B2 branch=WAVE_RUN layer=4 n_active=43 num_slots=8 n_waves=6
+(EngineCore pid=1364585) SEW_B2 branch=WAVE_RUN layer=5 n_active=39 num_slots=8 n_waves=5
+[b2] BASE captured (offload OFF, ACLGraph) -> .planning/sew_offload/logs/B2_base_captured.log
+OUTPUT_TOKENS [3555, 525, 279, 22146, 323, 63625, 315, 1667]
+[b2] B2+seam captured num_slots=8 nonres={2,3,4,5} -> .planning/sew_offload/logs/B2_seam_slots8.log
+[b2] seam OK: OUTPUT_TOKENS [3555, 525, 279, 1376, 6813, 315, 1741, 4119]
+[b2] seam WAVE_RUN: 4  b2_defer: 4  CAPTURING: 48
+(EngineCore pid=1369083) SEW_B2 branch=WAVE_RUN layer=2 n_active=51 num_slots=8 n_waves=7
+(EngineCore pid=1369083) SEW_B2 branch=WAVE_RUN layer=3 n_active=45 num_slots=8 n_waves=6
+(EngineCore pid=1369083) SEW_B2 branch=WAVE_RUN layer=4 n_active=43 num_slots=8 n_waves=6
+(EngineCore pid=1369083) SEW_B2 branch=WAVE_RUN layer=5 n_active=39 num_slots=8 n_waves=5
+[b2] DONE — eager: B2_base vs B2_slots8; captured: B2_base_captured vs B2_seam_slots8

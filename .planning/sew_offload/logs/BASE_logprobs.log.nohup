@@ -1,0 +1,2 @@
+[base try=1] NPU5 free — launching baseline (no offload)
+[base try=1] non-OOM exit on NPU5 — stopping for inspection

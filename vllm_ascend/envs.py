@@ -188,6 +188,33 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE": lambda: bool(
         int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_GRAPH_COMPATIBLE", "0"))
     ),
+    # Regime B path ①: insert the vllm::moe_offload_stage splitting op between the
+    # router and the grouped MLP so the data-dependent active-set staging runs
+    # eager between two captured pieces (per-step, supports num_slots < n). When
+    # on, the load-time full-residency hook is skipped for offloaded layers.
+    # Default off => Regime A (load-time full residency) behavior is unchanged.
+    "VLLM_ASCEND_MOE_OFFLOAD_STAGE_SEAM": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_STAGE_SEAM", "0"))
+    ),
+    # Regime B "B2": wave-streamed prefill. When an offloaded layer's eager-prefill
+    # active expert union exceeds num_slots, run the MoE MLP in capacity-bounded
+    # waves (each <= num_slots experts: stage -> partial grouped matmul -> combine
+    # -> accumulate) instead of failing closed. Prefill-only + eager-only; decode
+    # still uses the single-wave B1 path. Default off => B1/fail-closed behavior
+    # is unchanged.
+    "VLLM_ASCEND_MOE_OFFLOAD_B2_WAVE_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_B2_WAVE_PREFILL", "0"))
+    ),
+    # Autoconfig data-plane selector for --ascend-moe-offload-gb. Default (0) wires
+    # the vLLM PrefetchOffloader (eager-only, the legacy service path). When 1,
+    # autoconfig instead arms the SEW graph-compatible data plane: it enables
+    # GRAPH_COMPATIBLE + STAGE_SEAM + B2_WAVE_PREFILL and does NOT wire
+    # PrefetchOffloader (which cannot be ACLGraph-captured on NPU), so the service
+    # command can drop --enforce-eager and get captured-decode speedup with B2
+    # wave-streamed prefill at a small slot budget.
+    "VLLM_ASCEND_MOE_OFFLOAD_SEW_DATAPLANE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MOE_OFFLOAD_SEW_DATAPLANE", "0"))
+    ),
     # MVP-D.9 verification: optional JSONL path for cross-process profiling artifacts.
     "VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH": lambda: os.getenv("VLLM_ASCEND_MOE_OFFLOAD_PROFILE_PATH", ""),
     # Non-offload MoE GroupedMatmul trace path. Records grouped dispatch shapes

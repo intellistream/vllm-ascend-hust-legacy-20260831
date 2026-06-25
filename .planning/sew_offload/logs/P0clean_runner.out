@@ -1,0 +1,7 @@
+[p0-clean] B1 captured offload (no probe) -> .planning/sew_offload/logs/P0clean_b1_slots96.log
+(EngineCore pid=1293748) INFO 06-18 06:30:36 [model_runner_v1.py:3064] Loading model weights took 55.7751 GB
+LATENCY case=p0clean_b1 n_tokens=32 reps=5 TTFT_MS=307.95 TPOT_MS=69.083 DECODE_TPS=14.48 T1_S=0.3080 TN_S=2.4495
+[p0-clean] eager single-op offload (no probe) -> .planning/sew_offload/logs/P0clean_eager_slots96.log
+(EngineCore pid=1297495) INFO 06-18 06:33:59 [model_runner_v1.py:3064] Loading model weights took 55.7751 GB
+LATENCY case=p0clean_eager n_tokens=32 reps=5 TTFT_MS=242.84 TPOT_MS=212.285 DECODE_TPS=4.71 T1_S=0.2428 TN_S=6.8237
+[p0-clean] DONE

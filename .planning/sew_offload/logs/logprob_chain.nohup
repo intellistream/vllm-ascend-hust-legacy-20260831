@@ -1,0 +1,6 @@
+[race-sew-eager try=1] NPU5 at 5% (<15%) — launching (SEW-only, NoopOffloader)
+[race-sew-eager try=1] WON — engine loaded
+[chain] eager done rc=0 — starting baseline
+[base try=1] NPU5 free — launching baseline (no offload)
+[base try=1] WON on NPU5 — tokens captured
+[chain] baseline done rc=0
