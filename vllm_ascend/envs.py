@@ -221,3 +221,17 @@ def __getattr__(name: str):
 
 def __dir__():
     return list(env_variables.keys())
+
+
+def register_vllm_env_variables() -> None:
+    """Register Ascend plugin env vars with vLLM's env registry.
+
+    vLLM validates ``VLLM_*`` env names and uses the registry when propagating
+    selected env vars to worker processes. Registering plugin-owned names here
+    keeps ``VLLM_ASCEND_*`` vars visible without modifying vLLM core.
+    """
+    from vllm import envs as vllm_envs
+
+    for name, getter in env_variables.items():
+        if name.startswith("VLLM_ASCEND_"):
+            vllm_envs.environment_variables.setdefault(name, getter)

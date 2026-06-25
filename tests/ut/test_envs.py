@@ -57,3 +57,22 @@ class TestEnvVariables(TestBase):
         for var_name in self.env_vars:
             with self.subTest(var=var_name):
                 getattr(envs_ascend, var_name)
+
+    def test_register_vllm_env_variables(self):
+        import vllm.envs as vllm_envs
+
+        simllm_env = "VLLM_ASCEND_SIMLLM_ENABLED"
+        original = vllm_envs.environment_variables.pop(simllm_env, None)
+        try:
+            envs_ascend.register_vllm_env_variables()
+
+            self.assertIn(simllm_env, vllm_envs.environment_variables)
+            self.assertIs(
+                vllm_envs.environment_variables[simllm_env],
+                envs_ascend.env_variables[simllm_env],
+            )
+        finally:
+            if original is not None:
+                vllm_envs.environment_variables[simllm_env] = original
+            else:
+                vllm_envs.environment_variables.pop(simllm_env, None)

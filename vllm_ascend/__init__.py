@@ -33,7 +33,9 @@ except Exception:
 
 def register():
     """Register the NPU platform."""
+    from vllm_ascend.envs import register_vllm_env_variables
 
+    register_vllm_env_variables()
     return "vllm_ascend.platform.NPUPlatform"
 
 

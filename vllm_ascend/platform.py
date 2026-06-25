@@ -97,6 +97,18 @@ class NPUPlatform(Platform):
     simple_compile_backend: str = "eager"  # Disable torch.compile()
     ray_device_key: str = "NPU"
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
+    additional_env_vars: list[str] = [
+        "VLLM_ASCEND_SIMLLM_ENABLED",
+        "VLLM_ASCEND_SIMLLM_COSINE_THRESHOLD",
+        "VLLM_ASCEND_SIMLLM_LSH_NUM_BITS",
+        "VLLM_ASCEND_SIMLLM_LSH_BATCH_THRESHOLD",
+        "VLLM_ASCEND_SIMLLM_KV_CACHE_SIZE",
+        "VLLM_ASCEND_SIMLLM_SANDWICH_BOTTOM",
+        "VLLM_ASCEND_SIMLLM_SANDWICH_TOP",
+        "VLLM_ASCEND_SIMLLM_EMBEDDING_POOLING",
+        "VLLM_ASCEND_SIMLLM_DEFERRAL_RATIO",
+        "VLLM_ASCEND_SIMLLM_MAX_DEFERRALS",
+    ]
     dispatch_key: str = "PrivateUse1"
 
     supported_quantization: list[str] = [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD]
