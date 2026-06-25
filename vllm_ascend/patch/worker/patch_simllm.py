@@ -66,7 +66,7 @@ def log_simllm_patch_state(model_runner: object) -> None:
     model_forward = getattr(model_runner, "_model_forward", None)
     state = describe_model_runner_patch_state(model_runner)
     if _is_simllm_method(execute_model) and _is_simllm_method(model_forward):
-        logger.info("SimLLM worker patch state: %s", state)
+        logger.warning("SimLLM worker patch state: %s", state)
     else:
         logger.warning("SimLLM requested but worker runner is not patched: %s", state)
 

@@ -204,7 +204,7 @@ def apply_simllm_patch(model_runner_cls: Any | None = None) -> None:
     if getattr(model_runner_cls, "execute_model", None) is _simllm_execute_model:
         return
 
-    logger.info("Applying Sim-LLM patch to NPUModelRunner …")
+    logger.warning("Applying Sim-LLM patch to NPUModelRunner …")
 
     _simllm_config = config
 
@@ -245,7 +245,7 @@ def apply_simllm_patch(model_runner_cls: Any | None = None) -> None:
     _original_model_forward = model_runner_cls._model_forward
     model_runner_cls._model_forward = _simllm_model_forward  # type: ignore[method-assign]
 
-    logger.info(
+    logger.warning(
         "Sim-LLM patch applied (cache_size=%d, threshold=%.2f, "
         "sandwich_bottom=%d, sandwich_top=%d, lsh_bits=%d).",
         config.kv_cache_size,
