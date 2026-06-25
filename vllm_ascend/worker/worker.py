@@ -552,12 +552,25 @@ class NPUWorker(WorkerBase):
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:
+            if os.getenv("VLLM_ASCEND_SIMLLM_ENABLED", "0") == "1":
+                logger.warning(
+                    "SimLLM requested but NPU model runner V2 is active; "
+                    "current Sim-LLM patch supports V1 only."
+                )
             logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
             from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
 
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
+            # Re-apply at worker init time to cover spawn/import-order cases.
+            from vllm_ascend.patch.worker.patch_simllm import (
+                log_simllm_patch_state,
+                try_apply_simllm_patch,
+            )
+
+            try_apply_simllm_patch()
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+            log_simllm_patch_state(self.model_runner)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:

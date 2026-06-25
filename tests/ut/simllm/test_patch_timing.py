@@ -69,3 +69,20 @@ def test_simllm_patch_applies_after_model_runner_class_exists(monkeypatch):
     patch_simllm.try_apply_simllm_patch()
 
     assert calls == [DummyNPUModelRunner]
+
+
+def test_simllm_patch_state_describes_active_bindings():
+    patch_simllm = _load_patch_simllm_module()
+
+    class DummyNPUModelRunner:
+        def execute_model(self):
+            return None
+
+        def _model_forward(self):
+            return None
+
+    state = patch_simllm.describe_model_runner_patch_state(DummyNPUModelRunner())
+
+    assert "runner=" in state
+    assert "execute_model=" in state
+    assert "_model_forward=" in state
