@@ -72,7 +72,6 @@ class AscendConfig:
             )
 
         from vllm_ascend import envs as ascend_envs
-        from vllm_ascend.core.victim_selector import UtilityVictimSelectorConfig
 
         if self.profiling_chunk_config.enabled and ascend_envs.VLLM_ASCEND_BALANCE_SCHEDULING:
             raise ValueError(
@@ -80,63 +79,43 @@ class AscendConfig:
                 "cannot be enabled at the same time. Please disable one of them."
             )
 
-        default_utility_cfg = UtilityVictimSelectorConfig()
-        utility_cfg = UtilityVictimSelectorConfig.from_additional_config(
-            {
-                "enable_utility_victim_selection": additional_config.get(
-                    "enable_utility_victim_selection",
-                    ascend_envs.VLLM_ASCEND_ENABLE_UTILITY_VICTIM_SELECTION,
-                ),
-                "utility_kill_switch": additional_config.get(
-                    "utility_kill_switch", ascend_envs.VLLM_ASCEND_UTILITY_KILL_SWITCH
-                ),
-                "utility_completion_weight": additional_config.get(
-                    "utility_completion_weight",
-                    ascend_envs.VLLM_ASCEND_UTILITY_COMPLETION_WEIGHT,
-                ),
-                "utility_preempt_weight": additional_config.get(
-                    "utility_preempt_weight", ascend_envs.VLLM_ASCEND_UTILITY_PREEMPT_WEIGHT
-                ),
-                "utility_kv_gate": additional_config.get(
-                    "utility_kv_gate", ascend_envs.VLLM_ASCEND_UTILITY_KV_GATE
-                ),
-                "utility_cooldown_s": additional_config.get(
-                    "utility_cooldown_s", ascend_envs.VLLM_ASCEND_UTILITY_COOLDOWN_S
-                ),
-                "utility_min_running": additional_config.get(
-                    "utility_min_running", ascend_envs.VLLM_ASCEND_UTILITY_MIN_RUNNING
-                ),
-                "utility_snapshot_enabled": additional_config.get(
-                    "utility_snapshot_enabled", ascend_envs.VLLM_ASCEND_UTILITY_SNAPSHOT_ENABLED
-                ),
-                "utility_snapshot_top_k": additional_config.get(
-                    "utility_snapshot_top_k", ascend_envs.VLLM_ASCEND_UTILITY_SNAPSHOT_TOP_K
-                ),
-                "utility_snapshot_history_size": additional_config.get(
-                    "utility_snapshot_history_size",
-                    ascend_envs.VLLM_ASCEND_UTILITY_SNAPSHOT_HISTORY_SIZE,
-                ),
-                "utility_epsilon": additional_config.get(
-                    "utility_epsilon", default_utility_cfg.utility_epsilon
-                ),
-                "utility_default_max_tokens": additional_config.get(
-                    "utility_default_max_tokens",
-                    default_utility_cfg.utility_default_max_tokens,
-                ),
-            }
+        # BidKV utility victim selection config — passed through to plugins
+        # via additional_config.  The vllm-hust-ascend-bidkv plugin reads these
+        # keys (with env-var fallback) in its own config layer.
+        self.enable_utility_victim_selection = additional_config.get(
+            "enable_utility_victim_selection", False
         )
-        self.enable_utility_victim_selection = utility_cfg.enable_utility_victim_selection
-        self.utility_kill_switch = utility_cfg.utility_kill_switch
-        self.utility_completion_weight = utility_cfg.utility_completion_weight
-        self.utility_preempt_weight = utility_cfg.utility_preempt_weight
-        self.utility_kv_gate = utility_cfg.utility_kv_gate
-        self.utility_cooldown_s = utility_cfg.utility_cooldown_s
-        self.utility_min_running = utility_cfg.utility_min_running
-        self.utility_snapshot_enabled = utility_cfg.utility_snapshot_enabled
-        self.utility_snapshot_top_k = utility_cfg.utility_snapshot_top_k
-        self.utility_snapshot_history_size = utility_cfg.utility_snapshot_history_size
-        self.utility_epsilon = utility_cfg.utility_epsilon
-        self.utility_default_max_tokens = utility_cfg.utility_default_max_tokens
+        self.utility_kill_switch = additional_config.get(
+            "utility_kill_switch", False
+        )
+        self.utility_completion_weight = additional_config.get(
+            "utility_completion_weight", 0.5
+        )
+        self.utility_preempt_weight = additional_config.get(
+            "utility_preempt_weight", 0.3
+        )
+        self.utility_kv_gate = additional_config.get("utility_kv_gate", 0.0)
+        self.utility_cooldown_s = additional_config.get(
+            "utility_cooldown_s", 0.0
+        )
+        self.utility_min_running = additional_config.get(
+            "utility_min_running", 1
+        )
+        self.utility_snapshot_enabled = additional_config.get(
+            "utility_snapshot_enabled", False
+        )
+        self.utility_snapshot_top_k = additional_config.get(
+            "utility_snapshot_top_k", 3
+        )
+        self.utility_snapshot_history_size = additional_config.get(
+            "utility_snapshot_history_size", 32
+        )
+        self.utility_epsilon = additional_config.get(
+            "utility_epsilon", 1e-6
+        )
+        self.utility_default_max_tokens = additional_config.get(
+            "utility_default_max_tokens", 1024
+        )
 
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = additional_config.get("dump_config_path", None)

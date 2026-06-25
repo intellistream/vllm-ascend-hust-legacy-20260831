@@ -301,22 +301,6 @@ class NPUPlatform(Platform):
         for key, value in utility_selector_config.items():
             vllm_config.additional_config.setdefault(key, value)
 
-        if utility_selector_config["enable_utility_victim_selection"]:
-            logger.info(
-                "Utility victim selection enabled: kill_switch=%s, completion_weight=%.3f, "
-                "preempt_weight=%.3f, kv_gate=%.3f, cooldown_s=%.3f, min_running=%d, "
-                "snapshot_enabled=%s, snapshot_top_k=%d, snapshot_history_size=%d",
-                utility_selector_config["utility_kill_switch"],
-                utility_selector_config["utility_completion_weight"],
-                utility_selector_config["utility_preempt_weight"],
-                utility_selector_config["utility_kv_gate"],
-                utility_selector_config["utility_cooldown_s"],
-                utility_selector_config["utility_min_running"],
-                utility_selector_config["utility_snapshot_enabled"],
-                utility_selector_config["utility_snapshot_top_k"],
-                utility_selector_config["utility_snapshot_history_size"],
-            )
-
         if model_config is None:
             logger.warning("Model config is missing. This may indicate that we are running a test case")
             enforce_eager = False

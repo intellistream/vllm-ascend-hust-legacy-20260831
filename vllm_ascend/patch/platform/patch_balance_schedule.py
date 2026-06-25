@@ -25,7 +25,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.victim_selector import (
-    UnifiedVictimSelector,
+    get_victim_selector,
     infer_kv_utilization_from_scheduler,
 )
 
@@ -61,7 +61,7 @@ class BalanceScheduler(Scheduler):
             torch.tensor([0], dtype=torch.int, device="cpu")
             for _ in range(self.vllm_config.parallel_config.data_parallel_size)
         ]
-        self.victim_selector = UnifiedVictimSelector.from_vllm_config(vllm_config)
+        self.victim_selector = get_victim_selector(vllm_config)
 
     def balance_gather(self, dp_group):
         running_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")

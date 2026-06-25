@@ -42,7 +42,7 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.core.profiling_chunk_predictor import ProfilingChunkManager
 from vllm_ascend.core.victim_selector import (
-    UnifiedVictimSelector,
+    get_victim_selector,
     infer_kv_utilization_from_scheduler,
 )
 
@@ -90,7 +90,7 @@ class ProfilingChunkScheduler(Scheduler):
             min_chunk=profiling_cfg.min_chunk,
         )
         self._profiling_initialized = False
-        self.victim_selector = UnifiedVictimSelector.from_vllm_config(vllm_config)
+        self.victim_selector = get_victim_selector(vllm_config)
 
         logger.info(
             "[ProfilingChunk] Scheduler initialized. base_chunk=%d, page_size=%d, smooth_factor=%.2f, min_chunk=%d",

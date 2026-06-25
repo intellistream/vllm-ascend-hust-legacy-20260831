@@ -15,17 +15,6 @@ def test_service_profiling_symbols_include_real_ascend_schedulers():
         assert symbol in SERVICE_PROFILING_SYMBOLS_YAML
 
 
-def test_service_profiling_symbols_include_utility_selector_hooks():
-    assert (
-        "vllm_ascend.core.victim_selector:UnifiedVictimSelector.pick_victim"
-        in SERVICE_PROFILING_SYMBOLS_YAML
-    )
-    assert (
-        "vllm_ascend.core.victim_selector:UnifiedVictimSelector.emit_observability_log"
-        in SERVICE_PROFILING_SYMBOLS_YAML
-    )
-
-
 def test_service_profiling_symbols_drop_legacy_scheduler_symbol():
     assert "vllm_ascend.core.scheduler:AscendScheduler.schedule" not in SERVICE_PROFILING_SYMBOLS_YAML
 

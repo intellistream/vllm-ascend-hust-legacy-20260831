@@ -32,7 +32,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.core.victim_selector import (
-    UnifiedVictimSelector,
+    get_victim_selector,
     infer_kv_utilization_from_scheduler,
 )
 
@@ -158,7 +158,7 @@ class SchedulerDynamicBatch(Scheduler):
             default_budget=self.scheduler_config.max_num_batched_tokens,
             slo_limit=self.scheduler_config.SLO_limits_for_dynamic_batch,
         )
-        self.victim_selector = UnifiedVictimSelector.from_vllm_config(vllm_config)
+        self.victim_selector = get_victim_selector(vllm_config)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE: This scheduling algorithm is developed based on the "super.schedule()"

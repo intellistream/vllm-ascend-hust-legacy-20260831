@@ -8,7 +8,7 @@ from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.sample.penalties import apply_all_penalties
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, global_stream, npu_stream_switch
+from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type, global_stream, npu_stream_switch
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 logger = init_logger(__name__)
@@ -182,7 +182,7 @@ def apply_top_k_top_p(
     if get_ascend_device_type() not in [AscendDeviceType.A2, AscendDeviceType.A3]:
         return _apply_top_k_top_p_pytorch(logits, k, p)
 
-    if _has_ascend_top_k_top_p_op():
+    if _has_ascend_top_k_top_p_op() and enable_custom_op():
         return _apply_top_k_top_p_ascendc(logits, k, p)
 
     if not _MISSING_TOP_K_TOP_P_OP_WARNED:
