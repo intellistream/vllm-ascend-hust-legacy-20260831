@@ -3338,7 +3338,49 @@ class NPUModelRunner(GPUModelRunner):
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 layer_names.add(layer_name)
-        assert layer_names == set(kv_cache_raw_tensors.keys()), "Some layers are not correctly initialized"
+        if layer_names != set(kv_cache_raw_tensors.keys()):
+            actual_layer_names = set(kv_cache_raw_tensors.keys())
+            missing_layers = sorted(layer_names - actual_layer_names)
+            extra_layers = sorted(actual_layer_names - layer_names)
+
+            # HUST PATCH: draft_model KV names are expected by scheduler,
+            # but Ascend allocator only allocated target layer KV tensors.
+            # For draft_model mode, alias draft_model.model.layers.N.* to
+            # model.layers.N.* so initialization can continue.
+            aliased = []
+            for name in missing_layers:
+                if name.startswith("draft_model."):
+                    target_name = name[len("draft_model."):]
+                    if target_name in kv_cache_raw_tensors:
+                        target_kv = kv_cache_raw_tensors[target_name]
+                        if isinstance(target_kv, torch.Tensor):
+                            kv_cache_raw_tensors[name] = torch.empty_like(target_kv)
+                        elif isinstance(target_kv, (list, tuple)):
+                            kv_cache_raw_tensors[name] = type(target_kv)(
+                                torch.empty_like(x) if isinstance(x, torch.Tensor) else x
+                                for x in target_kv
+                            )
+                        else:
+                            raise TypeError(f"unsupported kv tensor type: {type(target_kv)}")
+                        aliased.append((name, target_name))
+
+            if aliased:
+                print("[HUST_KV_SEPARATE_DRAFT] alloc_count", len(aliased), flush=True)
+                print("[HUST_KV_SEPARATE_DRAFT] alloc_head", aliased[:10], flush=True)
+
+            actual_layer_names = set(kv_cache_raw_tensors.keys())
+            if layer_names != actual_layer_names:
+                missing_layers = sorted(layer_names - actual_layer_names)
+                extra_layers = sorted(actual_layer_names - layer_names)
+                print("[HUST_KV_LAYER_DIFF] expected_count", len(layer_names),
+                      "actual_count", len(actual_layer_names), flush=True)
+                print("[HUST_KV_LAYER_DIFF] missing_count", len(missing_layers),
+                      "extra_count", len(extra_layers), flush=True)
+                print("[HUST_KV_LAYER_DIFF] missing_head", missing_layers[:80], flush=True)
+                print("[HUST_KV_LAYER_DIFF] extra_head", extra_layers[:80], flush=True)
+                print("[HUST_KV_LAYER_DIFF] expected_head", sorted(layer_names)[:80], flush=True)
+                print("[HUST_KV_LAYER_DIFF] actual_head", sorted(actual_layer_names)[:80], flush=True)
+                raise AssertionError("Some layers are not correctly initialized")
 
         return kv_cache_raw_tensors
 

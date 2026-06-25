@@ -5,6 +5,11 @@ from vllm.config import VllmConfig
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 
 from vllm_ascend.spec_decode.eagle_proposer import AscendSpecDecodeBaseProposer
+from vllm.v1.spec_decode.utils import create_vllm_config_for_draft_model
+try:
+    from vllm.model_executor.model_loader import get_model
+except ImportError:
+    from vllm.model_executor.model_loader.loader import get_model
 
 
 class AscendDraftModelProposer(DraftModelProposer, AscendSpecDecodeBaseProposer):

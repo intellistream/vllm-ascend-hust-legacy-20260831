@@ -185,8 +185,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.positions = torch.zeros(self.max_num_tokens, dtype=torch.int32, device=device)
 
         self.token_arange_np = np.arange(self.max_num_tokens + 1)
-        self.enable_enpu = self.runner.enable_enpu
-        self.use_eagle = self.runner.use_eagle
+        self.enable_enpu = getattr(self.runner, "enable_enpu", False)
+        self.use_eagle = getattr(self.runner, "use_eagle", False)
 
     def _get_model(self) -> nn.Module:
         """
