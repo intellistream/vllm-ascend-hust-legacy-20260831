@@ -63,7 +63,7 @@ public:
             .DynamicRankSupportFlag(true)
             .DynamicShapeSupportFlag(true)
             .ExtendCfgInfo("opFile.value", "moe_gating_top_k_apt");
-        this->AICore().AddConfig(VLLM_ASCEND_950_SOC_CONFIG, regbaseCfg);
+        this->AICore().AddConfig("ascend950", regbaseCfg);
     }
 };
 

@@ -1,5 +1,7 @@
 import torch
 import vllm.envs as envs
+from vllm.distributed.parallel_state import get_tp_group
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
@@ -47,6 +49,10 @@ class AscendSampler(Sampler):
     ) -> torch.Tensor:
         """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
         if not HAS_TRITON:
+            logger.warning_once(
+                "[sample/sampler] Triton not available, falling back to vLLM default "
+                "penalty implementation. Penalty performance may be degraded on NPU. "
+            )
             return Sampler.apply_penalties(logits, sampling_metadata, output_token_ids)
 
         if sampling_metadata.no_penalties:
@@ -66,6 +72,11 @@ class AscendSampler(Sampler):
         super().__init__(logprobs_mode=logprobs_mode)
         self.topk_topp_sampler = AscendTopKTopPSampler()
         self.async_exponential_event = torch.npu.Event()
+        logger.debug(
+            "[sample/sampler] AscendSampler initialized. logprobs_mode=%s, triton_available=%s",
+            logprobs_mode,
+            HAS_TRITON,
+        )
 
     def set_q_event(self, q, event):
         self.topk_topp_sampler.set_q_event(q, event)
@@ -85,6 +96,28 @@ class AscendSampler(Sampler):
             self.async_exponential_event.record()
         self.set_q_event(q, self.async_exponential_event)
 
+    @staticmethod
+    def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
+        if get_ascend_config().enable_reduce_sample:
+            logger.debug_once(
+                "[sample/sampler] Using reduce-sample greedy sampling. "
+                "TP all-gather will be performed to find global argmax.",
+            )
+            tp_group = get_tp_group()
+            B, V_local = logits.shape
+            rank = tp_group.rank_in_group
+
+            local_max_logits, local_max_indices = logits.max(dim=-1)
+            local_global_idx = local_max_indices + rank * V_local  # [B]
+            # [B, world_size]
+            gathered_logits = tp_group.all_gather(local_max_logits.unsqueeze(-1), dim=-1)
+            gathered_global_idx = tp_group.all_gather(local_global_idx.unsqueeze(-1), dim=-1)  # [B, world_size]
+            global_max_rank = gathered_logits.argmax(dim=-1)  # [B]
+            target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
+            return target_argmax
+        else:
+            return logits.argmax(dim=-1).view(-1)
+
 
 class AscendTopKTopPSampler(TopKTopPSampler):
     def __init__(self, **kwargs):
@@ -102,6 +135,10 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         # when batch_invariant mode is enabled, we should use vllm's implementation.
         # or it will make batch_invariant mode not working.
         if envs.VLLM_BATCH_INVARIANT:
+            logger.debug_once(
+                "[sample/sampler] BATCH_INVARIANT mode enabled, "
+                "falling back to vLLM native top-k/top-p implementation.",
+            )
             return super().forward_native(logits, generators, k, p)
         logits = self.apply_top_k_top_p(logits, k, p)
         logits_to_return = None
@@ -110,12 +147,41 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
-        if get_ascend_config().enable_async_exponential:
-            # Add synchronize to prevent synchronize error.
-            self.async_event.synchronize()
-            return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
-        return random_sample(probs, generators), logits_to_return
+        if get_ascend_config().enable_reduce_sample:
+            logger.debug_once(
+                "[sample/sampler] Using reduce-sample path in forward_native. "
+                "top-k/top-p with TP all-gather for distributed sampling.",
+            )
+            cand_logits, cand_idx = self.apply_top_k_top_p(logits, k, p, self.top_k)
+            logits_to_return = None
+            if self.logprobs_mode == "processed_logits":
+                logits_to_return = cand_logits
+            elif self.logprobs_mode == "processed_logprobs":
+                logits_to_return = cand_logits.log_softmax(dim=-1, dtype=torch.float32)
+
+            probs = cand_logits.softmax(dim=-1, dtype=torch.float32)
+            pos = random_sample(probs, generators)  # [B]
+
+            next_token = cand_idx.gather(dim=1, index=pos.unsqueeze(1)).squeeze(1)  # [B]
+            return next_token, logits_to_return
+        else:
+            logits = self.apply_top_k_top_p(logits, k, p)
+            logits_to_return = None
+            if self.logprobs_mode == "processed_logits":
+                logits_to_return = logits
+            elif self.logprobs_mode == "processed_logprobs":
+                logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
+
+            probs = logits.softmax(dim=-1, dtype=torch.float32)
+            if get_ascend_config().enable_async_exponential:
+                # Add synchronize to prevent synchronize error.
+                logger.debug_once(
+                    "[sample/sampler] Using async-exponential sampling path. "
+                    "Pre-computed exponential randoms from separate stream will be used.",
+                )
+                self.async_event.synchronize()
+                return probs.div_(self.q).argmax(dim=-1).view(-1), logits_to_return
+            return random_sample(probs, generators), logits_to_return
 
 
 def _apply_top_k_top_p_pytorch(

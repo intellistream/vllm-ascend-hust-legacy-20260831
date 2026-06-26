@@ -12,6 +12,15 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 ])
 
 
+@pytest.mark.parametrize(
+    "batch_size,vocab_size,num_logprobs",
+    [
+        (48, 1024, 5),
+        (96, 1024, 0),
+        (24, 1519, 1),
+        (1, 320, 10),
+    ],
+)
 def test_compute_topk_logprobs(batch_size, vocab_size, num_logprobs):
     """Test compute_topk_logprobs for correctness of IDs, logprobs, and ranks.
     Args:

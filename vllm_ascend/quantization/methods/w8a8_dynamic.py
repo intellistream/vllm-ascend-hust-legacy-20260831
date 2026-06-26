@@ -54,6 +54,8 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     and per-channel quantization for weights.
     """
 
+    act_quant_type: torch.dtype = torch.int8
+
     def __init__(self):
         pass
 
@@ -78,31 +80,77 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
-        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x, dst_type=self.act_quant_type)
         need_unsqz = False
         if pertoken_scale.dim() == 2:
             need_unsqz = True
             quantized_x = quantized_x.squeeze(dim=1)
             pertoken_scale = pertoken_scale.squeeze(dim=1)
-        output = torch_npu.npu_quant_matmul(
-            quantized_x,
-            layer.weight,
-            layer.weight_scale,
-            pertoken_scale=pertoken_scale,
-            bias=bias,
-            output_dtype=x.dtype,
-        )
+
+        chunk_size = getattr(layer, "_chunk_size", 0)
+        if isinstance(chunk_size, int) and chunk_size > 0:
+            bias_1 = bias[:chunk_size] if bias is not None else None
+            bias_2 = bias[chunk_size:] if bias is not None else None
+            output = torch.cat(
+                [
+                    torch_npu.npu_quant_matmul(
+                        quantized_x,
+                        layer.weight_1,
+                        layer.weight_1_scale,
+                        pertoken_scale=pertoken_scale,
+                        bias=bias_1,
+                        output_dtype=x.dtype,
+                    ),
+                    torch_npu.npu_quant_matmul(
+                        quantized_x,
+                        layer.weight_2,
+                        layer.weight_2_scale,
+                        pertoken_scale=pertoken_scale,
+                        bias=bias_2,
+                        output_dtype=x.dtype,
+                    ),
+                ],
+                dim=-1,
+            )
+        else:
+            output = torch_npu.npu_quant_matmul(
+                quantized_x,
+                layer.weight,
+                layer.weight_scale,
+                pertoken_scale=pertoken_scale,
+                bias=bias if self.act_quant_type == torch.int8 else None,
+                output_dtype=x.dtype,
+            )
         if need_unsqz:
             output = output.unsqueeze(dim=1)
         return output
 
     def process_weights_after_loading(self, layer):
         layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        # cast quantized weight tensors in NZ format for higher inference speed
-        layer.weight.data = maybe_trans_nz(layer.weight.data)
-        layer.weight_scale.data = layer.weight_scale.data.flatten()
-        layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
-        layer.weight_offset.data = layer.weight_offset.data.flatten()
+        if "wq_b" in getattr(layer, "prefix", "") and layer.weight.shape[1] >= 65536 and enable_dsa_cp():
+            # TODO(jianzs): Remove this workaround after
+            # `torch_npu.npu_quant_matmul` supports large weight dimensions.
+            chunk_size = layer.weight.shape[1] // 2
+            assert chunk_size < 65536, "Even after chunking, the weight dimension is still larger than 65536."
+            layer._chunk_size = chunk_size
+            layer.weight_1 = maybe_trans_nz(layer.weight.data[:, :chunk_size].contiguous())
+            layer.weight_2 = maybe_trans_nz(layer.weight.data[:, chunk_size:].contiguous())
+            layer.weight_1_scale = layer.weight_scale.data[:chunk_size].flatten().contiguous()
+            layer.weight_2_scale = layer.weight_scale.data[chunk_size:].flatten().contiguous()
+            layer.weight_1_scale_fp32 = layer.weight_1_scale.to(torch.float32)
+            layer.weight_2_scale_fp32 = layer.weight_2_scale.to(torch.float32)
+            layer.weight_1_offset = layer.weight_offset.data[:chunk_size].flatten().contiguous()
+            layer.weight_2_offset = layer.weight_offset.data[chunk_size:].flatten().contiguous()
+            del layer.weight
+            del layer.weight_scale
+            del layer.weight_offset
+        else:
+            # cast quantized weight tensors in NZ format for higher inference speed
+            if self.act_quant_type == torch.int8:
+                layer.weight.data = maybe_trans_nz(layer.weight.data)
+            layer.weight_scale.data = layer.weight_scale.data.flatten()
+            layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
+            layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 
 @register_scheme("W8A8_DYNAMIC", "moe")
@@ -291,8 +339,9 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
         # TODO(zzzzwwjj): Currently, `torch_npu.npu_grouped_matmul_swiglu_quant`
         # can only support weight nz.
-        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        if self.quant_type == QuantType.W8A8:
+            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(torch.float32)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(layer.w13_weight_offset.data.shape[0], -1)

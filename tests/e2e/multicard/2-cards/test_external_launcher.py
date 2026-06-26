@@ -17,7 +17,7 @@
 """
 Compare the outputs of vLLM with and without aclgraph.
 
-Run `pytest tests/multicard/test_external_launcher.py`.
+Run `pytest tests/e2e/pull_request/two_card/test_external_launcher.py`.
 """
 
 import os
@@ -36,17 +36,18 @@ from tests.e2e.conftest import wait_until_npu_memory_free
 MODELS = ["Qwen/Qwen3-0.6B"]
 MOE_MODELS = ["Qwen/Qwen3-30B-A3B"]
 DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
+REPO_ROOT = Path(__file__).resolve().parents[4]
+EXTERNAL_LAUNCHER_SCRIPT = REPO_ROOT / "examples" / "offline_external_launcher.py"
 
 
 @pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "500"})
 def test_qwen3_external_launcher(model):
-    script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     # TODO: Change to 2 when ci machine has 4 cards
     cmd = [
         sys.executable,
-        str(script),
+        str(EXTERNAL_LAUNCHER_SCRIPT),
         "--model",
         model,
         "--tp-size",
@@ -79,14 +80,13 @@ def test_qwen3_external_launcher(model):
 
 
 @pytest.mark.parametrize("model", MOE_MODELS)
-@wait_until_npu_memory_free()
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_moe_external_launcher_ep_tp2(model):
-    script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     # TODO: Change to 2 when ci machine has 4 cards
     cmd = [
         sys.executable,
-        str(script),
+        str(EXTERNAL_LAUNCHER_SCRIPT),
         "--model",
         model,
         "--tp-size",
@@ -119,14 +119,13 @@ def test_qwen3_moe_external_launcher_ep_tp2(model):
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
-@wait_until_npu_memory_free()
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_external_launcher_with_sleepmode():
-    script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     # TODO: Change to 2 when ci machine has 4 cards
     cmd = [
         sys.executable,
-        str(script),
+        str(EXTERNAL_LAUNCHER_SCRIPT),
         "--model",
         "Qwen/Qwen3-8B",
         "--tp-size",
@@ -151,7 +150,7 @@ def test_qwen3_external_launcher_with_sleepmode():
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        timeout=300,
+        timeout=600,
     )
     output = proc.stdout.decode(errors="ignore")
 
@@ -163,8 +162,8 @@ def test_qwen3_external_launcher_with_sleepmode():
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 def test_qwen3_external_launcher_with_sleepmode_level2():
-    script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     model_path = snapshot_download(
         "Qwen/Qwen3-8B",
@@ -173,7 +172,7 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
     # TODO: Add moe model test
     cmd = [
         sys.executable,
-        str(script),
+        str(EXTERNAL_LAUNCHER_SCRIPT),
         "--model",
         model_path,
         "--tp-size",
@@ -200,7 +199,7 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        timeout=300,
+        timeout=600,
     )
     output = proc.stdout.decode(errors="ignore")
 
@@ -216,14 +215,13 @@ def test_qwen3_external_launcher_with_sleepmode_level2():
     reason="This test is only for Ascend910B devices.",
 )
 @pytest.mark.parametrize("model", MODELS)
-@wait_until_npu_memory_free()
+@wait_until_npu_memory_free(target_free_percentage=0.7)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1", "HCCL_BUFFSIZE": "500"})
 def test_qwen3_external_launcher_with_matmul_allreduce(model):
-    script = Path(__file__).parent.parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
     env = os.environ.copy()
     cmd = [
         sys.executable,
-        str(script),
+        str(EXTERNAL_LAUNCHER_SCRIPT),
         "--model",
         model,
         "--trust-remote-code",

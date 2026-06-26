@@ -4,6 +4,7 @@
  */
 
 #include "copy_and_expand_eagle_inputs_tiling.h"
+#include "tiling_base/error_log.h"
 #include "register/op_def_registry.h"
 #include "log/ops_log.h"
 
@@ -52,10 +53,11 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     int32_t totalInputTokens = *(attrs->GetAttrPointer<int32_t>(4));
 
     // ========== 4. Compute core distribution ==========
-    uint32_t usedCoreNum = std::min(coreNum, numReqs);
-    if (usedCoreNum == 0) {
-        usedCoreNum = 1;
-    }
+    // Adjacent requests do not guarantee block-aligned output boundaries.
+    // The runtime write path emits block-granular stores, so request-parallel
+    // execution can cause neighboring segments to overlap at block tails.
+    // Run this op on a single core to preserve correctness.
+    uint32_t usedCoreNum = 1;
     uint32_t reqsPerCore   = numReqs / usedCoreNum;
     uint32_t remainderReqs = numReqs % usedCoreNum;
 

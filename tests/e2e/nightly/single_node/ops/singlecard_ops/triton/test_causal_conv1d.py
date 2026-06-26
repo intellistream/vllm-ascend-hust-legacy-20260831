@@ -120,19 +120,22 @@ def test_ascend_causal_conv1d(dim, width, extra_state_len, seq_len, has_bias,
     weight_origin=weight.transpose(-1, -2)
     conv_states_origin=conv_states.transpose(-1, -2)
     activation_num = 1 if activation else 0
-    out = torch.ops._C_ascend.npu_causal_conv1d_custom(
-                    x_origin,
-                    weight_origin,
-                    conv_state=conv_states_origin,
-                    bias_opt=bias,
-                    query_start_loc_opt=to_int64_tuple(query_start_loc),
-                    cache_indices_opt=to_int64_tuple(cache_indices),
-                    initial_state_mode_opt=to_int64_tuple(has_initial_state_tensor),
-                    num_accepted_tokens_opt=[],
-                    activation_mode=activation_num,
-                    pad_slot_id=PAD_SLOT_ID,
-                    run_mode=0
-                ).transpose(-1, -2)
+    out = torch.empty_like(x_origin)
+    torch.ops._C_ascend.npu_causal_conv1d_custom(
+        out,
+        x_origin,
+        weight_origin,
+        conv_state=conv_states_origin,
+        bias_opt=bias,
+        query_start_loc_opt=to_int64_tuple(query_start_loc),
+        cache_indices_opt=to_int64_tuple(cache_indices),
+        initial_state_mode_opt=to_int64_tuple(has_initial_state_tensor),
+        num_accepted_tokens_opt=[],
+        activation_mode=activation_num,
+        pad_slot_id=PAD_SLOT_ID,
+        run_mode=0,
+    )
+    out = out.transpose(-1, -2)
     validate_cmp(out, out_ref, itype)
     validate_cmp(conv_states, conv_states_ref, itype)
 

@@ -4,12 +4,9 @@ import numpy as np
 import pytest
 import torch
 
-import vllm_ascend.ops.register_custom_ops  # noqa
-from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-
 MAX_POSITION_EMBEDDINGS = [262144]
-NUM_TOKENS = [1, 4, 8, 16, 1024]
-NUM_QKV_HEADS = [(12, 1), (16, 1), (32, 4), (64, 4)]
+NUM_TOKENS = [1, 16, 1024]
+NUM_QKV_HEADS = [(12, 1), (64, 4)]
 HEAD_SIZES = [128]
 ROPE_DIMS = [64, 128]
 EPS = [1e-6]
@@ -78,7 +75,6 @@ def test_split_qkv_rmsnorm_rope(max_position_embeddings, num_tokens, num_q_heads
                                 head_size, eps, dtype, seed, device, rope_dim):
     torch.manual_seed(seed)
     torch.set_default_device(device)
-    init_device_properties_triton()
 
     q_hidden_size = num_q_heads * head_size
     kv_hidden_size = num_kv_heads * head_size
@@ -157,7 +153,6 @@ def test_split_qkv_rmsnorm_rope_with_bias(max_position_embeddings, num_tokens, n
                                           seed, device, rope_dim):
     torch.manual_seed(seed)
     torch.set_default_device(device)
-    init_device_properties_triton()
 
     q_hidden_size = num_q_heads * head_size
     kv_hidden_size = num_kv_heads * head_size

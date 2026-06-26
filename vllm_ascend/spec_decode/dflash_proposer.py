@@ -92,6 +92,7 @@ class AscendDflashProposer(AscendEagleProposer):
             # Inputs
             next_token_ids_ptr=next_token_ids,
             target_positions_ptr=target_positions,
+            context_slot_mapping_ptr=cad.slot_mapping,
             # Outputs
             out_input_ids_ptr=self.input_ids,
             out_context_positions_ptr=self._context_positions_buffer,
@@ -104,6 +105,7 @@ class AscendDflashProposer(AscendEagleProposer):
             block_table_stride=cad.block_table_tensor.stride(0),
             # Metadata
             query_start_loc_ptr=cad.query_start_loc,
+            seq_lens_ptr=cad.seq_lens,
             num_rejected_tokens_ptr=(num_rejected_tokens_gpu if has_num_rejected else 0),
             # Scalars
             parallel_drafting_token_id=self.parallel_drafting_token_id,
@@ -176,6 +178,7 @@ class AscendDflashProposer(AscendEagleProposer):
                 query_start_loc=self.arange_dflash[: num_reqs + 1] * num_query_per_req,
                 query_start_loc_cpu=torch.from_numpy(self.token_arange_np[: num_reqs + 1]).clone() * num_query_per_req,
                 seq_lens_cpu=self.runner.optimistic_seq_lens_cpu,
+                seq_lens_cpu_upper_bound=self.runner.optimistic_seq_lens_cpu,
                 seq_lens=self.runner.seq_lens[:num_reqs],
                 num_reqs=num_reqs,
                 num_actual_tokens=num_query_tokens,

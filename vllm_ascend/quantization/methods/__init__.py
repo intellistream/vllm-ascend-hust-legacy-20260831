@@ -41,11 +41,13 @@ from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
 from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 from .w4a4_mxfp4 import AscendW4A4MXFP4DynamicFusedMoEMethod, AscendW4A4MXFP4DynamicLinearMethod
 from .w4a8 import AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod
+from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod, AscendW4A8MXFPDynamicLinearMethod
 from .w4a16 import AscendW4A16FusedMoEMethod
 from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
 from .w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
 from .w8a8_pdmix import AscendW8A8PDMixFusedMoeMethod, AscendW8A8PDMixLinearMethod
 from .w8a8_static import AscendW8A8LinearMethod
+from .w8a8fp8_dynamic import AscendW8A8FP8DynamicFusedMoEMethod, AscendW8A8FP8DynamicLinearMethod
 from .w8a16 import AscendW8A16LinearMethod
 
 
@@ -55,6 +57,9 @@ def is_mx_quant_type(instance: Any) -> bool:
         AscendW8A8MXFP8DynamicLinearMethod,
         AscendW4A4MXFP4DynamicLinearMethod,
         AscendW4A4MXFP4DynamicFusedMoEMethod,
+        AscendW4A4MXFP4FlatQuantDynamicLinearMethod,
+        AscendW4A8MXFPDynamicLinearMethod,
+        AscendW4A8MXFPDynamicFusedMoEMethod,
     )
     return isinstance(instance, MX_QUANT_TYPES)
 
@@ -74,6 +79,8 @@ __all__ = [
     "AscendW8A8LinearMethod",
     "AscendW8A8DynamicLinearMethod",
     "AscendW8A8DynamicFusedMoEMethod",
+    "AscendW8A8FP8DynamicLinearMethod",
+    "AscendW8A8FP8DynamicFusedMoEMethod",
     "AscendW8A8MXFP8DynamicLinearMethod",
     "AscendW8A8PDMixLinearMethod",
     "AscendW8A8PDMixFusedMoeMethod",
