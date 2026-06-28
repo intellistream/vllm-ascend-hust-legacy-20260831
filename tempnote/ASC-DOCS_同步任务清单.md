@@ -57,7 +57,7 @@
 | #10059 | [CI] add slash command dispatch | ✅ | 无冲突 |
 | #10139 | [Doc] Translated Doc files | ✅ | 空操作：全部 --ours，无英文源匹配上游 |
 | #10070 | [Doc][CI] Refine doctest workflow | ✅ | conf.py --ours（CANN 8.5.1），installation.md --theirs（多一个 fallback 镜像 URL） |
-| #10269 | [Doc] Translated Doc files | 🔍 | 🔍 翻译文件，同 #9989 #10139，依赖英文文档同步 |
+| #10269 | [Doc] Translated Doc files | ✅ | 空操作：全部 --ours，无英文源匹配上游 |
 | #10292 | [Feature] add ascendc ops store_kv_block | 🔍 | 🔍 部分完成：torch_binding_meta --theirs + llm_base_proposer git rm；4个C++/Python核心代码 aborted，需人工 |
 | #10034 | [Ops][Feature] add setup of batch_invariant_ops | ✅ | --ours：build_aclnn.sh 保留HEAD旧安装方式（upstream替换为subshell新流程，不确定兼容性）；其余7文件自动合并 |
 | #9882 | [CI] Rename CI variant label a2→910b | ✅ | 无冲突 |
