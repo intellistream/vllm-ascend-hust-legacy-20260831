@@ -33,50 +33,50 @@
 | PR | 标题 | 状态 | 处理方式 |
 |----|------|------|----------|
 | #9128 | [Misc] Upgrade torch-npu to 2.10.0 | 🔍 | 🔍 待确认：CANN 8.5.1 vs 9.0.0 / torch-npu 2.9.0 vs 2.10.0 |
-| #9160 | [CI] Remove quantization e2e test case | ⏸️ | — |
+| #9160 | [CI] Remove quantization e2e test case | ✅ | --ours：保留量化测试条目 + 保留被删的 test_quantization.py |
 | #9298 | [Doc] Fix CANN 9.0.0 release-notes URL | 🔍 | 🔍 待确认：同#9128，依赖CANN版本 |
-| #9271 | [Feature][Ops] Add A5 custom operator build support | ⏸️ | — |
-| #7886 | [Ops][Feature] Add support for Qwen2.5-Math-RM-72B | ⏸️ | — |
-| #8537 | [Doc] add Mixtral-8x7B-Instruct-v0.1 model docs | ⏸️ | — |
-| #9466 | [Doc] Correct the README file and link errors | ⏸️ | — |
-| #9201 | [Refactor] migrate compilation backend torchair→npugraph | ⏸️ | — |
-| #9449 | [CI][Nightly] Add the external_dp test framework | ⏸️ | — |
-| #9344 | [Doc] [Feature] Add Hy3-preview model tutorials doc | ⏸️ | — |
-| #9572 | [1/N][Feature] Support FULL_AND_PIECEWISE | ⏸️ | — |
-| #9668 | [Ops][Misc] Remove VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL | ⏸️ | — |
-| #7820 | [Feature] Mooncake kvpool usage optimization | ⏸️ | — |
-| #9697 | Misc: introduce additional_config for dsa_cp | ⏸️ | — |
-| #9807 | [CI] Refactor test folder | ⏸️ | — |
-| #9881 | [Doc][Misc] Update model-code converter writing guide | ⏸️ | — |
-| #9989 | [Doc] Translated Doc files | ⏸️ | — |
-| #10017 | [Test][CI] final part for selected test | ⏸️ | — |
-| #9980 | [Doc]Add InternVL3.5 documentation | ⏸️ | — |
-| #9481 | [Doc] Update MiniMax-M2.5.md change A2 to single node | ⏸️ | — |
-| #9731 | [Feature] Add Mooncake SSD offload with embedded client | ⏸️ | — |
-| #10090 | [Doc] move example from installation to quick_start | ⏸️ | — |
-| #10059 | [CI] add slash command dispatch | ⏸️ | — |
-| #10139 | [Doc] Translated Doc files | ⏸️ | — |
-| #10070 | [Doc][CI] Refine doctest workflow | ⏸️ | — |
-| #10269 | [Doc] Translated Doc files | ⏸️ | — |
-| #10292 | [Feature] add ascendc ops store_kv_block | ⏸️ | — |
-| #10034 | [Ops][Feature] add setup of batch_invariant_ops | ⏸️ | — |
-| #9882 | [CI] Rename CI variant label a2→910b | ⏸️ | — |
-| #10344 | [Doc] Fix explanations for batch_invariant_ops | ⏸️ | — |
-| #10571 | [Doc][Misc] Update v0.21.0rc1 release notes | ⏸️ | — |
-| #10533 | [Doc] Correct product name A5→Ascend 950 | ⏸️ | — |
+| #9271 | [Feature][Ops] Add A5 custom operator build support | 🔍 | 🔍 A5产品名待确认 |
+| #7886 | [Ops][Feature] Add support for Qwen2.5-Math-RM-72B | ✅ | --theirs：models/index.md 纯追加2个新模型条目，其余4文件自动合并 |
+| #8537 | [Doc] add Mixtral-8x7B-Instruct-v0.1 model docs | ✅ | 无冲突：纯新增模型文档和测试配置 |
+| #9466 | [Doc] Correct the README file and link errors | ✅ | 手动合并：保留About This Fork + 追加supported models链接；版本冲突 --ours |
+| #9201 | [Refactor] migrate compilation backend torchair→npugraph | ✅ | git rm + --theirs：torchair→npugraph_ex 纯重命名，2个测试+1个已删README |
+| #9449 | [CI][Nightly] Add the external_dp test framework | ✅ | 无冲突 |
+| #9344 | [Doc][Feature] Add Hy3-preview model tutorials doc | ✅ | --theirs：pyproject.toml 末尾追加2个模型文件路径，其余4文件自动合并 |
+| #9572 | [1/N][Feature] Support FULL_AND_PIECEWISE | 🔍 | 🔍 待确认：8个冲突含核心代码，upstream含旧版update_aclgraph_sizes被#9962移除 |
+| #9668 | [Ops][Misc] Remove VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL | ✅ | 手动：ascend_config.py --theirs但multistream_dsv4_dsa_overlap保持True；test --theirs |
+| #7820 | [Feature] Mooncake kvpool usage optimization | ✅ | --theirs：Mooncake 初始化优化+fabric内存+ReplicateConfig，test 纯追加 |
+| #9697 | Misc: introduce additional_config for dsa_cp | ✅ | add_config.md --ours（保留#10518条目），test_basic.py --theirs（新增测试参数） |
+| #9807 | [CI] Refactor test folder | ✅ | 无冲突 |
+| #9881 | [Doc][Misc] Update model-code converter writing guide | 🔍 | 🔍 待确认：upstream 全文重写（587行→469行），删除5章节+新增开发者视角+本地预览 |
+| #9989 | [Doc] Translated Doc files | 🔍 | 🔍 依赖 #9881：doc_writing.po 冲突需等 #9881 全文重写决策；release_notes.po 纯翻译可 --theirs |
+| #10017 | [Test][CI] final part for selected test | ✅ | 无冲突 |
+| #9980 | [Doc]Add InternVL3.5 documentation | ✅ | 无冲突：纯新增模型文档，index.md 自动合并 |
+| #9481 | [Doc] Update MiniMax-M2.5.md change A2 to single node | 🔍 | 🔍 待确认：HUST 用多节点还是单节点部署 MiniMax-M2.5？upstream 完全重写为单节点+Eagle3 |
+| #9731 | [Feature] Add Mooncake SSD offload with embedded client | ✅ | --theirs：SSD offload 纯追加，per-rank 目录 |
+| #10090 | [Doc] move example from installation to quick_start | ✅ | --ours：版本表保留 CANN 8.5.1，其余内容自动合并 |
+| #10059 | [CI] add slash command dispatch | ✅ | 无冲突 |
+| #10139 | [Doc] Translated Doc files | 🔍 | 🔍 8个.po文件冲突（时间戳+内容），依赖英文文档同步完成 |
+| #10070 | [Doc][CI] Refine doctest workflow | ✅ | conf.py --ours（CANN 8.5.1），installation.md --theirs（多一个 fallback 镜像 URL） |
+| #10269 | [Doc] Translated Doc files | 🔍 | 🔍 翻译文件，同 #9989 #10139，依赖英文文档同步 |
+| #10292 | [Feature] add ascendc ops store_kv_block | 🔍 | 🔍 部分完成：torch_binding_meta --theirs + llm_base_proposer git rm；4个C++/Python核心代码 aborted，需人工 |
+| #10034 | [Ops][Feature] add setup of batch_invariant_ops | ✅ | --ours：build_aclnn.sh 保留HEAD旧安装方式（upstream替换为subshell新流程，不确定兼容性）；其余7文件自动合并 |
+| #9882 | [CI] Rename CI variant label a2→910b | ✅ | 无冲突 |
+| #10344 | [Doc] Fix explanations for batch_invariant_ops | ✅ | 无冲突：文档修正，自动合并 |
+| #10571 | [Doc][Misc] Update v0.21.0rc1 release notes | ✅ | --theirs：纯新增 v0.21.0rc1 发布说明和版本记录 |
+| #10533 | [Doc] Correct product name A5→Ascend 950 | 🔍 | 🔍 待确认：产品名 A5→Ascend 950，需确认HUST环境 |
 
 ---
 
 ## 第 3 批：pick-later — 待验证（7 PRs） 🟢
 
-| PR | 标题 | 状态 |
-|----|------|------|
-| #7804 | [Feature] Verify and support Qwen3-ASR-1.7B | ⏸️ |
-| #9567 | [Doc] remove --async-scheduling from configs/docs | ⏸️ |
-| #8368 | [Doc][Test] Add testable docs codegen framework | ⏸️ |
-| #9955 | [Test] Move more test to selected way | ⏸️ |
-| #10027 | [Test] Update test coverage guide | ⏸️ |
-| #10576 | [CI] Fix /e2e command | ⏸️ |
+| PR | 标题 | 状态 | 处理方式 |
+|----|------|------|----------|
+| #7804 | [Feature] Verify and support Qwen3-ASR-1.7B | ✅ | 手动合并：index.md --ours（HEAD已有4条更全），json只加Qwen3-ASR-1.7B（未加Qwen3-VL-4B-Instruct） |
+| #9567 | [Doc] remove --async-scheduling from configs/docs | 🔍 | 🔍 14个冲突超阈值：13 modify/delete(git rm可解) + 1 content yaml；有1个文件修改 |
+| #8368 | [Doc][Test] Add testable docs codegen framework | ✅ | git rm ×4 + index.md --ours（HEAD保留ascend_benchmark_runner+doc_writing） |
+| #9955 | [Test] Move more test to selected way | 🔍 | 🔍 14个冲突超阈值：310p测试文件大规模目录重构，与HEAD目录结构不兼容 |
+| #10027 | [Test] Update test coverage guide | ✅ | git rm ×4 + --ours ×2（CI镜像URL、pip命令、文档表述均保留HEAD） |
+| #10576 | [CI] Fix /e2e command | ✅ | git rm ×4 + --theirs ×2（CI镜像构建版本号更新为上游新版本） |
 
 ---
 
