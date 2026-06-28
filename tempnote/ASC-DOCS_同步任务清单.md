@@ -51,7 +51,7 @@
 | #9989 | [Doc] Translated Doc files | 🔍 | 🔍 依赖 #9881：doc_writing.po 冲突需等 #9881 全文重写决策；release_notes.po 纯翻译可 --theirs |
 | #10017 | [Test][CI] final part for selected test | ✅ | 无冲突 |
 | #9980 | [Doc]Add InternVL3.5 documentation | ✅ | 无冲突：纯新增模型文档，index.md 自动合并 |
-| #9481 | [Doc] Update MiniMax-M2.5.md change A2 to single node | 🔍 | 🔍 待确认：HUST 用多节点还是单节点部署 MiniMax-M2.5？upstream 完全重写为单节点+Eagle3 |
+| #9481 | [Doc] Update MiniMax-M2.5.md change A2 to single node | ✅ | 空操作：--ours，保留当前双节点部署文档 |
 | #9731 | [Feature] Add Mooncake SSD offload with embedded client | ✅ | --theirs：SSD offload 纯追加，per-rank 目录 |
 | #10090 | [Doc] move example from installation to quick_start | ✅ | --ours：版本表保留 CANN 8.5.1，其余内容自动合并 |
 | #10059 | [CI] add slash command dispatch | ✅ | 无冲突 |
