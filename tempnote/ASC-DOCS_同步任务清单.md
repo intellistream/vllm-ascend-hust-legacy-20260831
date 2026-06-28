@@ -72,7 +72,7 @@
 | PR | 标题 | 状态 | 处理方式 |
 |----|------|------|----------|
 | #7804 | [Feature] Verify and support Qwen3-ASR-1.7B | ✅ | 手动合并：index.md --ours（HEAD已有4条更全），json只加Qwen3-ASR-1.7B（未加Qwen3-VL-4B-Instruct） |
-| #9567 | [Doc] remove --async-scheduling from configs/docs | 🔍 | 🔍 14个冲突超阈值：13 modify/delete(git rm可解) + 1 content yaml；有1个文件修改 |
+| #9567 | [Doc] remove --async-scheduling from configs/docs | ✅ | 空操作：--async-scheduling 已在 #9962 移除，git rm + --ours |
 | #8368 | [Doc][Test] Add testable docs codegen framework | ✅ | git rm ×4 + index.md --ours（HEAD保留ascend_benchmark_runner+doc_writing） |
 | #9955 | [Test] Move more test to selected way | 🔍 | 🔍 14个冲突超阈值：310p测试文件大规模目录重构，与HEAD目录结构不兼容 |
 | #10027 | [Test] Update test coverage guide | ✅ | git rm ×4 + --ours ×2（CI镜像URL、pip命令、文档表述均保留HEAD） |
