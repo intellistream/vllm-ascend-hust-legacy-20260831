@@ -47,7 +47,7 @@
 | #7820 | [Feature] Mooncake kvpool usage optimization | ✅ | --theirs：Mooncake 初始化优化+fabric内存+ReplicateConfig，test 纯追加 |
 | #9697 | Misc: introduce additional_config for dsa_cp | ✅ | add_config.md --ours（保留#10518条目），test_basic.py --theirs（新增测试参数） |
 | #9807 | [CI] Refactor test folder | ✅ | 无冲突 |
-| #9881 | [Doc][Misc] Update model-code converter writing guide | 🔍 | 🔍 待确认：upstream 全文重写（587行→469行），删除5章节+新增开发者视角+本地预览 |
+| #9881 | [Doc][Misc] Update model-code converter writing guide | ✅ | 无冲突自动合并，全文重写 |
 | #9989 | [Doc] Translated Doc files | 🔍 | 🔍 依赖 #9881：doc_writing.po 冲突需等 #9881 全文重写决策；release_notes.po 纯翻译可 --theirs |
 | #10017 | [Test][CI] final part for selected test | ✅ | 无冲突 |
 | #9980 | [Doc]Add InternVL3.5 documentation | ✅ | 无冲突：纯新增模型文档，index.md 自动合并 |
