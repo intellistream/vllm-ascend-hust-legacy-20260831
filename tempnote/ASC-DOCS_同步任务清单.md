@@ -42,7 +42,7 @@
 | #9201 | [Refactor] migrate compilation backend torchair→npugraph | ✅ | git rm + --theirs：torchair→npugraph_ex 纯重命名，2个测试+1个已删README |
 | #9449 | [CI][Nightly] Add the external_dp test framework | ✅ | 无冲突 |
 | #9344 | [Doc][Feature] Add Hy3-preview model tutorials doc | ✅ | --theirs：pyproject.toml 末尾追加2个模型文件路径，其余4文件自动合并 |
-| #9572 | [1/N][Feature] Support FULL_AND_PIECEWISE | 🔍 | 🔍 待确认：8个冲突含核心代码，upstream含旧版update_aclgraph_sizes被#9962移除 |
+| #9572 | [1/N][Feature] Support FULL_AND_PIECEWISE | ⏭️ | 跳过：功能特性PR非文档，核心代码冲突(platform.py/utils.py)，旧版update_aclgraph_sizes已被#9962移除 |
 | #9668 | [Ops][Misc] Remove VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL | ✅ | 手动：ascend_config.py --theirs但multistream_dsv4_dsa_overlap保持True；test --theirs |
 | #7820 | [Feature] Mooncake kvpool usage optimization | ✅ | --theirs：Mooncake 初始化优化+fabric内存+ReplicateConfig，test 纯追加 |
 | #9697 | Misc: introduce additional_config for dsa_cp | ✅ | add_config.md --ours（保留#10518条目），test_basic.py --theirs（新增测试参数） |
@@ -58,7 +58,7 @@
 | #10139 | [Doc] Translated Doc files | ✅ | 空操作：全部 --ours，无英文源匹配上游 |
 | #10070 | [Doc][CI] Refine doctest workflow | ✅ | conf.py --ours（CANN 8.5.1），installation.md --theirs（多一个 fallback 镜像 URL） |
 | #10269 | [Doc] Translated Doc files | ✅ | 空操作：全部 --ours，无英文源匹配上游 |
-| #10292 | [Feature] add ascendc ops store_kv_block | 🔍 | 🔍 部分完成：torch_binding_meta --theirs + llm_base_proposer git rm；4个C++/Python核心代码 aborted，需人工 |
+| #10292 | [Feature] add ascendc ops store_kv_block | ⏭️ | 跳过：4个C++/Python核心代码冲突含model_runner_v1.py，需人工审查 |
 | #10034 | [Ops][Feature] add setup of batch_invariant_ops | ✅ | --ours：build_aclnn.sh 保留HEAD旧安装方式（upstream替换为subshell新流程，不确定兼容性）；其余7文件自动合并 |
 | #9882 | [CI] Rename CI variant label a2→910b | ✅ | 无冲突 |
 | #10344 | [Doc] Fix explanations for batch_invariant_ops | ✅ | 无冲突：文档修正，自动合并 |
