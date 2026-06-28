@@ -55,7 +55,7 @@
 | #9731 | [Feature] Add Mooncake SSD offload with embedded client | ✅ | --theirs：SSD offload 纯追加，per-rank 目录 |
 | #10090 | [Doc] move example from installation to quick_start | ✅ | --ours：版本表保留 CANN 8.5.1，其余内容自动合并 |
 | #10059 | [CI] add slash command dispatch | ✅ | 无冲突 |
-| #10139 | [Doc] Translated Doc files | 🔍 | 🔍 8个.po文件冲突（时间戳+内容），依赖英文文档同步完成 |
+| #10139 | [Doc] Translated Doc files | ✅ | 空操作：全部 --ours，无英文源匹配上游 |
 | #10070 | [Doc][CI] Refine doctest workflow | ✅ | conf.py --ours（CANN 8.5.1），installation.md --theirs（多一个 fallback 镜像 URL） |
 | #10269 | [Doc] Translated Doc files | 🔍 | 🔍 翻译文件，同 #9989 #10139，依赖英文文档同步 |
 | #10292 | [Feature] add ascendc ops store_kv_block | 🔍 | 🔍 部分完成：torch_binding_meta --theirs + llm_base_proposer git rm；4个C++/Python核心代码 aborted，需人工 |
