@@ -32,7 +32,7 @@
 
 | PR | 标题 | 状态 | 处理方式 |
 |----|------|------|----------|
-| #9128 | [Misc] Upgrade torch-npu to 2.10.0 | 🔍 | 🔍 待确认：CANN 8.5.1 vs 9.0.0 / torch-npu 2.9.0 vs 2.10.0 |
+| #9128 | [Misc] Upgrade torch-npu to 2.10.0 | ✅ | 已在批处理中自动合并，版本号错误已修复：pyproject.toml/CMakeLists/conf.py/installation.md 回退至 2.9.0/8.5.1 |
 | #9160 | [CI] Remove quantization e2e test case | ✅ | --ours：保留量化测试条目 + 保留被删的 test_quantization.py |
 | #9298 | [Doc] Fix CANN 9.0.0 release-notes URL | 🔍 | 🔍 待确认：同#9128，依赖CANN版本 |
 | #9271 | [Feature][Ops] Add A5 custom operator build support | 🔍 | 🔍 A5产品名待确认 |
