@@ -35,7 +35,7 @@
 | #9128 | [Misc] Upgrade torch-npu to 2.10.0 | ✅ | 已在批处理中自动合并，版本号错误已修复：pyproject.toml/CMakeLists/conf.py/installation.md 回退至 2.9.0/8.5.1 |
 | #9160 | [CI] Remove quantization e2e test case | ✅ | --ours：保留量化测试条目 + 保留被删的 test_quantization.py |
 | #9298 | [Doc] Fix CANN 9.0.0 release-notes URL | ✅ | 空操作：--ours，HEAD 已含正确 CANN 8.5.1 URL |
-| #9271 | [Feature][Ops] Add A5 custom operator build support | 🔍 | 🔍 A5产品名待确认 |
+| #9271 | [Feature][Ops] Add A5 custom operator build support | ✅ | 空操作：--ours + git rm，A5/Ascend950 平台不需要（910B/C） |
 | #7886 | [Ops][Feature] Add support for Qwen2.5-Math-RM-72B | ✅ | --theirs：models/index.md 纯追加2个新模型条目，其余4文件自动合并 |
 | #8537 | [Doc] add Mixtral-8x7B-Instruct-v0.1 model docs | ✅ | 无冲突：纯新增模型文档和测试配置 |
 | #9466 | [Doc] Correct the README file and link errors | ✅ | 手动合并：保留About This Fork + 追加supported models链接；版本冲突 --ours |
@@ -63,7 +63,7 @@
 | #9882 | [CI] Rename CI variant label a2→910b | ✅ | 无冲突 |
 | #10344 | [Doc] Fix explanations for batch_invariant_ops | ✅ | 无冲突：文档修正，自动合并 |
 | #10571 | [Doc][Misc] Update v0.21.0rc1 release notes | ✅ | --theirs：纯新增 v0.21.0rc1 发布说明和版本记录 |
-| #10533 | [Doc] Correct product name A5→Ascend 950 | 🔍 | 🔍 待确认：产品名 A5→Ascend 950，需确认HUST环境 |
+| #10533 | [Doc] Correct product name A5→Ascend 950 | ✅ | 空操作：--ours，A5/Ascend 950 文档重命名不适用（910B/C） |
 
 ---
 
