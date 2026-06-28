@@ -11,11 +11,11 @@ This document describes how to install vllm-ascend manually.
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to the documentation [CANN 9.0.0](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | == 9.0.0                        | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | == 2.10.0                       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | == 2.10.0                       | Required for torch-npu and vllm, No need to install manually, it will be auto installed in below steps |
-    | NNAL          | == 9.0.0                        | Required for libatb.so, enables advanced tensor operations |
+    | Ascend HDK    | Refer to the documentation [CANN 8.5.0](https://www.hiascend.com/document/detail/zh/canncommercial/850/releasenote/releasenote_0000.html) | Required for CANN |
+    | CANN          | == 8.5.1                        | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.9.0             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.9.0                          | Required for torch-npu and vllm           |
+    | NNAL          | == 8.5.1                       | Required for libatb.so, enables advanced tensor operations |
 
 There are two installation methods:
 
@@ -91,18 +91,18 @@ python -m pip install --upgrade pip
 pip3 install attrs numpy decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_9.0.0_linux-"$(uname -i)".run --full
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_8.5.1_linux-"$(uname -i)".run --full
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run
-./Ascend-cann-910b-ops_9.0.0_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run
+./Ascend-cann-910b-ops_8.5.1_linux-"$(uname -i)".run --install
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.0.0/Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run
-./Ascend-cann-nnal_9.0.0_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.1/Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run
+./Ascend-cann-nnal_8.5.1_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
