@@ -171,13 +171,15 @@ public:
                                 __gm__ void* counts, __gm__ void* weight_t,
                                 __gm__ void* y, uint32_t input_dim,
                                 uint32_t output_dim, uint32_t tile_count,
-                                uint32_t work_items, uint32_t block_dim)
+                                uint32_t work_items, uint32_t block_dim,
+                                uint32_t output_tile)
     {
         inputDim_ = input_dim;
         outputDim_ = output_dim;
         tileCount_ = tile_count;
         workItems_ = work_items;
         blockDim_ = block_dim;
+        outputTile_ = output_tile;
 
         valuesGm_.SetGlobalBuffer((__gm__ X_T*)values);
         indicesGm_.SetGlobalBuffer((__gm__ int32_t*)indices);
@@ -198,10 +200,10 @@ public:
              work_idx += blockDim_) {
             uint32_t row = work_idx / tileCount_;
             uint32_t tile_idx = work_idx - row * tileCount_;
-            uint32_t out_start = tile_idx * OUTPUT_TILE;
+            uint32_t out_start = tile_idx * outputTile_;
             uint32_t tile_len = outputDim_ - out_start;
-            if (tile_len > OUTPUT_TILE) {
-                tile_len = OUTPUT_TILE;
+            if (tile_len > outputTile_) {
+                tile_len = outputTile_;
             }
             ComputeTile(row, out_start, tile_len);
         }
@@ -213,7 +215,6 @@ private:
     {
         AscendC::LocalTensor<float> acc = accBufferY_.Get<float>();
         Duplicate(acc, 0.0F, tile_len);
-        AscendC::PipeBarrier<PIPE_V>();
 
         uint64_t packed_offset = static_cast<uint64_t>(row) * inputDim_;
         int32_t nnz = countsGm_.GetValue(row);
@@ -252,13 +253,10 @@ private:
         AscendC::LocalTensor<float> acc = accBufferY_.Get<float>();
 
         Cast(wTmp, wLocal, AscendC::RoundMode::CAST_NONE, tile_len);
-        AscendC::PipeBarrier<PIPE_V>();
         inQueueW_.FreeTensor(wLocal);
 
         Muls(wTmp, wTmp, x_value, tile_len);
-        AscendC::PipeBarrier<PIPE_V>();
         Add(acc, acc, wTmp, tile_len);
-        AscendC::PipeBarrier<PIPE_V>();
     }
 
     __aicore__ inline void CopyOut(uint32_t row, uint32_t out_start,
@@ -267,7 +265,6 @@ private:
         AscendC::LocalTensor<float> acc = accBufferY_.Get<float>();
         AscendC::LocalTensor<Y_T> yLocal = outQueueY_.AllocTensor<Y_T>();
         Cast(yLocal, acc, AscendC::RoundMode::CAST_RINT, tile_len);
-        AscendC::PipeBarrier<PIPE_V>();
         outQueueY_.EnQue<Y_T>(yLocal);
 
         yLocal = outQueueY_.DeQue<Y_T>();
@@ -298,6 +295,182 @@ private:
     uint32_t tileCount_;
     uint32_t workItems_;
     uint32_t blockDim_;
+    uint32_t outputTile_;
+};
+
+template <typename scalar_t>
+class ActivationSparseSiluAndMulPackedTransposed {
+public:
+    using X_T = scalar_t;
+    using W_T = scalar_t;
+    using Y_T = scalar_t;
+
+    static constexpr int32_t BUFFER_NUM = 1;
+    static constexpr uint32_t OUTPUT_TILE = 1024;
+
+    __aicore__ inline ActivationSparseSiluAndMulPackedTransposed(
+        AscendC::TPipe* pipe)
+        : pipe_(pipe)
+    {}
+
+    __aicore__ inline void Init(__gm__ void* values, __gm__ void* indices,
+                                __gm__ void* counts, __gm__ void* weight_t,
+                                __gm__ void* y, uint32_t input_dim,
+                                uint32_t intermediate_dim,
+                                uint32_t tile_count, uint32_t work_items,
+                                uint32_t block_dim, uint32_t output_tile)
+    {
+        inputDim_ = input_dim;
+        intermediateDim_ = intermediate_dim;
+        gateUpDim_ = intermediate_dim * 2;
+        tileCount_ = tile_count;
+        workItems_ = work_items;
+        blockDim_ = block_dim;
+        outputTile_ = output_tile;
+
+        valuesGm_.SetGlobalBuffer((__gm__ X_T*)values);
+        indicesGm_.SetGlobalBuffer((__gm__ int32_t*)indices);
+        countsGm_.SetGlobalBuffer((__gm__ int32_t*)counts);
+        weightTGm_.SetGlobalBuffer((__gm__ W_T*)weight_t);
+        yGm_.SetGlobalBuffer((__gm__ Y_T*)y);
+
+        pipe_->InitBuffer(inQueueW_, BUFFER_NUM, 2 * OUTPUT_TILE * sizeof(W_T));
+        pipe_->InitBuffer(outQueueY_, BUFFER_NUM, OUTPUT_TILE * sizeof(Y_T));
+        pipe_->InitBuffer(tmpBufferW_, 2 * OUTPUT_TILE * sizeof(float));
+        pipe_->InitBuffer(accGateBuffer_, OUTPUT_TILE * sizeof(float));
+        pipe_->InitBuffer(accUpBuffer_, OUTPUT_TILE * sizeof(float));
+        pipe_->InitBuffer(siluBuffer_, OUTPUT_TILE * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        uint32_t block_idx = AscendC::GetBlockIdx();
+        for (uint32_t work_idx = block_idx; work_idx < workItems_;
+             work_idx += blockDim_) {
+            uint32_t row = work_idx / tileCount_;
+            uint32_t tile_idx = work_idx - row * tileCount_;
+            uint32_t out_start = tile_idx * outputTile_;
+            uint32_t tile_len = intermediateDim_ - out_start;
+            if (tile_len > outputTile_) {
+                tile_len = outputTile_;
+            }
+            ComputeTile(row, out_start, tile_len);
+        }
+    }
+
+private:
+    __aicore__ inline void ComputeTile(uint32_t row, uint32_t out_start,
+                                       uint32_t tile_len)
+    {
+        AscendC::LocalTensor<float> accGate = accGateBuffer_.Get<float>();
+        AscendC::LocalTensor<float> accUp = accUpBuffer_.Get<float>();
+        Duplicate(accGate, 0.0F, tile_len);
+        Duplicate(accUp, 0.0F, tile_len);
+
+        uint64_t packed_offset = static_cast<uint64_t>(row) * inputDim_;
+        int32_t nnz = countsGm_.GetValue(row);
+        for (int32_t nz_pos = 0; nz_pos < nnz; ++nz_pos) {
+            uint64_t value_offset = packed_offset + static_cast<uint32_t>(nz_pos);
+            int32_t in_col = indicesGm_.GetValue(value_offset);
+            float x_value = static_cast<float>(valuesGm_.GetValue(value_offset));
+            CopyInGateUp(static_cast<uint32_t>(in_col), out_start, tile_len);
+            ComputeGateUp(accGate, accUp, x_value, tile_len);
+        }
+        ApplySiluAndCopyOut(row, out_start, tile_len);
+    }
+
+    __aicore__ inline void CopyInGateUp(uint32_t in_col, uint32_t out_start,
+                                        uint32_t tile_len)
+    {
+        AscendC::LocalTensor<W_T> wLocal = inQueueW_.AllocTensor<W_T>();
+        uint64_t gate_offset =
+            static_cast<uint64_t>(in_col) * gateUpDim_ + out_start;
+        uint64_t up_offset = static_cast<uint64_t>(in_col) * gateUpDim_ +
+                             intermediateDim_ + out_start;
+        AscendC::DataCopyPadExtParams<W_T> pad_params{false, 0, 0, 0};
+        AscendC::DataCopyExtParams copy_params{
+            1,
+            static_cast<uint32_t>(tile_len * sizeof(W_T)),
+            0,
+            0,
+            0,
+        };
+        DataCopyPad(wLocal, weightTGm_[gate_offset], copy_params, pad_params);
+        DataCopyPad(wLocal[OUTPUT_TILE], weightTGm_[up_offset], copy_params,
+                    pad_params);
+        inQueueW_.EnQue(wLocal);
+    }
+
+    __aicore__ inline void ComputeGateUp(AscendC::LocalTensor<float> accGate,
+                                         AscendC::LocalTensor<float> accUp,
+                                         float x_value, uint32_t tile_len)
+    {
+        AscendC::LocalTensor<W_T> wLocal = inQueueW_.DeQue<W_T>();
+        AscendC::LocalTensor<float> wTmp = tmpBufferW_.Get<float>();
+
+        Cast(wTmp, wLocal, AscendC::RoundMode::CAST_NONE, tile_len);
+        Cast(wTmp[OUTPUT_TILE], wLocal[OUTPUT_TILE],
+             AscendC::RoundMode::CAST_NONE, tile_len);
+        inQueueW_.FreeTensor(wLocal);
+
+        Muls(wTmp, wTmp, x_value, tile_len);
+        Add(accGate, accGate, wTmp, tile_len);
+        Muls(wTmp[OUTPUT_TILE], wTmp[OUTPUT_TILE], x_value, tile_len);
+        Add(accUp, accUp, wTmp[OUTPUT_TILE], tile_len);
+    }
+
+    __aicore__ inline void ApplySiluAndCopyOut(uint32_t row,
+                                               uint32_t out_start,
+                                               uint32_t tile_len)
+    {
+        AscendC::LocalTensor<float> accGate = accGateBuffer_.Get<float>();
+        AscendC::LocalTensor<float> accUp = accUpBuffer_.Get<float>();
+        AscendC::LocalTensor<float> silu = siluBuffer_.Get<float>();
+
+        Muls(silu, accGate, -1.0F, tile_len);
+        Exp(silu, silu, tile_len);
+        Adds(silu, silu, 1.0F, tile_len);
+        Div(silu, accGate, silu, tile_len);
+        Mul(silu, silu, accUp, tile_len);
+
+        AscendC::LocalTensor<Y_T> yLocal = outQueueY_.AllocTensor<Y_T>();
+        Cast(yLocal, silu, AscendC::RoundMode::CAST_RINT, tile_len);
+        outQueueY_.EnQue<Y_T>(yLocal);
+
+        yLocal = outQueueY_.DeQue<Y_T>();
+        uint64_t y_offset =
+            static_cast<uint64_t>(row) * intermediateDim_ + out_start;
+        AscendC::DataCopyExtParams copy_params{
+            1,
+            static_cast<uint32_t>(tile_len * sizeof(Y_T)),
+            0,
+            0,
+            0,
+        };
+        DataCopyPad(yGm_[y_offset], yLocal, copy_params);
+        outQueueY_.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe* pipe_;
+    AscendC::TQue<AscendC::QuePosition::VECIN, BUFFER_NUM> inQueueW_;
+    AscendC::TQue<AscendC::QuePosition::VECOUT, BUFFER_NUM> outQueueY_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> tmpBufferW_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> accGateBuffer_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> accUpBuffer_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> siluBuffer_;
+    AscendC::GlobalTensor<X_T> valuesGm_;
+    AscendC::GlobalTensor<int32_t> indicesGm_;
+    AscendC::GlobalTensor<int32_t> countsGm_;
+    AscendC::GlobalTensor<W_T> weightTGm_;
+    AscendC::GlobalTensor<Y_T> yGm_;
+    uint32_t inputDim_;
+    uint32_t intermediateDim_;
+    uint32_t gateUpDim_;
+    uint32_t tileCount_;
+    uint32_t workItems_;
+    uint32_t blockDim_;
+    uint32_t outputTile_;
 };
 
 template <typename scalar_t>
@@ -318,14 +491,15 @@ public:
                                 __gm__ void* threshold, __gm__ void* y,
                                 uint32_t input_dim, uint32_t output_dim,
                                 uint32_t tile_count, uint32_t work_items,
-                                uint32_t block_dim, bool threshold_per_row,
-                                bool inclusive)
+                                uint32_t block_dim, uint32_t output_tile,
+                                bool threshold_per_row, bool inclusive)
     {
         inputDim_ = input_dim;
         outputDim_ = output_dim;
         tileCount_ = tile_count;
         workItems_ = work_items;
         blockDim_ = block_dim;
+        outputTile_ = output_tile;
         thresholdPerRow_ = threshold_per_row;
         inclusive_ = inclusive;
 
@@ -347,10 +521,10 @@ public:
              work_idx += blockDim_) {
             uint32_t row = work_idx / tileCount_;
             uint32_t tile_idx = work_idx - row * tileCount_;
-            uint32_t out_start = tile_idx * OUTPUT_TILE;
+            uint32_t out_start = tile_idx * outputTile_;
             uint32_t tile_len = outputDim_ - out_start;
-            if (tile_len > OUTPUT_TILE) {
-                tile_len = OUTPUT_TILE;
+            if (tile_len > outputTile_) {
+                tile_len = outputTile_;
             }
             ComputeTile(row, out_start, tile_len);
         }
@@ -362,7 +536,6 @@ private:
     {
         AscendC::LocalTensor<float> acc = accBufferY_.Get<float>();
         Duplicate(acc, 0.0F, tile_len);
-        AscendC::PipeBarrier<PIPE_V>();
 
         float threshold = thresholdPerRow_ ? thresholdGm_.GetValue(row)
                                            : thresholdGm_.GetValue(0);
@@ -406,13 +579,10 @@ private:
         AscendC::LocalTensor<float> acc = accBufferY_.Get<float>();
 
         Cast(wTmp, wLocal, AscendC::RoundMode::CAST_NONE, tile_len);
-        AscendC::PipeBarrier<PIPE_V>();
         inQueueW_.FreeTensor(wLocal);
 
         Muls(wTmp, wTmp, x_value, tile_len);
-        AscendC::PipeBarrier<PIPE_V>();
         Add(acc, acc, wTmp, tile_len);
-        AscendC::PipeBarrier<PIPE_V>();
     }
 
     __aicore__ inline void CopyOut(uint32_t row, uint32_t out_start,
@@ -421,7 +591,6 @@ private:
         AscendC::LocalTensor<float> acc = accBufferY_.Get<float>();
         AscendC::LocalTensor<Y_T> yLocal = outQueueY_.AllocTensor<Y_T>();
         Cast(yLocal, acc, AscendC::RoundMode::CAST_RINT, tile_len);
-        AscendC::PipeBarrier<PIPE_V>();
         outQueueY_.EnQue<Y_T>(yLocal);
 
         yLocal = outQueueY_.DeQue<Y_T>();
@@ -451,6 +620,189 @@ private:
     uint32_t tileCount_;
     uint32_t workItems_;
     uint32_t blockDim_;
+    uint32_t outputTile_;
+    bool thresholdPerRow_;
+    bool inclusive_;
+};
+
+template <typename scalar_t>
+class ActivationSparseSiluAndMulDirectTransposed {
+public:
+    using X_T = scalar_t;
+    using W_T = scalar_t;
+    using Y_T = scalar_t;
+
+    static constexpr int32_t BUFFER_NUM = 1;
+    static constexpr uint32_t OUTPUT_TILE = 1024;
+
+    __aicore__ inline ActivationSparseSiluAndMulDirectTransposed(
+        AscendC::TPipe* pipe)
+        : pipe_(pipe)
+    {}
+
+    __aicore__ inline void Init(__gm__ void* x, __gm__ void* weight_t,
+                                __gm__ void* threshold, __gm__ void* y,
+                                uint32_t input_dim, uint32_t intermediate_dim,
+                                uint32_t tile_count, uint32_t work_items,
+                                uint32_t block_dim, uint32_t output_tile,
+                                bool threshold_per_row, bool inclusive)
+    {
+        inputDim_ = input_dim;
+        intermediateDim_ = intermediate_dim;
+        gateUpDim_ = intermediate_dim * 2;
+        tileCount_ = tile_count;
+        workItems_ = work_items;
+        blockDim_ = block_dim;
+        outputTile_ = output_tile;
+        thresholdPerRow_ = threshold_per_row;
+        inclusive_ = inclusive;
+
+        xGm_.SetGlobalBuffer((__gm__ X_T*)x);
+        weightTGm_.SetGlobalBuffer((__gm__ W_T*)weight_t);
+        thresholdGm_.SetGlobalBuffer((__gm__ float*)threshold);
+        yGm_.SetGlobalBuffer((__gm__ Y_T*)y);
+
+        pipe_->InitBuffer(inQueueW_, BUFFER_NUM, 2 * OUTPUT_TILE * sizeof(W_T));
+        pipe_->InitBuffer(outQueueY_, BUFFER_NUM, OUTPUT_TILE * sizeof(Y_T));
+        pipe_->InitBuffer(tmpBufferW_, 2 * OUTPUT_TILE * sizeof(float));
+        pipe_->InitBuffer(accGateBuffer_, OUTPUT_TILE * sizeof(float));
+        pipe_->InitBuffer(accUpBuffer_, OUTPUT_TILE * sizeof(float));
+        pipe_->InitBuffer(siluBuffer_, OUTPUT_TILE * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        uint32_t block_idx = AscendC::GetBlockIdx();
+        for (uint32_t work_idx = block_idx; work_idx < workItems_;
+             work_idx += blockDim_) {
+            uint32_t row = work_idx / tileCount_;
+            uint32_t tile_idx = work_idx - row * tileCount_;
+            uint32_t out_start = tile_idx * outputTile_;
+            uint32_t tile_len = intermediateDim_ - out_start;
+            if (tile_len > outputTile_) {
+                tile_len = outputTile_;
+            }
+            ComputeTile(row, out_start, tile_len);
+        }
+    }
+
+private:
+    __aicore__ inline void ComputeTile(uint32_t row, uint32_t out_start,
+                                       uint32_t tile_len)
+    {
+        AscendC::LocalTensor<float> accGate = accGateBuffer_.Get<float>();
+        AscendC::LocalTensor<float> accUp = accUpBuffer_.Get<float>();
+        Duplicate(accGate, 0.0F, tile_len);
+        Duplicate(accUp, 0.0F, tile_len);
+
+        float threshold = thresholdPerRow_ ? thresholdGm_.GetValue(row)
+                                           : thresholdGm_.GetValue(0);
+        uint64_t x_offset = static_cast<uint64_t>(row) * inputDim_;
+        for (uint32_t in_col = 0; in_col < inputDim_; ++in_col) {
+            float x_value =
+                static_cast<float>(xGm_.GetValue(x_offset + in_col));
+            float magnitude = AbsFloat(x_value);
+            bool active = inclusive_ ? (magnitude >= threshold)
+                                     : (magnitude > threshold);
+            if (active) {
+                CopyInGateUp(in_col, out_start, tile_len);
+                ComputeGateUp(accGate, accUp, x_value, tile_len);
+            }
+        }
+        ApplySiluAndCopyOut(row, out_start, tile_len);
+    }
+
+    __aicore__ inline void CopyInGateUp(uint32_t in_col, uint32_t out_start,
+                                        uint32_t tile_len)
+    {
+        AscendC::LocalTensor<W_T> wLocal = inQueueW_.AllocTensor<W_T>();
+        uint64_t gate_offset =
+            static_cast<uint64_t>(in_col) * gateUpDim_ + out_start;
+        uint64_t up_offset = static_cast<uint64_t>(in_col) * gateUpDim_ +
+                             intermediateDim_ + out_start;
+        AscendC::DataCopyPadExtParams<W_T> pad_params{false, 0, 0, 0};
+        AscendC::DataCopyExtParams copy_params{
+            1,
+            static_cast<uint32_t>(tile_len * sizeof(W_T)),
+            0,
+            0,
+            0,
+        };
+        DataCopyPad(wLocal, weightTGm_[gate_offset], copy_params, pad_params);
+        DataCopyPad(wLocal[OUTPUT_TILE], weightTGm_[up_offset], copy_params,
+                    pad_params);
+        inQueueW_.EnQue(wLocal);
+    }
+
+    __aicore__ inline void ComputeGateUp(AscendC::LocalTensor<float> accGate,
+                                         AscendC::LocalTensor<float> accUp,
+                                         float x_value, uint32_t tile_len)
+    {
+        AscendC::LocalTensor<W_T> wLocal = inQueueW_.DeQue<W_T>();
+        AscendC::LocalTensor<float> wTmp = tmpBufferW_.Get<float>();
+
+        Cast(wTmp, wLocal, AscendC::RoundMode::CAST_NONE, tile_len);
+        Cast(wTmp[OUTPUT_TILE], wLocal[OUTPUT_TILE],
+             AscendC::RoundMode::CAST_NONE, tile_len);
+        inQueueW_.FreeTensor(wLocal);
+
+        Muls(wTmp, wTmp, x_value, tile_len);
+        Add(accGate, accGate, wTmp, tile_len);
+        Muls(wTmp[OUTPUT_TILE], wTmp[OUTPUT_TILE], x_value, tile_len);
+        Add(accUp, accUp, wTmp[OUTPUT_TILE], tile_len);
+    }
+
+    __aicore__ inline void ApplySiluAndCopyOut(uint32_t row,
+                                               uint32_t out_start,
+                                               uint32_t tile_len)
+    {
+        AscendC::LocalTensor<float> accGate = accGateBuffer_.Get<float>();
+        AscendC::LocalTensor<float> accUp = accUpBuffer_.Get<float>();
+        AscendC::LocalTensor<float> silu = siluBuffer_.Get<float>();
+
+        Muls(silu, accGate, -1.0F, tile_len);
+        Exp(silu, silu, tile_len);
+        Adds(silu, silu, 1.0F, tile_len);
+        Div(silu, accGate, silu, tile_len);
+        Mul(silu, silu, accUp, tile_len);
+
+        AscendC::LocalTensor<Y_T> yLocal = outQueueY_.AllocTensor<Y_T>();
+        Cast(yLocal, silu, AscendC::RoundMode::CAST_RINT, tile_len);
+        outQueueY_.EnQue<Y_T>(yLocal);
+
+        yLocal = outQueueY_.DeQue<Y_T>();
+        uint64_t y_offset =
+            static_cast<uint64_t>(row) * intermediateDim_ + out_start;
+        AscendC::DataCopyExtParams copy_params{
+            1,
+            static_cast<uint32_t>(tile_len * sizeof(Y_T)),
+            0,
+            0,
+            0,
+        };
+        DataCopyPad(yGm_[y_offset], yLocal, copy_params);
+        outQueueY_.FreeTensor(yLocal);
+    }
+
+private:
+    AscendC::TPipe* pipe_;
+    AscendC::TQue<AscendC::QuePosition::VECIN, BUFFER_NUM> inQueueW_;
+    AscendC::TQue<AscendC::QuePosition::VECOUT, BUFFER_NUM> outQueueY_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> tmpBufferW_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> accGateBuffer_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> accUpBuffer_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> siluBuffer_;
+    AscendC::GlobalTensor<X_T> xGm_;
+    AscendC::GlobalTensor<W_T> weightTGm_;
+    AscendC::GlobalTensor<float> thresholdGm_;
+    AscendC::GlobalTensor<Y_T> yGm_;
+    uint32_t inputDim_;
+    uint32_t intermediateDim_;
+    uint32_t gateUpDim_;
+    uint32_t tileCount_;
+    uint32_t workItems_;
+    uint32_t blockDim_;
+    uint32_t outputTile_;
     bool thresholdPerRow_;
     bool inclusive_;
 };
@@ -557,12 +909,27 @@ private:
         __gm__ void* values, __gm__ void* indices, __gm__ void* counts,            \
         __gm__ void* weight_t, __gm__ void* y, uint32_t input_dim,                 \
         uint32_t output_dim, uint32_t tile_count, uint32_t work_items,             \
-        uint32_t block_dim)                                                        \
+        uint32_t block_dim, uint32_t output_tile)                                  \
     {                                                                              \
         AscendC::TPipe pipe;                                                       \
         ActivationSparseLinearPackedTransposed<TYPE> op(&pipe);                    \
         op.Init(values, indices, counts, weight_t, y, input_dim, output_dim,       \
-                tile_count, work_items, block_dim);                                \
+                tile_count, work_items, block_dim, output_tile);                   \
+        op.Process();                                                              \
+    }
+
+#define ACTIVATION_SPARSE_SILU_AND_MUL_PACKED_T_TYPE_DECLARE(TYPE)                 \
+    extern "C" __global__ __aicore__ void                                          \
+    activation_sparse_silu_and_mul_packed_t_##TYPE(                                \
+        __gm__ void* values, __gm__ void* indices, __gm__ void* counts,            \
+        __gm__ void* weight_t, __gm__ void* y, uint32_t input_dim,                 \
+        uint32_t intermediate_dim, uint32_t tile_count, uint32_t work_items,        \
+        uint32_t block_dim, uint32_t output_tile)                                  \
+    {                                                                              \
+        AscendC::TPipe pipe;                                                       \
+        ActivationSparseSiluAndMulPackedTransposed<TYPE> op(&pipe);                \
+        op.Init(values, indices, counts, weight_t, y, input_dim,                  \
+                intermediate_dim, tile_count, work_items, block_dim, output_tile);  \
         op.Process();                                                              \
     }
 
@@ -572,12 +939,28 @@ private:
         __gm__ void* x, __gm__ void* weight_t, __gm__ void* threshold,             \
         __gm__ void* y, uint32_t input_dim, uint32_t output_dim,                   \
         uint32_t tile_count, uint32_t work_items, uint32_t block_dim,              \
-        bool threshold_per_row, bool inclusive)                                    \
+        uint32_t output_tile, bool threshold_per_row, bool inclusive)              \
     {                                                                              \
         AscendC::TPipe pipe;                                                       \
         ActivationSparseLinearDirectTransposed<TYPE> op(&pipe);                    \
         op.Init(x, weight_t, threshold, y, input_dim, output_dim, tile_count,       \
-                work_items, block_dim, threshold_per_row, inclusive);              \
+                work_items, block_dim, output_tile, threshold_per_row, inclusive);  \
+        op.Process();                                                              \
+    }
+
+#define ACTIVATION_SPARSE_SILU_AND_MUL_DIRECT_T_TYPE_DECLARE(TYPE)                 \
+    extern "C" __global__ __aicore__ void                                          \
+    activation_sparse_silu_and_mul_direct_t_##TYPE(                                \
+        __gm__ void* x, __gm__ void* weight_t, __gm__ void* threshold,             \
+        __gm__ void* y, uint32_t input_dim, uint32_t intermediate_dim,             \
+        uint32_t tile_count, uint32_t work_items, uint32_t block_dim,              \
+        uint32_t output_tile, bool threshold_per_row, bool inclusive)              \
+    {                                                                              \
+        AscendC::TPipe pipe;                                                       \
+        ActivationSparseSiluAndMulDirectTransposed<TYPE> op(&pipe);                \
+        op.Init(x, weight_t, threshold, y, input_dim, intermediate_dim,            \
+                tile_count, work_items, block_dim, output_tile,                    \
+                threshold_per_row, inclusive);                                     \
         op.Process();                                                              \
     }
 
@@ -597,7 +980,9 @@ private:
 ACTIVATION_SPARSE_PACK_TYPE_DECLARE(half)
 ACTIVATION_SPARSE_LINEAR_PACKED_TYPE_DECLARE(half)
 ACTIVATION_SPARSE_LINEAR_PACKED_T_TYPE_DECLARE(half)
+ACTIVATION_SPARSE_SILU_AND_MUL_PACKED_T_TYPE_DECLARE(half)
 ACTIVATION_SPARSE_LINEAR_DIRECT_T_TYPE_DECLARE(half)
+ACTIVATION_SPARSE_SILU_AND_MUL_DIRECT_T_TYPE_DECLARE(half)
 ACTIVATION_SPARSE_LINEAR_TYPE_DECLARE(half)
 
 } // namespace
@@ -646,9 +1031,8 @@ extern void activation_sparse_linear_packed_impl(
 extern void activation_sparse_linear_packed_t_impl(
     AscendType type, void* stream, void* values, void* indices, void* counts,
     void* weight_t, void* y, uint32_t batch_size, uint32_t input_dim,
-    uint32_t output_dim, uint32_t block_dim)
+    uint32_t output_dim, uint32_t block_dim, uint32_t output_tile)
 {
-    constexpr uint32_t output_tile = 1024;
     uint32_t tile_count = (output_dim + output_tile - 1) / output_tile;
     uint32_t work_items = batch_size * tile_count;
     if (work_items == 0 || block_dim == 0) {
@@ -657,7 +1041,27 @@ extern void activation_sparse_linear_packed_t_impl(
     if (type == AscendType::FP16) {
         activation_sparse_linear_packed_t_half<<<block_dim, nullptr, stream>>>(
             values, indices, counts, weight_t, y, input_dim, output_dim,
-            tile_count, work_items, block_dim);
+            tile_count, work_items, block_dim, output_tile);
+    } else {
+        return;
+    }
+}
+
+extern void activation_sparse_silu_and_mul_packed_t_impl(
+    AscendType type, void* stream, void* values, void* indices, void* counts,
+    void* weight_t, void* y, uint32_t batch_size, uint32_t input_dim,
+    uint32_t intermediate_dim, uint32_t block_dim, uint32_t output_tile)
+{
+    uint32_t tile_count = (intermediate_dim + output_tile - 1) / output_tile;
+    uint32_t work_items = batch_size * tile_count;
+    if (work_items == 0 || block_dim == 0) {
+        return;
+    }
+    if (type == AscendType::FP16) {
+        activation_sparse_silu_and_mul_packed_t_half<<<block_dim, nullptr,
+                                                       stream>>>(
+            values, indices, counts, weight_t, y, input_dim, intermediate_dim,
+            tile_count, work_items, block_dim, output_tile);
     } else {
         return;
     }
@@ -666,9 +1070,9 @@ extern void activation_sparse_linear_packed_t_impl(
 extern void activation_sparse_linear_direct_t_impl(
     AscendType type, void* stream, void* x, void* weight_t, void* threshold,
     void* y, uint32_t batch_size, uint32_t input_dim, uint32_t output_dim,
-    bool threshold_per_row, bool inclusive, uint32_t block_dim)
+    bool threshold_per_row, bool inclusive, uint32_t block_dim,
+    uint32_t output_tile)
 {
-    constexpr uint32_t output_tile = 1024;
     uint32_t tile_count = (output_dim + output_tile - 1) / output_tile;
     uint32_t work_items = batch_size * tile_count;
     if (work_items == 0 || block_dim == 0) {
@@ -677,7 +1081,28 @@ extern void activation_sparse_linear_direct_t_impl(
     if (type == AscendType::FP16) {
         activation_sparse_linear_direct_t_half<<<block_dim, nullptr, stream>>>(
             x, weight_t, threshold, y, input_dim, output_dim, tile_count,
-            work_items, block_dim, threshold_per_row, inclusive);
+            work_items, block_dim, output_tile, threshold_per_row, inclusive);
+    } else {
+        return;
+    }
+}
+
+extern void activation_sparse_silu_and_mul_direct_t_impl(
+    AscendType type, void* stream, void* x, void* weight_t, void* threshold,
+    void* y, uint32_t batch_size, uint32_t input_dim,
+    uint32_t intermediate_dim, bool threshold_per_row, bool inclusive,
+    uint32_t block_dim, uint32_t output_tile)
+{
+    uint32_t tile_count = (intermediate_dim + output_tile - 1) / output_tile;
+    uint32_t work_items = batch_size * tile_count;
+    if (work_items == 0 || block_dim == 0) {
+        return;
+    }
+    if (type == AscendType::FP16) {
+        activation_sparse_silu_and_mul_direct_t_half<<<block_dim, nullptr,
+                                                       stream>>>(
+            x, weight_t, threshold, y, input_dim, intermediate_dim, tile_count,
+            work_items, block_dim, output_tile, threshold_per_row, inclusive);
     } else {
         return;
     }

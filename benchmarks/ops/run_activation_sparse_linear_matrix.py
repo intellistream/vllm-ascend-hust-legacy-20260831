@@ -102,10 +102,24 @@ def parse_args() -> argparse.Namespace:
         default="bfloat16",
     )
     parser.add_argument("--inclusive", action="store_true")
+    parser.add_argument(
+        "--fused-silu-and-mul",
+        action="store_true",
+        help=(
+            "Forward --fused-silu-and-mul to the per-shape benchmark. Use only "
+            "with shapes whose output dim is 2 * intermediate_dim."
+        ),
+    )
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument(
         "--max-sparse-err",
+        type=float,
+        default=None,
+        help="Forwarded to bench_activation_sparse_linear.py.",
+    )
+    parser.add_argument(
+        "--max-sparse-rel-err",
         type=float,
         default=None,
         help="Forwarded to bench_activation_sparse_linear.py.",
@@ -117,7 +131,19 @@ def parse_args() -> argparse.Namespace:
         help="Forwarded to bench_activation_sparse_linear.py.",
     )
     parser.add_argument(
+        "--max-direct-rel-err",
+        type=float,
+        default=None,
+        help="Forwarded to bench_activation_sparse_linear.py.",
+    )
+    parser.add_argument(
         "--max-direct-t-err",
+        type=float,
+        default=None,
+        help="Forwarded to bench_activation_sparse_linear.py.",
+    )
+    parser.add_argument(
+        "--max-direct-t-rel-err",
         type=float,
         default=None,
         help="Forwarded to bench_activation_sparse_linear.py.",
@@ -219,11 +245,28 @@ def main() -> int:
                 ]
                 if args.inclusive:
                     cmd.append("--inclusive")
+                if args.fused_silu_and_mul:
+                    cmd.append("--fused-silu-and-mul")
                 if args.skip_direct:
                     cmd.append("--skip-direct")
                 add_optional_float(cmd, "--max-sparse-err", args.max_sparse_err)
+                add_optional_float(
+                    cmd,
+                    "--max-sparse-rel-err",
+                    args.max_sparse_rel_err,
+                )
                 add_optional_float(cmd, "--max-direct-err", args.max_direct_err)
+                add_optional_float(
+                    cmd,
+                    "--max-direct-rel-err",
+                    args.max_direct_rel_err,
+                )
                 add_optional_float(cmd, "--max-direct-t-err", args.max_direct_t_err)
+                add_optional_float(
+                    cmd,
+                    "--max-direct-t-rel-err",
+                    args.max_direct_t_rel_err,
+                )
                 add_optional_float(
                     cmd,
                     "--min-packed-total-speedup",

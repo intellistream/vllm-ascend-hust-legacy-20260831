@@ -154,7 +154,22 @@ namespace vllm_ascend {
         uint32_t batch_size,
         uint32_t input_dim,
         uint32_t output_dim,
-        uint32_t block_dim);
+        uint32_t block_dim,
+        uint32_t output_tile);
+
+    extern void activation_sparse_silu_and_mul_packed_t_impl(
+        AscendType type,
+        void *stream,
+        void *values,
+        void *indices,
+        void *counts,
+        void *weight_t,
+        void *y,
+        uint32_t batch_size,
+        uint32_t input_dim,
+        uint32_t intermediate_dim,
+        uint32_t block_dim,
+        uint32_t output_tile);
 
     extern void activation_sparse_linear_direct_t_impl(
         AscendType type,
@@ -168,7 +183,23 @@ namespace vllm_ascend {
         uint32_t output_dim,
         bool threshold_per_row,
         bool inclusive,
-        uint32_t block_dim);
+        uint32_t block_dim,
+        uint32_t output_tile);
+
+    extern void activation_sparse_silu_and_mul_direct_t_impl(
+        AscendType type,
+        void *stream,
+        void *x,
+        void *weight_t,
+        void *threshold,
+        void *y,
+        uint32_t batch_size,
+        uint32_t input_dim,
+        uint32_t intermediate_dim,
+        bool threshold_per_row,
+        bool inclusive,
+        uint32_t block_dim,
+        uint32_t output_tile);
 
     extern void mla_preprocess_impl(
         void* stream,

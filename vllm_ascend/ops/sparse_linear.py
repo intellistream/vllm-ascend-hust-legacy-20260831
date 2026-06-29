@@ -20,6 +20,8 @@ from typing import Any
 import torch
 
 _CUSTOM_OP_MARKED: set[str] = set()
+_ENABLE_CUSTOM_OP_IMPORT_ATTEMPTED = False
+_ENABLE_CUSTOM_OP = None
 
 
 def activation_sparse_pack_ref(
@@ -86,6 +88,22 @@ def activation_sparse_linear_packed_t_ref(
         cols = indices[row, :count].to(dtype=torch.long)
         out[row] = torch.matmul(values[row, :count], weight_t[cols])
     return out
+
+
+def activation_sparse_silu_and_mul_packed_t_ref(
+    values: torch.Tensor,
+    indices: torch.Tensor,
+    counts: torch.Tensor,
+    weight_t: torch.Tensor,
+) -> torch.Tensor:
+    gate_up = activation_sparse_linear_packed_t_ref(
+        values,
+        indices,
+        counts,
+        weight_t,
+    )
+    gate, up = gate_up.chunk(2, dim=-1)
+    return torch.nn.functional.silu(gate) * up
 
 
 def activation_sparse_linear_ref(
@@ -178,6 +196,97 @@ def activation_sparse_linear_direct_t(
         weight_t.contiguous(),
         threshold.to(dtype=torch.float32, device=x.device).contiguous(),
         inclusive,
+    )
+
+
+def activation_sparse_silu_and_mul_direct_t(
+    x: torch.Tensor,
+    weight_t: torch.Tensor,
+    threshold: torch.Tensor,
+    *,
+    inclusive: bool = False,
+) -> torch.Tensor:
+    if not _can_use_custom_op(x, weight_t):
+        if _requires_backend_kernel():
+            raise RuntimeError(
+                "activation_sparse_silu_and_mul_direct_t requires the Ascend "
+                "custom fp16 op when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
+        )
+        sparse_gate_up = activation_sparse_linear_ref(
+            x,
+            weight_t.t().contiguous(),
+            threshold,
+            inclusive=inclusive,
+        )
+        gate, up = sparse_gate_up.chunk(2, dim=-1)
+        return torch.nn.functional.silu(gate) * up
+    if not _should_use_direct_t(x, weight_t):
+        return activation_sparse_silu_and_mul_packed_t(
+            x,
+            weight_t,
+            threshold,
+            inclusive=inclusive,
+        )
+    _record_custom_op_invocation(
+        "activation_sparse_silu_and_mul_direct_t",
+        {
+            **_tensor_marker_payload("x", x),
+            **_tensor_marker_payload("weight_t", weight_t),
+            **_tensor_marker_payload("threshold", threshold),
+            "inclusive": bool(inclusive),
+        },
+    )
+    return torch.ops._C_ascend.activation_sparse_silu_and_mul_direct_t(
+        x.contiguous(),
+        weight_t.contiguous(),
+        threshold.to(dtype=torch.float32, device=x.device).contiguous(),
+        inclusive,
+    )
+
+
+def activation_sparse_silu_and_mul_packed_t(
+    x: torch.Tensor,
+    weight_t: torch.Tensor,
+    threshold: torch.Tensor,
+    *,
+    inclusive: bool = False,
+) -> torch.Tensor:
+    if not _can_use_custom_op(x, weight_t):
+        if _requires_backend_kernel():
+            raise RuntimeError(
+                "activation_sparse_silu_and_mul_packed_t requires the Ascend "
+                "custom fp16 ops when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
+            )
+        values, indices, counts = activation_sparse_pack_ref(
+            x,
+            threshold,
+            inclusive=inclusive,
+        )
+        return activation_sparse_silu_and_mul_packed_t_ref(
+            values,
+            indices,
+            counts,
+            weight_t,
+        )
+    _record_custom_op_invocation(
+        "activation_sparse_silu_and_mul_packed_t",
+        {
+            **_tensor_marker_payload("x", x),
+            **_tensor_marker_payload("weight_t", weight_t),
+            **_tensor_marker_payload("threshold", threshold),
+            "inclusive": bool(inclusive),
+        },
+    )
+    values, indices, counts = torch.ops._C_ascend.activation_sparse_pack(
+        x.contiguous(),
+        threshold.to(dtype=torch.float32, device=x.device).contiguous(),
+        inclusive,
+    )
+    return torch.ops._C_ascend.activation_sparse_silu_and_mul_packed_t(
+        values,
+        indices,
+        counts,
+        weight_t.contiguous(),
     )
 
 
@@ -311,8 +420,13 @@ def _record_custom_op_invocation(
 
 
 def _custom_op_enabled() -> bool:
-    try:
-        from vllm_ascend.utils import enable_custom_op
-    except ModuleNotFoundError:
-        return False
-    return enable_custom_op()
+    global _ENABLE_CUSTOM_OP_IMPORT_ATTEMPTED, _ENABLE_CUSTOM_OP
+    if not _ENABLE_CUSTOM_OP_IMPORT_ATTEMPTED:
+        _ENABLE_CUSTOM_OP_IMPORT_ATTEMPTED = True
+        try:
+            from vllm_ascend.utils import enable_custom_op
+        except ModuleNotFoundError:
+            _ENABLE_CUSTOM_OP = None
+        else:
+            _ENABLE_CUSTOM_OP = enable_custom_op
+    return False if _ENABLE_CUSTOM_OP is None else _ENABLE_CUSTOM_OP()
