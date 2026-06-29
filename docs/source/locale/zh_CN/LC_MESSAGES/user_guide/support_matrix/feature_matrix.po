@@ -125,8 +125,8 @@ msgid "[Eagle3](https://docs.vllm.ai/en/latest/features/speculative_decoding/eag
 msgstr "[Eagle3](https://docs.vllm.ai/en/latest/features/speculative_decoding/eagle/)"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md
-msgid "[Eplb](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/eplb_swift_balancer.html)"
-msgstr "[EPLB](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/eplb_swift_balancer.html)"
+msgid "[Eplb](../feature_guide/eplb_swift_balancer.md)"
+msgstr "[EPLB](../feature_guide/eplb_swift_balancer.md)"
 
 #: ../../source/user_guide/support_matrix/feature_matrix.md
 msgid ""

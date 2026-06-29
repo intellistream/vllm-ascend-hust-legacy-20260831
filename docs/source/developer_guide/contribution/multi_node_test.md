@@ -8,7 +8,7 @@ The following picture shows the basic deployment view of the multi-node CI mecha
 
 ![alt text](../../assets/deployment.png)
 
-From the workflow perspective, we can see how the final test script is executed, The key point is that these two [lws.yaml and run.sh](https://github.com/vllm-project/vllm-ascend/tree/main/tests/e2e/nightly/multi_node/scripts), The former defines how our k8s cluster is pulled up, and the latter defines the entry script when the pod is started, Each node executes different logic according to the [LWS_WORKER_INDEX](https://lws.sigs.k8s.io/docs/reference/labels-annotations-and-environment-variables/) environment variable, so that multiple nodes can form a distributed cluster to perform tasks.
+From the workflow perspective, we can see how the final test script is executed, The key point is that these two [lws.yaml and run.sh](https://github.com/vLLM-HUST/vllm-ascend-hust/tree/main/tests/e2e/nightly/multi_node/scripts), The former defines how our k8s cluster is pulled up, and the latter defines the entry script when the pod is started, Each node executes different logic according to the [LWS_WORKER_INDEX](https://lws.sigs.k8s.io/docs/reference/labels-annotations-and-environment-variables/) environment variable, so that multiple nodes can form a distributed cluster to perform tasks.
 
 ![alt text](../../assets/workflow.png)
 
@@ -20,7 +20,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
 2. Add config yaml
 
-    As the entrypoint script [run.sh](https://github.com/vllm-project/vllm-ascend/blob/0bf3f21a987aede366ec4629ad0ffec8e32fe90d/tests/e2e/nightly/multi_node/scripts/run.sh#L106) shows, a k8s pod startup means traversing all *.yaml files in the [directory](https://github.com/vllm-project/vllm-ascend/tree/main/tests/e2e/nightly/multi_node/config/), reading and executing according to different configurations, so what we need to do is just add "yamls" like [DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml).
+    As the entrypoint script [run.sh](https://github.com/vLLM-HUST/vllm-ascend-hust/blob/main/tests/e2e/nightly/multi_node/scripts/run.sh#L106) shows, a k8s pod startup means traversing all *.yaml files in the [directory](https://github.com/vLLM-HUST/vllm-ascend-hust/tree/main/tests/e2e/nightly/multi_node/config/), reading and executing according to different configurations, so what we need to do is just add "yamls" like [DeepSeek-V3.yaml](https://github.com/vLLM-HUST/vllm-ascend-hust/blob/main/tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml).
 
     Suppose you have **2 nodes** running a 1P1D setup (1 Prefillers + 1 Decoder):
 
@@ -76,7 +76,7 @@ From the workflow perspective, we can see how the final test script is executed,
 
 3. Add the case to nightly workflow
 
-Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)
+Currently, the multi-node test workflow is defined in the [nightly_test_a3.yaml](https://github.com/vLLM-HUST/vllm-ascend-hust/blob/main/.github/workflows/schedule_nightly_test_a3.yaml)
 
     ```yaml
     multi-node-tests:
@@ -320,7 +320,7 @@ Since our script is Kubernetes-friendly, we need to actively pass in some cluste
 
 - Step 1. Add cluster_hosts to config yamls
 
-    Modify on every cluster host, commands just like [DeepSeek-V3.yaml](https://github.com/vllm-project/vllm-ascend/blob/e760aae1df7814073a4180172385505c1ec0fd83/tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml#L25) after the configure item `num_nodes` , for example:
+    Modify on every cluster host, commands just like [DeepSeek-V3.yaml](https://github.com/vLLM-HUST/vllm-ascend-hust/blob/main/tests/e2e/nightly/multi_node/config/DeepSeek-V3.yaml#L25) after the configure item `num_nodes` , for example:
     `cluster_hosts: ["xxx.xxx.xxx.188", "xxx.xxx.xxx.212"]`
 
 - Step 2. Install develop environment
