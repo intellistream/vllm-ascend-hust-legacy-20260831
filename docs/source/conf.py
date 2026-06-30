@@ -119,6 +119,11 @@ exclude_patterns = [
     "user_guide/release.template.md",
     # TODO(yikun): Remove this after zh supported
     "**/*.zh.md",
+    "fork_release_install_guide.md",
+    "developer_guide/feature_guide/index.md",
+    "tutorials/models/Qwen2.5-7B.md",
+    "tutorials/models/Qwen2.5-Omni.md",
+    "user_guide/feature_guide/npugraph_ex.md",
 ]
 
 # -- Options for HTML output -------------------------------------------------
@@ -159,6 +164,7 @@ linkcheck_ignore = [
     r"https?://192\.0\.0\.1(:\d+)?($|/.*)",
     r"https?://<[^>]+>.*",
     r"<https?://[^>]+>",
+    r"https?://.*\$\{[^}]*\}.*",
     r"https://github\.com/vllm-project/vllm-ascend/issues/new/choose",
     r"https://github\.com/[^/?#]+/?$",
     r"https?://.*\$%7B.*%7D.*",

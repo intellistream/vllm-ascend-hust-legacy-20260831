@@ -15,11 +15,8 @@ option(BUILD_OPEN_PROJECT         "Build open ascend ops project."  ON)
 option(ENABLE_CCACHE              "Enable ccache capability"        ON)
 set(ASCEND_COMPUTE_UNIT           "ascend910b"                    CACHE   STRING   "soc that need to be compiled")
 set(ASCEND_OP_NAME                "ALL"                           CACHE   STRING   "operators that need to be compiled")
-<<<<<<< HEAD
 set(VENDOR_NAME                   "vllm-ascend"                   CACHE   STRING   "vendor name")
-=======
 set(ARCH_DIRECTORY                ""                           CACHE   STRING   "arch directory that need to be compiled")
-set(VENDOR_NAME                   "custom"                     CACHE   STRING   "vendor name")
 set(ASCEND_ALL_COMPUTE_UNIT       "ascend310p;ascend910b;ascend910_93;ascend950;kirinx90" CACHE STRING "all soc list")
 
 set(SOC_VERSION_LIST ascend310p ascend910b ascend910_93 ascend950 kirinx90)
@@ -83,7 +80,6 @@ set(CMAKE_CXX_STANDARD 17 CACHE STRING "c++17 is needed for this project")
 set_directory_properties(PROPERTIES
     ADDITIONAL_MAKE_CLEAN_FILES "${CMAKE_BINARY_DIR}/_CPack_Packages"
 )
->>>>>>> c5eca44ec ([Ops][BugFix] Reuse common tiling_base for custom ops (#9103))
 
 # Suppress warnings from catlass/tla third-party headers for CANN kernel compilation
 list(APPEND OPS_COMPILE_OPTIONS -Wno-ignored-attributes)
