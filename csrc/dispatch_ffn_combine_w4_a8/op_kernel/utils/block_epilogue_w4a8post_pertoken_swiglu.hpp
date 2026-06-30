@@ -83,7 +83,7 @@ public:
     CATLASS_DEVICE
     BlockEpilogue(Arch::Resource<ArchTag> const &resource, int32_t n, Params const &params = Params{}) : params(params)
     {
-        ubOffset = 0;
+        size_t ubOffset = 0;
         int32_t eventVMTE2 = 0;
         int32_t eventMTE2V = 0;
         int32_t eventMTE3V = 0;
@@ -123,20 +123,23 @@ public:
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID5);
 #endif
 
+        ubD = resource.ubBuf.template GetBufferByByte<ElementD>(ubOffset);
+        ubOffset += blockN * sizeof(ElementD);
         ubCFp32 = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
+        ubOffset += blockN * sizeof(float) * 2;
+        ubCFp32ChunkN = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
+        ubOffset += ChunkTileLen * sizeof(float);
         ubCFp32ChunkNAbs = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
+        ubOffset += ChunkTileLen * sizeof(float);
+        ubCFp32ChunkNMax = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
+        ubOffset += HalfChunkTileLen * sizeof(float);
         ubQuantS32 = ubCFp32ChunkNAbs.template ReinterpretCast<int32_t>();
         ubQuantF16 = ubCFp32ChunkNAbs.template ReinterpretCast<half>();
-        ubCFp32ChunkNMax = resource.ubBuf.template GetBufferByByte<float>(ubOffset + ChunkTileLen * sizeof(float));
-        sharedTmpBuffer = resource.ubBuf.template GetBufferByByte<uint8_t>(ubOffset + blockN * sizeof(float));
-        ubOffset += blockN * sizeof(float) * 2;
 
-        ubCFp32ChunkN = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-        ubD = resource.ubBuf.template GetBufferByByte<ElementD>(ubOffset);
         xLowHalfTensor = resource.ubBuf.template GetBufferByByte<half>(ubOffset);
-        xLowHalfTensor2 = resource.ubBuf.template GetBufferByByte<half>(ubOffset + ChunkTileLen * sizeof(half));
-        ubOffset += ChunkTileLen * sizeof(float);
-
+        ubOffset += ChunkTileLen * sizeof(half);
+        xLowHalfTensor2 = resource.ubBuf.template GetBufferByByte<half>(ubOffset);
+        ubOffset += ChunkTileLen * sizeof(half);
         xLowI16Tensor = resource.ubBuf.template GetBufferByByte<int16_t>(ubOffset);
         ubOffset += 128 * sizeof(int16_t);
 
@@ -173,8 +176,7 @@ public:
                     AscendC::GlobalTensor<int32_t> const &cumsumMM, uint32_t MOffset,
                     AscendC::GlobalTensor<ElementPerTokenScale> const &gmPerTokenScale2, uint32_t expertPerRank,
                     uint32_t EP, AscendC::GlobalTensor<float> const &gmGMM1, int32_t rank, int32_t listLen,
-                    Arch::Resource<ArchTag> const &resource,
-                    uint32_t epilogueCoreNum = 40, float swigluLimit = 0.0f, Callback &&callback = Callback{})
+                    uint32_t epilogueCoreNum = 40, Callback &&callback = Callback{})
     {
         callback();
         uint32_t blockM = shapeC.row();
@@ -220,6 +222,7 @@ public:
             PipeBarrier<PIPE_V>();
 
             auto &ubAbs = ubCFp32ChunkNAbs;
+            auto &ubMax = ubCFp32ChunkNMax;
             auto &ubReduceMax = ubCFp32ChunkNMax;
             auto &ubOutputTmp = ubAbs;
             auto &sharedUbTmpBuffer = ubReduceMax;
@@ -304,13 +307,6 @@ public:
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Muls(ubCFp32, ubCFp32, perTokenScale, blockN);
 
-            if (swigluLimit > 0.0f) {
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::ClampMax(ubCFp32, ubCFp32, sharedTmpBuffer, swigluLimit, blockN);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::ClampMin(ubCFp32[ChunkTileLen], ubCFp32[ChunkTileLen], sharedTmpBuffer, -1.0f * swigluLimit, ChunkTileLen);
-            }
-
 #ifdef W4A8_DEBUG
             // PipeBarrier<PIPE_ALL>();
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID5);
@@ -331,7 +327,7 @@ public:
             // TODO: Check if division affects subsequent data
             AscendC::Div(ubCFp32ChunkN, ubCFp32, ubCFp32ChunkN, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Mul(ubCFp32ChunkN, ubCFp32ChunkN, ubCFp32[ChunkTileLen], ChunkTileLen); //ubCFp32 finished
+            AscendC::Mul(ubCFp32ChunkN, ubCFp32ChunkN, ubCFp32[ChunkTileLen], ChunkTileLen);
 
             // Quantization
             AscendC::PipeBarrier<PIPE_V>();
@@ -350,7 +346,7 @@ public:
             ubPerTokenScaleOutput.SetValue(ubPerTokenScaleOutputOffset, GMubDequantScale / 127.f);
 
             AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
-            AscendC::Muls(ubOutputTmp, ubCFp32ChunkN, 127.f / GMubDequantScale, ChunkTileLen); // ubCFp32ChunkN finished
+            AscendC::Muls(ubOutputTmp, ubCFp32ChunkN, 127.f / GMubDequantScale, ChunkTileLen);
             AscendC::PipeBarrier<PIPE_V>();
 
             AscendC::Cast(ubQuantS32, ubOutputTmp, AscendC::RoundMode::CAST_RINT, ChunkTileLen);
@@ -417,6 +413,7 @@ private:
     AscendC::LocalTensor<float> ubweighAuxList[UB_STAGES];
     AscendC::LocalTensor<int4b_t> xHighI4TensorList[UB_STAGES];
     AscendC::LocalTensor<int4b_t> xLowI4TensorList[UB_STAGES];
+    AscendC::LocalTensor<half> xHighHalfTensor;
     AscendC::LocalTensor<half> xLowHalfTensor;
     AscendC::LocalTensor<half> xLowHalfTensor2;
     AscendC::LocalTensor<int16_t> xLowI16Tensor;
@@ -434,7 +431,6 @@ private:
     int32_t eventxLowVMTE3List[UB_STAGES];
 
     uint32_t ubListId{0};
-    size_t ubOffset;
 
     AscendC::LocalTensor<float> ubCFp32;
     AscendC::LocalTensor<float> ubCFp32ChunkN;
@@ -443,7 +439,6 @@ private:
     AscendC::LocalTensor<int32_t> ubQuantS32;
     AscendC::LocalTensor<half> ubQuantF16;
     AscendC::LocalTensor<float> ubPerTokenScaleOutput;
-    AscendC::LocalTensor<uint8_t> sharedTmpBuffer;
 
     CopyGmToUbC copyGmToUbC;
     CopyUbToGmD copyUbToGmD;
