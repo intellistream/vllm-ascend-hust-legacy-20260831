@@ -33,6 +33,7 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
 
 # isort: off
@@ -538,13 +539,25 @@ class NPUPlatform(Platform):
             # This will cause in scenarios where both piecewise and splitting ops are configured simultaneously,
             # If splitting ops does not contain the this value, this configuration issue will
             # not be detected in advance assert.
-            compilation_config.splitting_ops.extend(
-                [
-                    "vllm::mla_forward",
-                    "vllm::dsa_forward",
-                ]
-            )
+            for op in ["vllm::mla_forward", "vllm::dsa_forward"]:
+                if op not in compilation_config.splitting_ops:
+                    compilation_config.splitting_ops.append(op)
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+            if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+                logger.info("FULL_AND_PIECEWISE enabled on NPU: mixed batches use PIECEWISE, decode batches use FULL.")
+                logger.warning(
+                    """\033[91m
+                    *****************************************************************************************
+                    * WARNING: You have enabled the *full graph* feature.
+                    * This is an early experimental stage and may involve various unknown issues.
+                    * A known problem is that capturing too many batch sizes can lead to OOM
+                    * (Out of Memory) errors or inference hangs. If you encounter such issues,
+                    * consider reducing `gpu_memory_utilization` or manually specifying a smaller
+                    * batch size for graph capture.
+                    * For more details, please refer to:
+                    * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
+                    *****************************************************************************************\033[0m"
+                )
         elif compilation_config.cudagraph_mode.has_full_cudagraphs():
             # We don't want to have our FX graph split for the sake of static kernel feature,
             # because it will compile multiple times, so we set splitting_ops to empty manually.
@@ -593,7 +606,7 @@ class NPUPlatform(Platform):
         if get_ascend_device_type() != AscendDeviceType._310P:
             compilation_config.custom_ops = ["all"]
 
-        if ascend_config.enable_balance_scheduling:
+        if envs_ascend.VLLM_ASCEND_BALANCE_SCHEDULING:
             kv_transfer_config = vllm_config.kv_transfer_config
             kv_role = getattr(kv_transfer_config, "kv_role", None)
             if kv_transfer_config is not None and kv_role != "kv_both":
@@ -689,7 +702,7 @@ class NPUPlatform(Platform):
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
-        if ascend_config.enable_mc2_hierarchy_comm and ascend_config.enable_fused_mc2:
+        if ascend_config.enable_mc2_hierarchy_comm and envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2:
             raise ValueError(
                 "fused mc2 op cannot be used with hierarchy communication."
                 "Please disable VLLM_ASCEND_ENABLE_FUSED_MC2 by setting it to 0."

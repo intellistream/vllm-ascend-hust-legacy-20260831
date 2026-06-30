@@ -173,6 +173,9 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([0, 1, 2, ...]) indicating token positions in sequence.
     positions: torch.Tensor = None
 
+    # CPU tensor of slot mapping for host-side operations.
+    slot_mapping_cpu: torch.Tensor = None
+
     # Current attention state (e.g., ChunkedPrefill, DecodeOnly).
     attn_state: Any = None
 
@@ -206,6 +209,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             # This is really strange since vLLM slices them as well
             block_table_tensor=self.block_table_tensor,
             slot_mapping=self.slot_mapping,
+            slot_mapping_cpu=self.slot_mapping_cpu,
             causal=self.causal,
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
             positions=self.positions,
