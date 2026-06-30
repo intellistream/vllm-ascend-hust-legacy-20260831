@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--row-topk-threshold-backend",
+        choices=["kthvalue", "topk"],
+        default="kthvalue",
+        help="Threshold primitive used by --threshold-mode row_topk.",
+    )
+    parser.add_argument(
         "--dtype",
         choices=["float16", "bfloat16"],
         default="bfloat16",
@@ -157,14 +163,18 @@ def build_threshold(
     x: torch.Tensor,
     sparsity: float,
     threshold_mode: str,
+    row_topk_threshold_backend: str,
 ) -> torch.Tensor:
     x_abs = x.abs().to(dtype=torch.float32)
     if threshold_mode == "scalar":
         return torch.quantile(x_abs.flatten(), sparsity).reshape(())
     if threshold_mode == "row_topk":
         keep = topk_keep(x.shape[-1], sparsity)
-        topk_values, _ = torch.topk(x_abs, keep, dim=-1)
-        return topk_values[..., -1].contiguous()
+        if row_topk_threshold_backend == "topk":
+            topk_values, _ = torch.topk(x_abs, keep, dim=-1)
+            return topk_values[..., -1].contiguous()
+        kth = x.shape[-1] - keep + 1
+        return torch.kthvalue(x_abs, kth, dim=-1).values.contiguous()
     raise ValueError(f"Unsupported threshold mode: {threshold_mode}")
 
 
@@ -226,7 +236,12 @@ def main() -> None:
         if args.threshold_mode == "row_topk"
         else None
     )
-    threshold = build_threshold(x, args.sparsity, args.threshold_mode)
+    threshold = build_threshold(
+        x,
+        args.sparsity,
+        args.threshold_mode,
+        args.row_topk_threshold_backend,
+    )
     effective_inclusive = args.inclusive or args.threshold_mode == "row_topk"
     compare = torch.ge if effective_inclusive else torch.gt
 
@@ -317,7 +332,12 @@ def main() -> None:
         args.iters,
     )
     threshold_time = bench(
-        lambda: build_threshold(x, args.sparsity, args.threshold_mode),
+        lambda: build_threshold(
+            x,
+            args.sparsity,
+            args.threshold_mode,
+            args.row_topk_threshold_backend,
+        ),
         args.warmup,
         args.iters,
     )
@@ -573,6 +593,7 @@ def main() -> None:
         "fused_silu_and_mul": args.fused_silu_and_mul,
         "dtype": args.dtype,
         "threshold_mode": args.threshold_mode,
+        "row_topk_threshold_backend": args.row_topk_threshold_backend,
         "requested_inclusive": args.inclusive,
         "inclusive": effective_inclusive,
         "topk_keep": topk_keep_count,
