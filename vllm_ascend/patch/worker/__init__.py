@@ -57,12 +57,20 @@ import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 
+
+_import_optional_patch("vllm_ascend.patch.worker.patch_qwen3vl")
+import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
+import vllm_ascend.patch.worker.patch_bailing_moe_linear  # noqa
+
+# Sim-LLM KV reuse — auto-loaded at worker init, gated behind
+# VLLM_ASCEND_SIMLLM_ENABLED=1 (no-op when disabled).
+_import_optional_patch("vllm_ascend.patch.worker.patch_simllm")
+
 if _V2_MODEL_RUNNER_SUPPORTED:
     import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
     import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
     import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
     import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
 
 # only patch routed experts capture in main2main.
 if _V2_MODEL_RUNNER_SUPPORTED:

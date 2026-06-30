@@ -73,6 +73,7 @@ else
 fi
 CANN_3RD_LIB_PATH="${CURRENT_DIR}/third_party"
 CUSTOM_OPTION="-DBUILD_OPEN_PROJECT=ON"
+PYTHON_EXECUTABLE=${PYTHON_EXECUTABLE:-}
 
 dotted_line="---------------------------------------------------------------------------------------------------------------------"
 ########################################################################################################################
@@ -1311,6 +1312,10 @@ CUSTOM_OPTION="${CUSTOM_OPTION} -DCANN_3RD_LIB_PATH=${CANN_3RD_LIB_PATH}"
 
 if [[ "$ENABLE_STATIC" == "TRUE" ]]; then
     CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_STATIC=${ENABLE_STATIC}"
+fi
+
+if [ -n "${PYTHON_EXECUTABLE}" ];then
+    CUSTOM_OPTION="${CUSTOM_OPTION} -DPython3_EXECUTABLE=${PYTHON_EXECUTABLE}"
 fi
 
 if [ -n "${ascend_package_path}" ];then

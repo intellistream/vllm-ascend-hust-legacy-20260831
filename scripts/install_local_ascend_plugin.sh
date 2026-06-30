@@ -84,7 +84,14 @@ if [[ ! -f "${PLUGIN_REPO}/pyproject.toml" ]]; then
 fi
 
 echo "[INFO] Installing local vllm-ascend-hust plugin from: ${PLUGIN_REPO}"
-echo "[INFO] Using lightweight mode: COMPILE_CUSTOM_KERNELS=0, --no-deps"
+export COMPILE_CUSTOM_KERNELS="${COMPILE_CUSTOM_KERNELS:-0}"
+if [[ "${COMPILE_CUSTOM_KERNELS}" == "1" ]]; then
+  echo "[INFO] Using runtime mode: COMPILE_CUSTOM_KERNELS=1, --no-deps"
+else
+  echo "[INFO] Using lightweight mode: COMPILE_CUSTOM_KERNELS=0, --no-deps"
+fi
+ALLOW_EXISTING_INSTALL_FALLBACK="${ALLOW_EXISTING_INSTALL_FALLBACK:-0}"
+export VLLM_ASCEND_EXPECTED_REPO="${PLUGIN_REPO}"
 mkdir -p "${CURRENT_USER_CACHE_HOME}/pip" "${CURRENT_USER_CONFIG_HOME}"
 
 PYTHON_BIN="$(hust_resolve_python_bin 2>/dev/null)" || {
@@ -109,21 +116,44 @@ then
   fi
 fi
 
+if ! "${PYTHON_BIN}" -m pybind11 --cmakedir >/dev/null 2>&1; then
+  echo "[INFO] Installing missing build dependency: pybind11"
+  if ! (
+    export HOME="${CURRENT_USER_HOME}"
+    export XDG_CACHE_HOME="${CURRENT_USER_CACHE_HOME}"
+    export XDG_CONFIG_HOME="${CURRENT_USER_CONFIG_HOME}"
+    export PIP_CACHE_DIR="${CURRENT_USER_CACHE_HOME}/pip"
+    hust_run_pip install "pybind11"
+  ); then
+    echo "[ERROR] Failed to install pybind11 required for editable build configuration"
+    exit 1
+  fi
+fi
+
 if ! (
   export HOME="${CURRENT_USER_HOME}"
   export XDG_CACHE_HOME="${CURRENT_USER_CACHE_HOME}"
   export XDG_CONFIG_HOME="${CURRENT_USER_CONFIG_HOME}"
   export PIP_CACHE_DIR="${CURRENT_USER_CACHE_HOME}/pip"
-  export COMPILE_CUSTOM_KERNELS=0
+  export COMPILE_CUSTOM_KERNELS="${COMPILE_CUSTOM_KERNELS}"
   hust_run_pip install -e "${PLUGIN_REPO}" --no-build-isolation --no-deps
 ); then
-  echo "[WARN] Local editable install failed."
-  echo "[WARN] Continue with currently installed vllm-ascend-hust package if present."
+  if [[ "${ALLOW_EXISTING_INSTALL_FALLBACK}" == "1" ]]; then
+    echo "[WARN] Local editable install failed."
+    echo "[WARN] Continue with currently installed vllm-ascend-hust package because ALLOW_EXISTING_INSTALL_FALLBACK=1."
+  else
+    echo "[ERROR] Local editable install failed. Refusing to continue with any preinstalled vllm-ascend-hust package."
+    exit 1
+  fi
 fi
 
 echo "[INFO] Checking vLLM platform plugin entry points"
 "${PYTHON_BIN}" - <<'PY'
+import os
+from pathlib import Path
 from importlib.metadata import entry_points
+
+import vllm_ascend
 
 eps = entry_points(group="vllm.platform_plugins")
 if not eps:
@@ -138,6 +168,15 @@ for ep in eps:
 
 if not found_ascend:
     raise SystemExit("[ERROR] ascend plugin entry point not found")
+
+expected_repo = Path(os.environ["VLLM_ASCEND_EXPECTED_REPO"]).resolve()
+module_path = Path(vllm_ascend.__file__).resolve()
+print(f"[INFO] vllm_ascend module path: {module_path}")
+if expected_repo not in module_path.parents:
+  raise SystemExit(
+    "[ERROR] vllm_ascend was imported from "
+    f"{module_path}, expected a checkout under {expected_repo}"
+  )
 PY
 
 echo "[OK] vllm-ascend-hust is installed as a vLLM platform plugin."

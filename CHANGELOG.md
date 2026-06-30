@@ -2,7 +2,42 @@
 
 ## Unreleased
 
+### Known Limitations
+
+- `AscendDraftModelProposer` does not support `update_stream` — generic
+  draft-model-based speculative decoding is not fully implemented in this
+  vllm-ascend version. Use ngram-based or suffix-based speculation (CPU-side,
+  no draft model required) as a workaround.
+
 ### Changed
+
+- Extended the trusted Ascend benchmark workflow dispatch path for quantized
+  model runs: manual runs can now select the paired `vllm-hust`,
+  `vllm-hust-benchmark`, model identity, precision, quantization, dtype, and
+  chip model while preserving the existing FP16/mainline defaults.
+- Propagated workflow-dispatch model, dtype, quantization, and chip metadata
+  into the same-spec benchmark runner and added preflight validation so branch
+  names such as `ws/quantized-model-leaderboard` cannot be accidentally used as
+  Hugging Face model identifiers.
+
+- Normalized `ASCEND_RT_VISIBLE_DEVICES` in
+  `scripts/use_single_ascend_env.sh`: empty or whitespace-only parent values
+  are now discarded, non-empty device lists are compacted, and the runtime
+  filter falls back to `ASCEND_VISIBLE_DEVICES` when only the generic device
+  selection is set. This keeps local shells and trusted benchmark wrappers from
+  inheriting an invalid empty runtime device mask.
+
+- Added explicit fork version metadata and git tag conventions for the current
+  maintained line: upstream anchors now use `upstream/v...`, fork release tags
+  use `v...postN`, and generated builds export `__upstream_version__`,
+  `__upstream_commit__`, and `__commit_id__` alongside `__version__`.
+- Switched Ascend-side vLLM compatibility checks to upstream version semantics
+  so fork suffixes such as `.postN`, `.devM`, and `+gSHA` do not break
+  version-gated behavior.
+- Renamed the fork's Python distribution name from the upstream-colliding
+  `vllm_ascend` package name to `vllm-ascend-hust` across install, uninstall,
+  release, and validation entry points while keeping the import namespace as
+  `vllm_ascend`.
 
 - Relaxed several optional Ascend imports and registrations so the default text
   serving path used by the same-spec benchmark no longer fails early on missing

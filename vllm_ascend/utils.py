@@ -285,6 +285,10 @@ def enable_custom_op():
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
 
+    if not envs_ascend.COMPILE_CUSTOM_KERNELS:
+        _CUSTOM_OP_ENABLED = False
+        return _CUSTOM_OP_ENABLED
+
     # There are some customed operators which aren't implemented
     # with batch invariant in vllm-ascend, we need to disable them.
     # FIXME(linfeng): Currently custom op compilation and execution are partially available
@@ -402,23 +406,45 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
+def _normalize_vllm_compat_version(version_str: str) -> str:
+    version = Version(version_str)
+    normalized = ".".join(str(part) for part in version.release)
+    if version.pre is not None:
+        normalized += f"{version.pre[0]}{version.pre[1]}"
+    return normalized
+
+
 @functools.cache
-def vllm_version_is(target_vllm_version: str):
+def get_vllm_upstream_version() -> str:
     if envs_ascend.VLLM_VERSION is not None:
-        vllm_version = envs_ascend.VLLM_VERSION
+        version_str = envs_ascend.VLLM_VERSION
     else:
         import vllm
 
-        vllm_version = vllm.__version__
+        version_str = getattr(vllm, "__upstream_version__", None) or vllm.__version__
+
     try:
-        return Version(vllm_version) == Version(target_vllm_version)
-    except InvalidVersion:
+        return _normalize_vllm_compat_version(version_str)
+    except InvalidVersion as exc:
         raise ValueError(
-            f"Invalid vllm version {vllm_version} found. A dev version of vllm "
-            "is installed probably. Set the environment variable VLLM_VERSION "
-            "to control it by hand. And please make sure the value follows the "
-            "format of x.y.z."
-        )
+            f"Invalid vllm version {version_str} found. Set the environment "
+            "variable VLLM_VERSION to the upstream-compatible version by hand, "
+            "for example x.y.z or x.y.zrcN."
+        ) from exc
+
+
+@functools.cache
+def vllm_version_is(target_vllm_version: str):
+    try:
+        current_version = get_vllm_upstream_version()
+        target_version = _normalize_vllm_compat_version(target_vllm_version)
+    except InvalidVersion as exc:
+        raise ValueError(
+            f"Invalid target vllm version {target_vllm_version}. "
+            "Please use x.y.z or x.y.zrcN."
+        ) from exc
+
+    return current_version == target_version
 
 
 def get_max_hidden_layers(hf_config) -> int:
@@ -651,8 +677,24 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendVocabParallelEmbedding,
     )
 
+    try:
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendSharedFusedMoE
+    except ModuleNotFoundError as exc:
+        logger.warning(
+            "Skipping Ascend shared fused MoE custom op registration because an optional "
+            "upstream dependency is unavailable: %s",
+            exc,
+        )
+        AscendSharedFusedMoE = None
+    is_moe_model = bool(
+        vllm_config is not None
+        and vllm_config.model_config is not None
+        and vllm_config.model_config.is_moe
+    )
+
     global REGISTERED_ASCEND_OPS
     REGISTERED_ASCEND_OPS = {
+    """
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
         "RotaryEmbedding": AscendRotaryEmbedding,
@@ -715,6 +757,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         )
 
         REGISTERED_ASCEND_OPS.pop("MRotaryEmbedding", None)
+
+    if AscendSharedFusedMoE is not None:
+        REGISTERED_ASCEND_OPS["SharedFusedMoE"] = AscendSharedFusedMoE
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)

@@ -289,6 +289,7 @@ class NPUModelRunner(GPUModelRunner):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self._init_dp_metadata_buffers()
 
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
@@ -528,6 +529,45 @@ class NPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         torch.npu.synchronize()
 
+
+    def _init_dp_metadata_buffers(self) -> None:
+        if self.dp_size <= 1:
+            self._dp_metadata_tensor = None
+            self._dp_num_tokens_after_padding = None
+            return
+
+        self._dp_metadata_tensor = torch.empty(
+            (2, self.dp_size),
+            device="cpu",
+            dtype=torch.int32,
+        )
+        self._dp_num_tokens_after_padding = torch.empty(
+            self.dp_size,
+            device="cpu",
+            dtype=torch.int32,
+        )
+
+    def _get_dp_metadata_buffers(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        metadata_tensor = getattr(self, "_dp_metadata_tensor", None)
+        num_tokens_after_padding = getattr(
+            self, "_dp_num_tokens_after_padding", None
+        )
+        if (
+            metadata_tensor is None
+            or num_tokens_after_padding is None
+            or metadata_tensor.shape != (2, self.dp_size)
+            or num_tokens_after_padding.shape != (self.dp_size,)
+        ):
+            self._init_dp_metadata_buffers()
+            metadata_tensor = self._dp_metadata_tensor
+            num_tokens_after_padding = self._dp_num_tokens_after_padding
+
+        assert metadata_tensor is not None
+        assert num_tokens_after_padding is not None
+        return metadata_tensor, num_tokens_after_padding
+
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.drafter: (
@@ -585,13 +625,15 @@ class NPUModelRunner(GPUModelRunner):
         if self.dp_size == 1:
             return num_tokens, None, cudagraph_mode
 
+        packed_tensor, num_tokens_after_padding = self._get_dp_metadata_buffers()
+
         if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
-            num_tokens_after_padding = torch.tensor([num_tokens] * self.dp_size, device="cpu", dtype=torch.int32)
+            num_tokens_after_padding.fill_(num_tokens)
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
-        packed_tensor = torch.zeros(2, self.dp_size, device="cpu", dtype=torch.int32)
-        packed_tensor[0][self.dp_rank] = num_tokens
-        packed_tensor[1][self.dp_rank] = cudagraph_mode.value
+        packed_tensor.zero_()
+        packed_tensor[0, self.dp_rank] = num_tokens
+        packed_tensor[1, self.dp_rank] = cudagraph_mode.value
         dist.all_reduce(packed_tensor, group=get_dp_group().cpu_group)
 
         # Unpack the results
@@ -601,11 +643,9 @@ class NPUModelRunner(GPUModelRunner):
 
         # Create a tensor for num_tokens_after_padding
         if allow_dp_padding or is_draft_model:
-            num_tokens_after_padding = torch.tensor(
-                [max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32
-            )
+            num_tokens_after_padding.fill_(max_tokens_across_dp)
         else:
-            num_tokens_after_padding = num_tokens_across_dp.cpu()
+            num_tokens_after_padding.copy_(num_tokens_across_dp)
 
         return max_tokens_across_dp, num_tokens_after_padding, synced_cudagraph_mode
 
@@ -853,16 +893,20 @@ class NPUModelRunner(GPUModelRunner):
             self.gdn_query_start_loc.copy_to_gpu()
 
 
-        # Compute optimistic seq_lens (assumes all draft tokens from previous
-        # iteration accepted). Store in optimistic_seq_lens_cpu for use by
-        # _build_attention_metadata (max_seq_len) and discard_request_mask.
-        # seq_lens (GPU) will be computed later using the same optimistic values.
+        # Keep the eager non-spec path aligned with upstream: materialize
+        # seq_lens immediately unless async spec decode needs the optimistic path.
         torch.add(
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
             torch.from_numpy(num_scheduled_tokens),
             out=self.optimistic_seq_lens_cpu[:num_reqs],
         )
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
+        if not self.use_async_spec_decode:
+            self.seq_lens[:num_reqs].copy_(
+                self.optimistic_seq_lens_cpu[:num_reqs],
+                non_blocking=True,
+            )
+            self.seq_lens[num_reqs:].fill_(0)
 
         # Build prev_positions mapping: current pos -> prev pos (-1 if new).
         # Used for gathering from previous iteration's GPU tensors.
@@ -2737,8 +2781,10 @@ class NPUModelRunner(GPUModelRunner):
             # to make sure the backend see a max_seq_len that is larger to the sliding
             # window size when capturing to make sure the correct kernel is selected.
             max_seq_len = self.max_model_len
-        else:
+        elif self.use_async_spec_decode:
             max_seq_len = self.optimistic_seq_lens_cpu.numpy()[:num_reqs].max().item()
+        else:
+            max_seq_len = self.seq_lens[:num_reqs].max().item()
 
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
@@ -2839,10 +2885,12 @@ class NPUModelRunner(GPUModelRunner):
         is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
         is_prefilling[num_reqs:] = False
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
+        seq_lens_cpu_metadata = self.optimistic_seq_lens_cpu[:num_reqs_padded]
         if self.use_async_spec_decode:
             # GPU tensors are authoritative in async mode.
             seq_lens_cpu = None
             num_computed_tokens_cpu = None
+            seq_lens_cpu_metadata = self.optimistic_seq_lens_cpu[:num_reqs_padded]
 
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
@@ -4469,3 +4517,8 @@ def update_pass_config(model_runner):
         yield
     finally:
         model_runner.compilation_config.pass_config.enable_sp = original_pass_config_sp
+
+
+from vllm_ascend.patch.worker.patch_simllm import try_apply_simllm_patch  # isort: skip  # noqa: E402
+
+try_apply_simllm_patch()
