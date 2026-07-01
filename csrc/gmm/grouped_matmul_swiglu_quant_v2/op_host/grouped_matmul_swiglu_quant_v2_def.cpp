@@ -253,7 +253,7 @@ public:
             .ExtendCfgInfo("coreType.value", "AiCore")
             .ExtendCfgInfo("aclnnSupport.value", "support_aclnn")
             .ExtendCfgInfo("opFile.value","grouped_matmul_swiglu_quant_v2_apt");
-        this->AICore().AddConfig("ascend950", config950);
+        this->AICore().AddConfig(VLLM_ASCEND_950_SOC_CONFIG, config950);
     }
 };
 

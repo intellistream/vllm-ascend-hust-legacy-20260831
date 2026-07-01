@@ -231,7 +231,7 @@ ValidSocVersion QuantLightningIndexerMetadataCpuKernel::ProcessSocVersion()
 {
     const std::string ascend950 = "Ascend950";
     if (socVersion_.find(ascend950) != std::string::npos) {
-        return ValidSocVersion::ASCEND950;
+        return ValidSocVersion::VLLM_ASCEND_950_SOC_ENUM;
     } else {
         return ValidSocVersion::ASCEND910B;
     }
@@ -258,7 +258,7 @@ bool QuantLightningIndexerMetadataCpuKernel::ParamsInit()
     validSocVersion_ = ProcessSocVersion();
     if (validSocVersion_ == ValidSocVersion::ASCEND910B){
         s2BaseSize_ = 2048U; // 仅用于A3
-    } else if (validSocVersion_ == ValidSocVersion::ASCEND950){
+    } else if (validSocVersion_ == ValidSocVersion::VLLM_ASCEND_950_SOC_ENUM){
         s2BaseSize_ = 128U; // 仅用于A5
     } else {
         s2BaseSize_ = 128U; // 其他情况

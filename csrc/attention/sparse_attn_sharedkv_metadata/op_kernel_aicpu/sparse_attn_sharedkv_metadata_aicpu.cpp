@@ -240,7 +240,7 @@ ValidSocVersion SparseAttnSharedkvMetadataCpuKernel::ProcessSocVersion()
 {
     const std::string ascend950 = "Ascend950";
     if (socVersion_.find(ascend950) != std::string::npos) {
-        return ValidSocVersion::ASCEND950;
+        return ValidSocVersion::VLLM_ASCEND_950_SOC_ENUM;
     } else {
         return ValidSocVersion::ASCEND910;
     }
@@ -277,7 +277,7 @@ bool SparseAttnSharedkvMetadataCpuKernel::ParamsInit()
     if (validSocVersion == ValidSocVersion::ASCEND910) {
         mBaseSize_ = groupSize_;
         s2BaseSize_ = 512U;
-    } else if (validSocVersion == ValidSocVersion::ASCEND950){
+    } else if (validSocVersion == ValidSocVersion::VLLM_ASCEND_950_SOC_ENUM){
         mBaseSize_ = 64U;
         s2BaseSize_ = 128U;
     }

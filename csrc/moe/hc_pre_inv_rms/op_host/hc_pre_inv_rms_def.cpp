@@ -44,7 +44,7 @@ public:
             .DynamicRankSupportFlag(true)
             .DynamicShapeSupportFlag(true)
             .ExtendCfgInfo("opFile.value", "hc_pre_inv_rms");
-        this->AICore().AddConfig("ascend950", regbaseCfg);
+        this->AICore().AddConfig(VLLM_ASCEND_950_SOC_CONFIG, regbaseCfg);
     }
 };
 OP_ADD(HcPreInvRms);

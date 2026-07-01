@@ -79,7 +79,7 @@ public:
 protected:
     bool IsCapable() override
     {
-        if (socVersion != platform_ascendc::SocVersion::ASCEND950) {
+        if (socVersion != platform_ascendc::SocVersion::VLLM_ASCEND_950_SOC_ENUM) {
             return false;
         }
         return true;

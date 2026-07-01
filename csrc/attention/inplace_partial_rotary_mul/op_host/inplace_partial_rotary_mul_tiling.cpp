@@ -62,7 +62,7 @@ ge::graphStatus Tiling4RotaryPositionEmbedding(gert::TilingContext *context)
                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     auto socVersion = ascendcPlatform.GetSocVersion();
-    if (socVersion == platform_ascendc::SocVersion::ASCEND950)
+    if (socVersion == platform_ascendc::SocVersion::VLLM_ASCEND_950_SOC_ENUM)
     {
         std::vector<std::unique_ptr<RopeRegBaseTilingClass>> regBaseTilingCases;
         regBaseTilingCases.push_back(std::unique_ptr<RopeRegBaseTilingClass>(new RopeRegBaseTilingClassAAndB(context)));

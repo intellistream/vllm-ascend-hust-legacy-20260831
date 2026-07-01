@@ -16,6 +16,8 @@ option(ENABLE_CCACHE              "Enable ccache capability"        ON)
 set(ASCEND_COMPUTE_UNIT           "ascend910b"                    CACHE   STRING   "soc that need to be compiled")
 set(ASCEND_OP_NAME                "ALL"                           CACHE   STRING   "operators that need to be compiled")
 set(VENDOR_NAME                   "vllm-ascend"                   CACHE   STRING   "vendor name")
+set(OPS_TRANSFORMER_DIR           ${CMAKE_CURRENT_SOURCE_DIR})
+include_directories(${OPS_TRANSFORMER_DIR}/common/include)
 
 # Suppress warnings from catlass/tla third-party headers for CANN kernel compilation
 list(APPEND OPS_COMPILE_OPTIONS -Wno-ignored-attributes)
