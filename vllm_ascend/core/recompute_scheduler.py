@@ -226,7 +226,7 @@ class RecomputeScheduler(Scheduler):
 
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
-    def schedule(self) -> RecomputeSchedulerOutput:
+    def schedule(self, throttle_prefills: bool = False) -> RecomputeSchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
