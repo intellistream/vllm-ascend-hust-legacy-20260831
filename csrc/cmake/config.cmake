@@ -67,11 +67,8 @@ elseif (VLLM_ASCEND_HAS_SOC_ASCEND910_95)
     set(VLLM_ASCEND_950_SOC_ENUM "ASCEND910_95")
     set(VLLM_ASCEND_950_SOC_CONFIG "ascend910_95")
 else ()
-    message(WARNING
-            "Neither platform_ascendc::SocVersion::ASCEND950 nor ASCEND910_95 is available in CANN headers. "
-            "ASCEND950-specific code paths will be disabled.")
-    set(VLLM_ASCEND_950_SOC_ENUM "")
-    set(VLLM_ASCEND_950_SOC_CONFIG "")
+    message(FATAL_ERROR
+            "Neither platform_ascendc::SocVersion::ASCEND950 nor ASCEND910_95 is available in CANN headers.")
 endif ()
 
 set(CMAKE_REQUIRED_INCLUDES "${_saved_CMAKE_REQUIRED_INCLUDES}")
