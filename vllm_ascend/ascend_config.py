@@ -329,6 +329,20 @@ class AscendConfig:
             "utility_default_max_tokens": self.utility_default_max_tokens,
         }
 
+    @staticmethod
+    def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
+        if config_key in additional_config:
+            value = additional_config[config_key]
+            logger.info_once(f"AscendConfig.{config_key} is set from additional_config with value {value}.")
+            return value
+        if env_key in os.environ:
+            logger.info_once(
+                f"AscendConfig.{config_key} falls back to environment variable {env_key} with value {env_value}. "
+                f"Please use additional_config.{config_key} instead, because {env_key} will be removed in the "
+                "next release."
+            )
+        return env_value
+
     def _check_mix_placement(self):
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
