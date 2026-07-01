@@ -453,6 +453,7 @@ class FinegrainedTPConfig:
         self.lmhead_tensor_parallel_size = finegrained_tp_config.get("lmhead_tensor_parallel_size", 0)
         self.embedding_tensor_parallel_size = finegrained_tp_config.get("embedding_tensor_parallel_size", 0)
         self.mlp_tensor_parallel_size = finegrained_tp_config.get("mlp_tensor_parallel_size", 0)
+        self.olora_tensor_parallel_size = finegrained_tp_config.get("olora_tensor_parallel_size", 0)
 
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
@@ -471,11 +472,20 @@ class FinegrainedTPConfig:
             enabled_configs.append(f"embedding_tensor_parallel_size={self.embedding_tensor_parallel_size}")
         if self.mlp_tensor_parallel_size > 0:
             enabled_configs.append(f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
+        if self.olora_tensor_parallel_size > 0:
+            enabled_configs.append(f"olora_tensor_parallel_size={self.olora_tensor_parallel_size}")
+            if vllm_config.model_config.enforce_eager is True:
+                raise AssertionError("olora_tensor_parallel_size is only supported in graph mode")
+            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise AssertionError(
+                    "olora_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
+                )
         module_tp_sizes = [
             self.oproj_tensor_parallel_size,
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
+            self.olora_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
             if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:

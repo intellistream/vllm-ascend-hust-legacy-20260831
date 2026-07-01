@@ -7,8 +7,12 @@ from vllm.v1.sample.rejection_sampler import (
     GREEDY_TEMPERATURE,
     MAX_SPEC_LEN,
     PLACEHOLDER_TOKEN_ID,
+    RejectionSampler,
     generate_uniform_probs,
 )
+
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata  # noqa: F401
+from vllm.v1.outputs import SamplerOutput  # noqa: F401
 
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,

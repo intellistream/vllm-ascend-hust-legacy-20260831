@@ -81,7 +81,10 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.utils import vllm_version_is
 
 if not vllm_version_is("0.20.2"):
-    from vllm.v1.outputs import RoutedExpertsLists
+    try:
+        from vllm.v1.outputs import RoutedExpertsLists  # noqa: F401
+    except ImportError:
+        RoutedExpertsLists = None  # type: ignore
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler

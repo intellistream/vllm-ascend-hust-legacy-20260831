@@ -37,9 +37,18 @@ import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 
 if not is_310p():
-    import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
-    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
-    import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
+    try:
+        import vllm_ascend.patch.worker.patch_qwen3_5  # noqa
+    except ImportError:
+        pass
+    try:
+        import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
+    except ImportError:
+        pass
+    try:
+        import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
+    except ImportError:
+        pass
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
@@ -57,10 +66,19 @@ import vllm_ascend.patch.worker.patch_cudagraph  # noqa
 import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 
+import importlib
+
+
+def _import_optional_patch(module_name: str) -> None:
+    try:
+        importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != "torchvision":
+            raise
+
 
 _import_optional_patch("vllm_ascend.patch.worker.patch_qwen3vl")
 import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
-import vllm_ascend.patch.worker.patch_bailing_moe_linear  # noqa
 
 # Sim-LLM KV reuse — auto-loaded at worker init, gated behind
 # VLLM_ASCEND_SIMLLM_ENABLED=1 (no-op when disabled).
@@ -74,4 +92,7 @@ if _V2_MODEL_RUNNER_SUPPORTED:
 
 # only patch routed experts capture in main2main.
 if _V2_MODEL_RUNNER_SUPPORTED:
-    import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+    try:
+        import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+    except ImportError:
+        pass
