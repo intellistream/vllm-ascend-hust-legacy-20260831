@@ -694,7 +694,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     global REGISTERED_ASCEND_OPS
     REGISTERED_ASCEND_OPS = {
-    """
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
         "RotaryEmbedding": AscendRotaryEmbedding,
