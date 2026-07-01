@@ -119,12 +119,10 @@ exclude_patterns = [
     "user_guide/release.template.md",
     # TODO(yikun): Remove this after zh supported
     "**/*.zh.md",
-    "fork_release_install_guide.md",
-    "developer_guide/feature_guide/index.md",
-    "tutorials/models/Qwen2.5-7B.md",
-    "tutorials/models/Qwen2.5-Omni.md",
-    "user_guide/feature_guide/npugraph_ex.md",
 ]
+
+# Suppress toctree warnings for documents intentionally excluded from navigation
+suppress_warnings = ["toc.not_included"]
 
 # -- Options for HTML output -------------------------------------------------
 
