@@ -278,7 +278,7 @@ log_selected_ops
     -exec rm -rf -- {} +
 
   shopt -s nullglob
-  installer_candidates=(./build/cann-ops-transformer*.run)
+  installer_candidates=(./build/*.run)
   shopt -u nullglob
 
   log "installer candidate count=${#installer_candidates[@]}"
