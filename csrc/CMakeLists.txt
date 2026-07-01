@@ -21,6 +21,7 @@ include_directories(${OPS_TRANSFORMER_DIR}/common/include)
 
 # Suppress warnings from catlass/tla third-party headers for CANN kernel compilation
 list(APPEND OPS_COMPILE_OPTIONS -Wno-ignored-attributes)
+add_compile_options(-Wno-narrowing -Wno-deprecated-declarations -Wno-c++20-extensions -Wno-unknown-warning-option)
 
 include(cmake/config.cmake)
 include(cmake/func.cmake)
