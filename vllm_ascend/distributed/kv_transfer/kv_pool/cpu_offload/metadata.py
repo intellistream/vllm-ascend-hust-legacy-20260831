@@ -88,6 +88,7 @@ class MetadataServer:
                     shm.close()
 
     def __init__(self, vllm_config: VllmConfig):
+        self.vllm_config = vllm_config
         self.world_size = vllm_config.parallel_config.world_size
         self.pipeline_parallel_size = vllm_config.parallel_config.pipeline_parallel_size
         kv_transfer_config = get_cpu_offload_connector(vllm_config)
@@ -179,7 +180,12 @@ class MetadataServer:
         # do shared_memory() at least once
         logger.info("assign cpu num blocks: %s", self.num_cpu_blocks)
         assert self.num_cpu_blocks >= 0
-        self.cpu_block_manager = CPUKVCacheManager(self.layer, self.num_cpu_blocks)
+        self.cpu_block_manager = CPUKVCacheManager(
+            self.layer,
+            self.num_cpu_blocks,
+            max_num_batched_tokens=self.vllm_config.scheduler_config.max_num_batched_tokens,
+            max_model_len=self.vllm_config.model_config.max_model_len,
+        )
         self.functions.update(
             {
                 "get_matched_num_and_touch": self.cpu_block_manager.get_matched_num_and_touch,

@@ -157,6 +157,7 @@ class CPUOffloadingConnectorScheduler:
     def get_num_new_matched_tokens(self, ori_request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         request = copy.deepcopy(ori_request)
         request.get_hash_new_full_blocks = None
+        request._block_hasher = None
         num_cpu_computed_tokens, load_async = self.zmq_rpc_client.call("get_matched_num_and_touch", request)
         self.num_gpu_computed_tokens[request.request_id] = num_computed_tokens
         self.num_cpu_computed_tokens[request.request_id] = num_cpu_computed_tokens
@@ -219,6 +220,7 @@ class CPUOffloadingConnectorScheduler:
     def request_finished(self, ori_request: "Request"):
         request = copy.deepcopy(ori_request)
         request.get_hash_new_full_blocks = None
+        request._block_hasher = None
         self.finished_req_ids.append(request.request_id)
         # inform metadata server to record request, and free it after finish sending
         self.zmq_rpc_client.call("record_request_cache_and_free_slots", request)
@@ -251,7 +253,9 @@ class CPUOffloadingConnectorWorker:
         if vllm_config.parallel_config.data_parallel_rank == 0 and self.tp_rank == 0 and self.pp_rank == 0:
             config = VllmConfig()
             config.cache_config = vllm_config.cache_config
+            config.model_config = vllm_config.model_config
             config.parallel_config = vllm_config.parallel_config
+            config.scheduler_config = vllm_config.scheduler_config
             config.kv_transfer_config = vllm_config.kv_transfer_config
             self.init_metadata_server(config)
         self._wait_for_metadata_process_start()
