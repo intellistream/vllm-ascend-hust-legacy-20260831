@@ -51,7 +51,7 @@ BENCH_MAX_CONCURRENCY=${BENCH_MAX_CONCURRENCY:-4}
 BENCH_INPUT_LEN=${BENCH_INPUT_LEN:-}
 BENCH_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-}
 HARDWARE_VENDOR=${HARDWARE_VENDOR:-Huawei}
-HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-910B3}
+HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-}
 CHIP_COUNT=${CHIP_COUNT:-1}
 NODE_COUNT=${NODE_COUNT:-1}
 PUBLISH_TO_HF=${PUBLISH_TO_HF:-0}
@@ -1163,17 +1163,21 @@ case "$BENCH_SCENARIO" in
     )
     ;;
   sharegpt-online)
-    if [[ -z "$BENCH_DATASET_PATH" ]]; then
+    if [[ "$SAME_SPEC_BENCHMARK_ENABLED" != "1" && -z "$BENCH_DATASET_PATH" ]]; then
       echo "BENCH_DATASET_PATH is required for sharegpt-online" >&2
       exit 2
     fi
-    if [[ -z "$BENCH_CONSTRAINTS_FILE" ]]; then
+    if [[ "$SAME_SPEC_BENCHMARK_ENABLED" != "1" && -z "$BENCH_CONSTRAINTS_FILE" ]]; then
       echo "BENCH_CONSTRAINTS_FILE is required for sharegpt-online" >&2
       exit 2
     fi
     EFFECTIVE_INPUT_LEN=${BENCH_INPUT_LEN:-1024}
     EFFECTIVE_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-256}
-    EFFECTIVE_CONSTRAINTS_FILE="$BENCH_CONSTRAINTS_FILE"
+    if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then
+      EFFECTIVE_CONSTRAINTS_FILE=$SAME_SPEC_CONSTRAINTS_FILE
+    else
+      EFFECTIVE_CONSTRAINTS_FILE="$BENCH_CONSTRAINTS_FILE"
+    fi
     bench_args=(
       --backend vllm
       --endpoint /v1/completions
@@ -1200,7 +1204,7 @@ if [[ ! -f "$EFFECTIVE_CONSTRAINTS_FILE" ]]; then
   exit 2
 fi
 
-if [[ "$BENCH_SCENARIO" == "random-online" && "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then
+if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then
   for start_attempt in $(seq 1 "$SERVER_START_RETRIES"); do
     if [[ "$CHIP_COUNT" == "1" ]]; then
       configure_single_card_ascend_device "$start_attempt"

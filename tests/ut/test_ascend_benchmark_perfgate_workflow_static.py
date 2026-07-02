@@ -31,16 +31,29 @@ def test_perfgate_scripts_are_present() -> None:
         "perfgate_store_baseline.sh",
         "parse_ascend_comment_command.py",
         "resolve_ascend_benchmark_scenario.py",
+        "resolve_perfgate_spec_file.py",
     ):
         assert (SCRIPT_DIR / script_name).is_file()
 
 
 def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
+    runner = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
 
     assert "PERFGATE_MODE" in workflow
     assert "PERFGATE_SPEC_FILE" in workflow
-    assert "docs/official-baselines/perfgate-ascend-qwen25-3b-910b3.json" in workflow
+    assert "VLLM_ASCEND_HUST_PERFGATE_SPEC_FILE || ''" in workflow
+    assert "Resolve perfgate spec for Ascend runner" in workflow
+    assert "resolve_perfgate_spec_file.py" in workflow
+    assert "perfgate-ascend-qwen25-3b-910b3.json" not in workflow
+    assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-}" in runner
+    assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-910B3}" not in runner
+    assert 'if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then' in runner
+    assert (
+        'if [[ "$BENCH_SCENARIO" == "random-online" && '
+        '"$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then'
+        not in runner
+    )
     assert "VLLM_HUST_BENCHMARK_REF" in workflow
     assert "ref: ${{ env.VLLM_HUST_BENCHMARK_REF }}" in workflow
     assert 'hust_run_pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]"' in workflow
@@ -65,6 +78,21 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "vars.VLLM_ASCEND_HUST_BENCHMARK_USE_SUDO || 'auto'" in workflow
     assert "CURRENT_VLLM_CACHE_ROOT: ${{ github.workspace }}/../.hf-cache/vllm" in workflow
     assert "VLLM_ASCEND_HUST_SAME_SPEC_READY_TIMEOUT_SECONDS || '1800'" in workflow
+
+
+def test_sharegpt_same_spec_does_not_require_manual_dataset_inputs() -> None:
+    runner = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
+    sharegpt_block = runner[runner.index("  sharegpt-online)") : runner.index("  *)")]
+
+    assert (
+        'if [[ "$SAME_SPEC_BENCHMARK_ENABLED" != "1" && '
+        '-z "$BENCH_DATASET_PATH" ]]; then'
+    ) in sharegpt_block
+    assert (
+        'if [[ "$SAME_SPEC_BENCHMARK_ENABLED" != "1" && '
+        '-z "$BENCH_CONSTRAINTS_FILE" ]]; then'
+    ) in sharegpt_block
+    assert "EFFECTIVE_CONSTRAINTS_FILE=$SAME_SPEC_CONSTRAINTS_FILE" in sharegpt_block
 
 
 def test_local_ascend_manager_fallback_bootstraps_pip() -> None:
