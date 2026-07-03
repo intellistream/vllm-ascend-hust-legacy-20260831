@@ -5,6 +5,7 @@ RUN_ID=${RUN_ID:-ci-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_S
 RESULT_ROOT=${RESULT_ROOT:-${GITHUB_WORKSPACE:-$PWD}/.benchmarks/ci/$RUN_ID}
 GITHUB_SHA=${GITHUB_SHA:-$(git rev-parse HEAD)}
 BASELINE_BRANCH=${PERFGATE_BASELINE_BRANCH:-benchmark-baselines}
+BASELINE_REMOTE=${PERFGATE_BASELINE_REMOTE:-origin}
 BASELINE_FILE=${PERFGATE_BASELINE_SOURCE_FILE:-$RESULT_ROOT/submissions/$RUN_ID/run_leaderboard.json}
 WORKTREE_DIR=${PERFGATE_BASELINE_WORKTREE:-${RUNNER_TEMP:-/tmp}/perfgate-baselines-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}}
 PUSH_REMOTE_URL=${PERFGATE_BASELINE_PUSH_REMOTE_URL:-}
@@ -92,11 +93,12 @@ PY
 
 rm -rf "$WORKTREE_DIR"
 if [[ -n "$PUSH_REMOTE_URL" ]]; then
-  git remote set-url origin "$PUSH_REMOTE_URL"
+  git remote set-url "$BASELINE_REMOTE" "$PUSH_REMOTE_URL"
 fi
-if git ls-remote --exit-code --heads origin "$BASELINE_BRANCH" >/dev/null 2>&1; then
-  git fetch origin "$BASELINE_BRANCH:$BASELINE_BRANCH" || git fetch origin "$BASELINE_BRANCH"
-  git worktree add "$WORKTREE_DIR" "origin/$BASELINE_BRANCH"
+if git ls-remote --exit-code --heads "$BASELINE_REMOTE" "$BASELINE_BRANCH" >/dev/null 2>&1; then
+  git fetch "$BASELINE_REMOTE" \
+    "+refs/heads/$BASELINE_BRANCH:refs/remotes/$BASELINE_REMOTE/$BASELINE_BRANCH"
+  git worktree add "$WORKTREE_DIR" "$BASELINE_REMOTE/$BASELINE_BRANCH"
 else
   git worktree add --detach "$WORKTREE_DIR" HEAD
   git -C "$WORKTREE_DIR" checkout --orphan "$BASELINE_BRANCH"
@@ -121,7 +123,7 @@ else
   git -C "$WORKTREE_DIR" config user.name "vLLM-HUST Benchmark Bot"
   git -C "$WORKTREE_DIR" config user.email "benchmark-bot@vllm-hust.local"
   git -C "$WORKTREE_DIR" commit -m "chore(perfgate): store baseline for ${GITHUB_SHA:0:8}"
-  if ! git -C "$WORKTREE_DIR" push origin "HEAD:$BASELINE_BRANCH"; then
+  if ! git -C "$WORKTREE_DIR" push "$BASELINE_REMOTE" "HEAD:$BASELINE_BRANCH"; then
     echo "Failed to push perfgate baseline to branch $BASELINE_BRANCH" >&2
     echo "Check that this job runs on push to main with contents: write permission and that branch protection allows GitHub Actions to update $BASELINE_BRANCH." >&2
     exit 1

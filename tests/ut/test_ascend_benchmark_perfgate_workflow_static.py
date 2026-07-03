@@ -70,6 +70,29 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "VLLM_ASCEND_HUST_SAME_SPEC_READY_TIMEOUT_SECONDS || '1800'" in workflow
 
 
+def test_perfgate_baseline_scripts_use_current_repo_remote_tracking_branch() -> None:
+    fetch_script = (SCRIPT_DIR / "perfgate_fetch_baseline.sh").read_text(
+        encoding="utf-8"
+    )
+    store_script = (SCRIPT_DIR / "perfgate_store_baseline.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "BASELINE_REMOTE=${PERFGATE_BASELINE_REMOTE:-origin}" in fetch_script
+    assert "BASELINE_REMOTE=${PERFGATE_BASELINE_REMOTE:-origin}" in store_script
+    assert (
+        '"+refs/heads/$BASELINE_BRANCH:refs/remotes/$BASELINE_REMOTE/$BASELINE_BRANCH"'
+        in fetch_script
+    )
+    assert (
+        '"+refs/heads/$BASELINE_BRANCH:refs/remotes/$BASELINE_REMOTE/$BASELINE_BRANCH"'
+        in store_script
+    )
+    assert 'git worktree add --detach "$BASELINE_WORKTREE"' in fetch_script
+    assert 'git worktree add "$WORKTREE_DIR" "$BASELINE_REMOTE/$BASELINE_BRANCH"' in store_script
+    assert 'git clone --depth 1 --branch "$BASELINE_BRANCH"' not in fetch_script
+
+
 def test_local_ascend_manager_fallback_bootstraps_pip() -> None:
     helper = MANAGER_HELPER.read_text(encoding="utf-8")
 

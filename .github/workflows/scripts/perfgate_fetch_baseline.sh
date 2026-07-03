@@ -3,10 +3,12 @@ set -euo pipefail
 
 COMMIT=${1:-${FORK_POINT:-${GITHUB_SHA:-}}}
 BASELINE_BRANCH=${PERFGATE_BASELINE_BRANCH:-benchmark-baselines}
+BASELINE_REMOTE=${PERFGATE_BASELINE_REMOTE:-origin}
 OUTPUT_DIR=${PERFGATE_BASELINE_OUTPUT_DIR:-${RUNNER_TEMP:-/tmp}/perfgate-baselines}
 ALLOW_BASELINE_FALLBACK=${PERFGATE_ALLOW_BASELINE_FALLBACK:-0}
 MODE=${PERFGATE_MODE:-report}
 GITHUB_ENV=${GITHUB_ENV:-/dev/null}
+BASELINE_WORKTREE="$OUTPUT_DIR/branch"
 
 write_env() {
   local name=$1
@@ -39,21 +41,23 @@ if [[ -z "$COMMIT" ]]; then
 fi
 
 mkdir -p "$OUTPUT_DIR"
-rm -rf "$OUTPUT_DIR/branch"
-if ! git ls-remote --exit-code --heads origin "$BASELINE_BRANCH" >/dev/null 2>&1; then
+git worktree remove "$BASELINE_WORKTREE" --force >/dev/null 2>&1 || rm -rf "$BASELINE_WORKTREE"
+if ! git ls-remote --exit-code --heads "$BASELINE_REMOTE" "$BASELINE_BRANCH" >/dev/null 2>&1; then
   baseline_unavailable "Perfgate baseline branch not found: $BASELINE_BRANCH"
 fi
 
-git clone --depth 1 --branch "$BASELINE_BRANCH" "$(git remote get-url origin)" "$OUTPUT_DIR/branch"
+git fetch "$BASELINE_REMOTE" \
+  "+refs/heads/$BASELINE_BRANCH:refs/remotes/$BASELINE_REMOTE/$BASELINE_BRANCH"
+git worktree add --detach "$BASELINE_WORKTREE" "$BASELINE_REMOTE/$BASELINE_BRANCH"
 
-baseline_file="$OUTPUT_DIR/branch/baselines/$COMMIT/run_leaderboard.json"
+baseline_file="$BASELINE_WORKTREE/baselines/$COMMIT/run_leaderboard.json"
 baseline_commit="$COMMIT"
 baseline_source="exact"
 if [[ ! -f "$baseline_file" ]]; then
   if [[ "$ALLOW_BASELINE_FALLBACK" != "1" ]]; then
     baseline_unavailable "No exact perfgate baseline found for $COMMIT"
   fi
-  baseline_file="$OUTPUT_DIR/branch/latest-main.json"
+  baseline_file="$BASELINE_WORKTREE/latest-main.json"
   baseline_commit="latest-main"
   baseline_source="latest-main-fallback"
 fi
