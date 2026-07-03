@@ -29,7 +29,7 @@
 #include "ops.h"
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
-#include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
+#include "add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
 #include "moe/apply_top_k_top_p_custom/apply_top_k_top_p_custom_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 #include "batch_matmul_transpose/batch_matmul_transpose_torch_adpt.h"
