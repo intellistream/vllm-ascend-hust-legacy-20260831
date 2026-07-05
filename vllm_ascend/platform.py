@@ -422,6 +422,23 @@ class NPUPlatform(Platform):
             )
 
     @classmethod
+    def _validate_layer_sharding_config(cls, vllm_config: VllmConfig) -> None:
+        additional_config = vllm_config.additional_config or {}
+        if not additional_config.get("layer_sharding"):
+            return
+
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is None
+            or not getattr(kv_transfer_config, "is_kv_producer", False)
+            or getattr(kv_transfer_config, "kv_role", None) != "kv_producer"
+        ):
+            raise ValueError(
+                "layer_sharding can only be enabled in PD-disaggregated's P node "
+                "(kv_role='kv_producer')."
+            )
+
+    @classmethod
     def _validate_draft_decode_context_parallel_config(
         cls,
         vllm_config: VllmConfig,
