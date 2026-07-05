@@ -16,10 +16,18 @@
 # limitations under the License.
 #
 
+import os
+
 from torch import fx as fx
 from vllm.compilation.passes.inductor_pass import get_pass_context
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
+from vllm.logger import logger
+
+
+def _disable_add_rms_norm_bias_custom_op() -> bool:
+    value = os.getenv("VLLM_ASCEND_DISABLE_ADD_RMS_NORM_BIAS_CUSTOM_OP", "0")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class GraphFusionPassManager:
@@ -61,10 +69,14 @@ class GraphFusionPassManager:
 
             self.passes.append(QKNormRopeFusionPass(config))
 
-        if self.ascend_compilation_config.get("fuse_allreduce_rms", True):
+        if self.ascend_compilation_config.get("fuse_allreduce_rms", True) and not _disable_add_rms_norm_bias_custom_op():
             from .passes.allreduce_rmsnorm_fusion_pass import MatmulAllReduceAddRMSNormPass
 
             self.passes.append(MatmulAllReduceAddRMSNormPass(config))
+        elif self.ascend_compilation_config.get("fuse_allreduce_rms", True):
+            logger.debug(
+                "AllReduce+AddRMSNorm fusion disabled by VLLM_ASCEND_DISABLE_ADD_RMS_NORM_BIAS_CUSTOM_OP"
+            )
 
         if self.ascend_compilation_config.get("fuse_muls_add", True) and not is_310p():
             from .passes.muls_add_pass import MulsAddFusionPass

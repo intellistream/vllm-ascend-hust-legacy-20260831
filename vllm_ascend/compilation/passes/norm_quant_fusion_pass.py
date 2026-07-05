@@ -15,6 +15,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
+
 import torch
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
@@ -28,6 +30,11 @@ from vllm_ascend.device.mxfp_compat import (
     is_rms_norm_dynamic_mx_quant_fusion_available,
 )
 from vllm_ascend.utils import enable_custom_op
+
+
+def _disable_add_rms_norm_bias_custom_op() -> bool:
+    value = os.getenv("VLLM_ASCEND_DISABLE_ADD_RMS_NORM_BIAS_CUSTOM_OP", "0")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class AddRMSNormQuantPattern(BasePattern):
@@ -692,13 +699,18 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
             if rms_norm_dynamic_mx_quant_fusion_available:
                 RMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 RMSNormDynamicMXQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
-            if enable_custom_op():
+            if enable_custom_op() and not _disable_add_rms_norm_bias_custom_op():
                 AddRMSNormQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormQuantSPPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormDynamicQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormDynamicQuantSPPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
+            elif enable_custom_op():
+                logger.debug(
+                    "AddRMSNormBias-backed quant fusion disabled by "
+                    "VLLM_ASCEND_DISABLE_ADD_RMS_NORM_BIAS_CUSTOM_OP"
+                )
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
