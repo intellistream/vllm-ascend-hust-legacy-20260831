@@ -8,7 +8,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group,
 from vllm.logger import logger
 
 from vllm_ascend.compilation.passes.noop_elimination import NoOpEliminationPass
-from vllm_ascend.utils import is_moe_model
+from vllm_ascend.utils import is_add_rms_norm_bias_custom_op_available, is_moe_model
 
 SP_MIN_TOKEN_NUM_DEFAULT = 1000
 
@@ -196,6 +196,11 @@ class SequenceParallelismPass(VllmInductorPass):
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(pass_name="npu_sequence_parallelism_pass")
         self.noop_cleanup = NoOpEliminationPass(config)
+
+        if not is_add_rms_norm_bias_custom_op_available():
+            logger.debug("SequenceParallelismPass RMSNorm patterns not enabled: required libopapi symbols unavailable")
+            self.min_tokens = get_sp_min_token_num(config)
+            return
 
         for epsilon in [1e-5, 1e-6]:
             MiddleAllReduceRMSNormPattern(config, epsilon).register(self.patterns)

@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import functools
 import json
 import math
@@ -77,6 +78,12 @@ _CUSTOM_OP_VENDOR_DIR = "custom_transformer"
 _CUSTOM_OP_BASE_DIR = (
     os.path.dirname(__file__) if os.path.isabs(__file__) else os.path.abspath(os.path.dirname(__file__))
 )
+_ADD_RMS_NORM_BIAS_DISABLE_ENV = "VLLM_ASCEND_DISABLE_ADD_RMS_NORM_BIAS_CUSTOM_OP"
+_ADD_RMS_NORM_BIAS_REQUIRED_SYMBOLS = (
+    "aclnnAddRmsNormBias",
+    "aclnnAddRmsNormBiasGetWorkspaceSize",
+)
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def extract_dsv4_layer_index(config: Any, layer_name: str) -> int:
@@ -352,6 +359,38 @@ def aligned_16(tensor: torch.Tensor):
     new_tensor[:n] = tensor
 
     return new_tensor
+
+
+@lru_cache(maxsize=1)
+def is_add_rms_norm_bias_custom_op_available() -> bool:
+    try:
+        libopapi = ctypes.CDLL("libopapi.so")
+    except OSError as exc:
+        logger.warning_once(
+            "Disable npu_add_rms_norm_bias custom op because libopapi.so "
+            "cannot be loaded: %s",
+            exc,
+        )
+        return False
+
+    missing_symbols = [
+        symbol for symbol in _ADD_RMS_NORM_BIAS_REQUIRED_SYMBOLS if not hasattr(libopapi, symbol)
+    ]
+    if missing_symbols:
+        logger.warning_once(
+            "Disable npu_add_rms_norm_bias custom op because libopapi.so "
+            "misses required symbol(s): %s",
+            ", ".join(missing_symbols),
+        )
+        return False
+
+    return True
+
+
+def disable_add_rms_norm_bias_custom_op() -> bool:
+    if os.getenv(_ADD_RMS_NORM_BIAS_DISABLE_ENV, "").strip().lower() in _TRUTHY_ENV_VALUES:
+        return True
+    return not is_add_rms_norm_bias_custom_op_available()
 
 
 def enable_custom_op():

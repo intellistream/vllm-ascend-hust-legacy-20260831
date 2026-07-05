@@ -111,6 +111,36 @@ class TestUtils(TestBase):
         output_tensor = utils.aligned_16(input_tensor)
         self.assertEqual(output_tensor.shape[0], 32)
 
+    def test_disable_add_rms_norm_bias_custom_op_honors_env(self):
+        utils.is_add_rms_norm_bias_custom_op_available.cache_clear()
+        with mock.patch.dict(os.environ, {"VLLM_ASCEND_DISABLE_ADD_RMS_NORM_BIAS_CUSTOM_OP": "true"}):
+            self.assertTrue(utils.disable_add_rms_norm_bias_custom_op())
+
+    def test_add_rms_norm_bias_custom_op_available(self):
+        class LibOpApi:
+            aclnnAddRmsNormBias = object()
+            aclnnAddRmsNormBiasGetWorkspaceSize = object()
+
+        utils.is_add_rms_norm_bias_custom_op_available.cache_clear()
+        with mock.patch("vllm_ascend.utils.ctypes.CDLL", return_value=LibOpApi()):
+            self.assertTrue(utils.is_add_rms_norm_bias_custom_op_available())
+            self.assertFalse(utils.disable_add_rms_norm_bias_custom_op())
+
+    def test_add_rms_norm_bias_custom_op_unavailable_when_lib_missing(self):
+        utils.is_add_rms_norm_bias_custom_op_available.cache_clear()
+        with mock.patch("vllm_ascend.utils.ctypes.CDLL", side_effect=OSError("missing")):
+            self.assertFalse(utils.is_add_rms_norm_bias_custom_op_available())
+            self.assertTrue(utils.disable_add_rms_norm_bias_custom_op())
+
+    def test_add_rms_norm_bias_custom_op_unavailable_when_symbol_missing(self):
+        class LibOpApi:
+            aclnnAddRmsNormBias = object()
+
+        utils.is_add_rms_norm_bias_custom_op_available.cache_clear()
+        with mock.patch("vllm_ascend.utils.ctypes.CDLL", return_value=LibOpApi()):
+            self.assertFalse(utils.is_add_rms_norm_bias_custom_op_available())
+            self.assertTrue(utils.disable_add_rms_norm_bias_custom_op())
+
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_enable_custom_op(self):
         result = utils.enable_custom_op()
