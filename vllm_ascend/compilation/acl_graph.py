@@ -304,7 +304,15 @@ def update_full_graph_params(
         draft_attn_metadatas,
     )
 
-    from vllm_ascend.ops.gdn import update_conv1d_graph_params
+    try:
+        from vllm_ascend.ops.gdn import update_conv1d_graph_params
+    except ModuleNotFoundError as exc:
+        logger.warning(
+            "Skipping GDN conv1d graph parameter update because an optional "
+            "upstream dependency is unavailable: %s",
+            exc,
+        )
+        return
 
     # For GDN Attention: AscendC operate(conv1d update) update graph params
     # No patch can be loaded, update method call is temporarily placed here

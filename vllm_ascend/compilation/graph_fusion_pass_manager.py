@@ -20,6 +20,7 @@ from torch import fx as fx
 from vllm.compilation.passes.inductor_pass import get_pass_context
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
+from vllm.logger import logger
 
 
 class GraphFusionPassManager:
@@ -46,6 +47,20 @@ class GraphFusionPassManager:
         assert isinstance(pass_, VllmInductorPass)
         self.passes.append(pass_)
 
+    def _add_optional_pass(self, pass_name: str, pass_factory):
+        try:
+            self.passes.append(pass_factory())
+        except RuntimeError as exc:
+            message = str(exc)
+            if "not in libopapi.so" not in message and "libopapi.so" not in message:
+                raise
+            logger.warning(
+                "Skipping Ascend graph fusion pass %s because the required "
+                "OPAPI symbol is unavailable in this runtime: %s",
+                pass_name,
+                exc,
+            )
+
     def configure(self, config: VllmConfig):
         from vllm_ascend.utils import is_310p
 
@@ -54,7 +69,7 @@ class GraphFusionPassManager:
         if self.ascend_compilation_config.get("fuse_norm_quant", True) and not is_310p():
             from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
 
-            self.passes.append(AddRMSNormQuantFusionPass(config))
+            self._add_optional_pass("fuse_norm_quant", lambda: AddRMSNormQuantFusionPass(config))
 
         if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
             from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
@@ -64,7 +79,7 @@ class GraphFusionPassManager:
         if self.ascend_compilation_config.get("fuse_allreduce_rms", True):
             from .passes.allreduce_rmsnorm_fusion_pass import MatmulAllReduceAddRMSNormPass
 
-            self.passes.append(MatmulAllReduceAddRMSNormPass(config))
+            self._add_optional_pass("fuse_allreduce_rms", lambda: MatmulAllReduceAddRMSNormPass(config))
 
         if self.ascend_compilation_config.get("fuse_muls_add", True) and not is_310p():
             from .passes.muls_add_pass import MulsAddFusionPass
@@ -75,5 +90,5 @@ class GraphFusionPassManager:
             from .passes.sequence_parallelism import SequenceParallelismPass
             from .passes.sequence_parallelism_moe import SequenceParallelismMoePass
 
-            self.passes.append(SequenceParallelismPass(config))
-            self.passes.append(SequenceParallelismMoePass(config))
+            self._add_optional_pass("sequence_parallelism", lambda: SequenceParallelismPass(config))
+            self._add_optional_pass("sequence_parallelism_moe", lambda: SequenceParallelismMoePass(config))

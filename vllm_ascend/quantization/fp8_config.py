@@ -11,17 +11,19 @@ from vllm_ascend.utils import FP8_METHOD, vllm_version_is
 
 if vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe import FusedMoE
+    _FUSED_MOE_LAYER_TYPES = (FusedMoE,)
 else:
-    from vllm.model_executor.layers.fused_moe import MoERunner
+    try:
+        from vllm.model_executor.layers.fused_moe import MoERunner
+    except ImportError:
+        from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+    _FUSED_MOE_LAYER_TYPES = (MoERunner,)
 
 from .methods import get_scheme_class
 
 
 def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
-    if vllm_version_is("0.23.0"):
-        return isinstance(layer, FusedMoE)
-    else:
-        return isinstance(layer, MoERunner)
+    return isinstance(layer, _FUSED_MOE_LAYER_TYPES)
 
 
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]

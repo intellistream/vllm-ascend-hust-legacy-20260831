@@ -10,7 +10,14 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowMLASpec
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+try:
+    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+except ModuleNotFoundError:
+
+    class KVCacheSpecRegistry:  # type: ignore[no-redef]
+        @staticmethod
+        def register(*args, **kwargs) -> None:
+            return None
 
 from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type

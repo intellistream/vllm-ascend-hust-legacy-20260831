@@ -37,28 +37,39 @@ def _import_optional_patch(module_name: str) -> None:
     try:
         importlib.import_module(module_name)
     except ModuleNotFoundError as exc:
-        if exc.name != "torchvision":
+        if (
+            exc.name != "torchvision"
+            and exc.name != module_name
+            and not (exc.name or "").startswith("vllm.")
+        ):
+            raise
+    except ImportError as exc:
+        if "cannot import name" not in str(exc):
             raise
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
 
     if _V2_MODEL_RUNNER_SUPPORTED:
-        import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
+        try:
+            import vllm_ascend.patch.worker.patch_v2.patch_triton  # noqa
+        except ImportError as exc:
+            if "rejection_sampler_utils" not in str(exc):
+                raise
 
 
 import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
-import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
+_import_optional_patch("vllm_ascend.patch.worker.patch_minimax_m2_linear_attn")
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 
 if not is_310p():
     _import_optional_patch("vllm_ascend.patch.worker.patch_qwen3_5")
-    import vllm_ascend.patch.worker.patch_gdn_attn  # noqa
-    import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
-    import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
+    _import_optional_patch("vllm_ascend.patch.worker.patch_gdn_attn")
+    _import_optional_patch("vllm_ascend.patch.worker.patch_qwen3_dflash")
+    _import_optional_patch("vllm_ascend.patch.worker.patch_qwen3vl")
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
@@ -93,12 +104,12 @@ if not vllm_version_is("0.23.0"):
     import vllm_ascend.patch.worker.patch_fused_moe  # noqa
 
 if _V2_MODEL_RUNNER_SUPPORTED:
-    import vllm_ascend.patch.worker.patch_v2.patch_uva  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_input_batch  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_model_state  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
-    import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
+    _import_optional_patch("vllm_ascend.patch.worker.patch_v2.patch_uva")
+    _import_optional_patch("vllm_ascend.patch.worker.patch_v2.patch_input_batch")
+    _import_optional_patch("vllm_ascend.patch.worker.patch_v2.patch_model_state")
+    _import_optional_patch("vllm_ascend.patch.worker.patch_v2.patch_block_table")
+    _import_optional_patch("vllm_ascend.patch.worker.patch_v2.patch_attn_utils")
 
 # only patch routed experts capture in main2main.
 if _V2_MODEL_RUNNER_SUPPORTED:
-    import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+    _import_optional_patch("vllm_ascend.patch.worker.patch_routed_experts_capture")

@@ -50,17 +50,26 @@ from vllm_ascend.utils import (
 
 if vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe import FusedMoE
+    _FUSED_MOE_LAYER_TYPES = (FusedMoE,)
 else:
-    from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
+    from vllm.model_executor.layers.fused_moe import FusedMoE
+
+    try:
+        from vllm.model_executor.layers.fused_moe import MoERunner
+    except ImportError:
+        from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+
+    try:
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
+        _FUSED_MOE_LAYER_TYPES = (MoERunner, RoutedExperts)
+    except ImportError:
+        _FUSED_MOE_LAYER_TYPES = (FusedMoE, MoERunner)
 
 from .methods import get_scheme_class
 
 
 def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
-    if vllm_version_is("0.23.0"):
-        return isinstance(layer, FusedMoE)
-    else:
-        return isinstance(layer, (MoERunner, RoutedExperts))
+    return isinstance(layer, _FUSED_MOE_LAYER_TYPES)
 
 
 # The config filename that ModelSlim generates after quantizing a model.

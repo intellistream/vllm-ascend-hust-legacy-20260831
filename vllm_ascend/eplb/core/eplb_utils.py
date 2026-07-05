@@ -21,7 +21,13 @@ from collections import defaultdict
 import numpy as np
 import torch
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
+
+try:
+    from vllm.model_executor.layers.fused_moe.expert_map_manager import determine_expert_map
+except ModuleNotFoundError as exc:
+    if exc.name != "vllm.model_executor.layers.fused_moe.expert_map_manager":
+        raise
+    from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 
 
 def expert_file_to_tensor(expert_map_path, layer_id):

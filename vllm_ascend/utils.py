@@ -55,6 +55,7 @@ ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
+_ADD_RMS_NORM_BIAS_OPAPI_AVAILABLE = None
 _DEVICE_PRINT_OP_REGISTERED = False
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
@@ -420,6 +421,32 @@ def enable_custom_op():
     return _CUSTOM_OP_ENABLED
 
 
+def add_rms_norm_bias_opapi_available():
+    global _ADD_RMS_NORM_BIAS_OPAPI_AVAILABLE
+
+    if _ADD_RMS_NORM_BIAS_OPAPI_AVAILABLE is not None:
+        return _ADD_RMS_NORM_BIAS_OPAPI_AVAILABLE
+
+    try:
+        x = torch.zeros((1, 4), device="npu", dtype=torch.float16)
+        residual = torch.zeros_like(x)
+        weight = torch.ones((4,), device="npu", dtype=torch.float16)
+        torch.ops._C_ascend.npu_add_rms_norm_bias(x, residual, weight, None, 1e-6)
+        _ADD_RMS_NORM_BIAS_OPAPI_AVAILABLE = True
+    except RuntimeError as exc:
+        message = str(exc)
+        if "aclnnAddRmsNormBias" not in message and "libopapi.so" not in message:
+            raise
+        logger.warning(
+            "npu_add_rms_norm_bias is unavailable in this runtime; Ascend "
+            "RMSNorm custom op registration will be skipped: %s",
+            exc,
+        )
+        _ADD_RMS_NORM_BIAS_OPAPI_AVAILABLE = False
+
+    return _ADD_RMS_NORM_BIAS_OPAPI_AVAILABLE
+
+
 def find_hccl_library() -> str:
     """
     We either use the library file specified by the `HCCL_SO_PATH`
@@ -677,9 +704,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendSiluAndMul,
         AscendSiluAndMulWithClamp,
     )
-    from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
-    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -707,7 +732,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     try:
         from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
-    except ModuleNotFoundError as exc:
+    except (ImportError, ModuleNotFoundError) as exc:
         logger.warning(
             "Skipping Ascend fused MoE custom op registration because an optional "
             "upstream dependency is unavailable: %s",
@@ -715,11 +740,30 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         )
         AscendFusedMoE = None
         AscendSharedFusedMoE = None
+    try:
+        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+    except ModuleNotFoundError as exc:
+        logger.warning(
+            "Skipping GatedDeltaNet attention custom op registration because "
+            "an optional upstream dependency is unavailable: %s",
+            exc,
+        )
+        AscendGatedDeltaNetAttention = None
+    try:
+        from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
+    except ModuleNotFoundError as exc:
+        logger.warning(
+            "Skipping Bailing MoE linear attention custom op registration because "
+            "an optional upstream dependency is unavailable: %s",
+            exc,
+        )
+        AscendBailingMoELinearAttention = None
     is_moe_model = bool(
         vllm_config is not None
         and vllm_config.model_config is not None
         and vllm_config.model_config.is_moe
     )
+    has_add_rms_norm_bias = enable_custom_op() and add_rms_norm_bias_opapi_available()
 
     global REGISTERED_ASCEND_OPS
     REGISTERED_ASCEND_OPS = {
@@ -738,8 +782,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "VocabParallelEmbedding": AscendVocabParallelEmbedding,
         "ParallelLMHead": AscendParallelLMHead,
         "LogitsProcessor": AscendLogitsProcessor,
-        "RMSNorm": AscendRMSNorm,
-        "GemmaRMSNorm": AscendGemmaRMSNorm,
         "MultiHeadLatentAttentionWrapper": AscendMultiHeadLatentAttention,
         "MMEncoderAttention": AscendMMEncoderAttention,
         "ApplyRotaryEmb": AscendApplyRotaryEmb,
@@ -747,12 +789,19 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "Conv3dLayer": AscendConv3dLayer,
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
-        "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
-        "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
-    if vllm_version_is("0.23.0"):
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
-
+    if has_add_rms_norm_bias:
+        REGISTERED_ASCEND_OPS.update(
+            {
+                "RMSNorm": AscendRMSNorm,
+                "GemmaRMSNorm": AscendGemmaRMSNorm,
+            }
+        )
+    if AscendGatedDeltaNetAttention is not None:
+        REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
+    if AscendBailingMoELinearAttention is not None:
+        REGISTERED_ASCEND_OPS["BailingMoELinearAttention"] = AscendBailingMoELinearAttention
+    if vllm_version_is("0.23.0") and AscendFusedMoE is not None:
         REGISTERED_ASCEND_OPS["FusedMoE"] = AscendFusedMoE
 
     if vllm_config is None:
@@ -768,7 +817,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
 
     if is_moe_model:
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
+        if AscendFusedMoE is None or AscendSharedFusedMoE is None:
+            raise RuntimeError("Ascend fused MoE custom ops are unavailable for an MoE model.")
 
         REGISTERED_ASCEND_OPS.update(
             {
@@ -1733,7 +1783,10 @@ def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
 
 def is_hidden_state_cache_spec(spec) -> bool:
     """Whether ``spec`` marks an ``extract_hidden_states`` cache-only layer."""
-    from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+    try:
+        from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+    except ImportError:
+        return spec.__class__.__name__ == "HiddenStateCacheSpec"
 
     return isinstance(spec, HiddenStateCacheSpec)
 

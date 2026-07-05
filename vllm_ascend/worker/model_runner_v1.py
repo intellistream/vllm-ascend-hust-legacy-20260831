@@ -65,13 +65,19 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
-    HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+try:
+    from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+except ImportError:
+
+    @dataclass(frozen=True, kw_only=True)
+    class HiddenStateCacheSpec(AttentionSpec):  # type: ignore[no-redef]
+        cache_dtype_str: str | None = None
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -79,11 +85,20 @@ from vllm.v1.outputs import (
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
-    RoutedExpertsLists,
-    RoutedExpertsTensors,
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
+try:
+    from vllm.v1.outputs import RoutedExpertsLists, RoutedExpertsTensors
+except ImportError:
+
+    class RoutedExpertsLists(NamedTuple):  # type: ignore[no-redef]
+        routing_data: np.ndarray
+        slot_mapping: np.ndarray
+
+    class RoutedExpertsTensors(NamedTuple):  # type: ignore[no-redef]
+        routing_data: torch.Tensor
+        slot_mapping: torch.Tensor
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID, RejectionSampler
@@ -2566,7 +2581,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
-        model_runner_output = ModelRunnerOutput(
+        model_runner_output_kwargs = dict(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
             sampled_token_ids=valid_sampled_token_ids,
@@ -2576,8 +2591,10 @@ class NPUModelRunner(GPUModelRunner):
             pooler_output=[],
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             cudagraph_stats=cudagraph_stats,
-            routed_experts=None,
         )
+        if "routed_experts" in getattr(ModelRunnerOutput, "__dataclass_fields__", {}):
+            model_runner_output_kwargs["routed_experts"] = None
+        model_runner_output = ModelRunnerOutput(**model_runner_output_kwargs)
         if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
             self._sync_device()
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
@@ -2637,15 +2654,17 @@ class NPUModelRunner(GPUModelRunner):
                     :total
                 ].clone(),
             )
-        async_output = AsyncGPUModelRunnerOutput(
+        async_output_kwargs = dict(
             model_runner_output=model_runner_output,
             sampled_token_ids=sampler_output.sampled_token_ids,
             logprobs_tensors=sampler_output.logprobs_tensors,
             invalid_req_indices=invalid_req_indices,
             async_output_copy_stream=self.async_output_copy_stream,
             vocab_size=self.input_batch.vocab_size,
-            routed_experts=routed_experts_snapshot,
         )
+        if "routed_experts" in AsyncGPUModelRunnerOutput.__init__.__code__.co_varnames:
+            async_output_kwargs["routed_experts"] = routed_experts_snapshot
+        async_output = AsyncGPUModelRunnerOutput(**async_output_kwargs)
         self.input_batch.set_async_sampled_token_ids(
             async_output.sampled_token_ids_cpu,
             async_output.async_copy_ready_event,

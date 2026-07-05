@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
 import sys
+import inspect
 from collections.abc import Mapping
 from math import lcm
 
@@ -485,6 +486,8 @@ def get_kv_cache_coordinator(
             metrics_collector=metrics_collector,
         )
         orig_kwargs["scheduler_block_size"] = scheduler_block_size
+        accepted_params = inspect.signature(_orig_get_kv_cache_coordinator).parameters
+        orig_kwargs = {key: value for key, value in orig_kwargs.items() if key in accepted_params}
         return _orig_get_kv_cache_coordinator(**orig_kwargs)
 
     return AscendHybridKVCacheCoordinator(
