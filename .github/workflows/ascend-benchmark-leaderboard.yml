@@ -647,6 +647,7 @@ jobs:
           HOME: ${{ env.CI_HOME }}
           XDG_CACHE_HOME: ${{ env.CI_HOME }}/.cache
           XDG_CONFIG_HOME: ${{ env.CI_HOME }}/.config
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
         run: |
           mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
           chmod 700 "$HOME"
@@ -656,9 +657,24 @@ jobs:
           fi
           export PYTHONPATH="$VLLM_HUST_REPO:$VLLM_HUST_BENCHMARK_REPO/src${PYTHONPATH:+:$PYTHONPATH}"
           echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
-          hust_run_pip install "torch==2.9.0" "torch-npu==2.9.0"
+          echo "TORCH_DEVICE_BACKEND_AUTOLOAD=0" >> "$GITHUB_ENV"
+          hust_run_pip install \
+            "torch==2.9.0" \
+            "torch-npu==2.9.0" \
+            "torchvision==0.24.0" \
+            "torchaudio==2.9.0"
           hust_run_pip install "numpy<2.0.0" scipy attrs decorator psutil
           hust_run_pip install -r "$VLLM_HUST_REPO/requirements/common.txt"
+          # The self-hosted benchmark runner currently carries a CANN runtime
+          # matched to the 2.9 torch-npu stack. vLLM-HUST dependencies can pull
+          # a newer generic torch wheel via transitive requirements, so re-apply
+          # the Ascend ABI-sensitive pins before importing torch_npu or building
+          # the local plugin.
+          hust_run_pip install \
+            "torch==2.9.0" \
+            "torch-npu==2.9.0" \
+            "torchvision==0.24.0" \
+            "torchaudio==2.9.0"
           PYTHON_BIN="$(hust_resolve_python_bin)"
           echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"
           "$PYTHON_BIN" - <<'PY'
@@ -684,6 +700,7 @@ jobs:
         env:
           VLLM_HUST_REPO: ${{ github.workspace }}/vllm-hust
           VLLM_HUST_BENCHMARK_REPO: ${{ github.workspace }}/vllm-hust-benchmark
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
         run: |
           source scripts/use_single_ascend_env.sh
           export PYTHONPATH="$VLLM_HUST_REPO:$VLLM_HUST_BENCHMARK_REPO/src${PYTHONPATH:+:$PYTHONPATH}"
@@ -724,6 +741,7 @@ jobs:
           CI_HOME: ${{ env.CI_HOME }}
           CI_RUNTIME_ROOT: ${{ env.CI_RUNTIME_ROOT }}
           RESULT_ROOT: ${{ env.RESULT_ROOT }}
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
         run: |
           set +e
           benchmark_lock_file="${ASCEND_BENCHMARK_LOCK_FILE:-/tmp/vllm-ascend-hust-benchmark.lock}"
@@ -770,6 +788,7 @@ jobs:
           BENCHMARK_RESULTS_ROOT: ${{ env.BENCHMARK_RESULTS_ROOT }}
           CI_HOME: ${{ env.CI_HOME }}
           CI_RUNTIME_ROOT: ${{ env.CI_RUNTIME_ROOT }}
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
         run: |
           source scripts/use_single_ascend_env.sh
           bash .github/workflows/scripts/perfgate_stage2_rebase_and_benchmark.sh
