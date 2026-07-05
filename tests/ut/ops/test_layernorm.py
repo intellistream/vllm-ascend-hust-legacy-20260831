@@ -1,3 +1,5 @@
+import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -5,6 +7,7 @@ import torch
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 
+from vllm_ascend.ops.layernorm import AscendRMSNorm
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
@@ -62,6 +65,36 @@ def test_RMSNorm_forward(
 
         mock_rmsnorm.assert_called_once()
         assert torch.allclose(out_x, expected_out_x)
+
+
+def test_RMSNorm_forward_can_disable_add_rms_norm_bias_custom_op(monkeypatch, dummy_tensor, default_vllm_config):
+    residual = torch.randn(4, 8, dtype=torch.float32)
+    fake_torch_npu = MagicMock()
+    fake_torch_npu.npu_add_rms_norm.side_effect = mock_add_rms_norm
+
+    def fail_custom_op(*_args, **_kwargs):
+        raise AssertionError("custom add_rms_norm_bias path should be disabled")
+
+    monkeypatch.setenv("VLLM_ASCEND_DISABLE_ADD_RMS_NORM_BIAS_CUSTOM_OP", "1")
+    monkeypatch.setitem(sys.modules, "torch_npu", fake_torch_npu)
+    layer = AscendRMSNorm(hidden_size=8, eps=1e-05)
+
+    with patch.object(
+        torch.ops,
+        "vllm",
+        SimpleNamespace(maybe_chunk_residual=lambda _x, residual: residual),
+        create=True,
+    ), patch.object(
+        torch.ops,
+        "_C_ascend",
+        SimpleNamespace(npu_add_rms_norm_bias=fail_custom_op),
+        create=True,
+    ):
+        out_x, out_residual = layer.forward_oot(dummy_tensor, residual)
+
+    fake_torch_npu.npu_add_rms_norm.assert_called_once()
+    assert torch.allclose(out_x, 2 * dummy_tensor)
+    assert torch.allclose(out_residual, 2 * residual)
 
 
 @pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")

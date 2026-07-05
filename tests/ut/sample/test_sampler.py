@@ -19,9 +19,18 @@ class TestAscendSampler(TestBase):
         logits = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32)
         k = torch.tensor([2], dtype=torch.int32)
 
-        expected = sampler_module._apply_top_k_top_p_pytorch(logits.clone(), k, None)
+        with patch.object(
+            sampler_module,
+            "get_ascend_config",
+            return_value=SimpleNamespace(enable_reduce_sample=False),
+        ):
+            expected = sampler_module._apply_top_k_top_p_pytorch(logits.clone(), k, None)
 
         with patch.object(
+            sampler_module,
+            "get_ascend_config",
+            return_value=SimpleNamespace(enable_reduce_sample=False),
+        ), patch.object(
             sampler_module,
             "get_ascend_device_type",
             return_value=sampler_module.AscendDeviceType.A2,
@@ -32,6 +41,42 @@ class TestAscendSampler(TestBase):
             create=True,
         ):
             sampler_module._MISSING_TOP_K_TOP_P_OP_WARNED = False
+            actual = sampler_module.apply_top_k_top_p(logits.clone(), k, None)
+
+        torch.testing.assert_close(actual, expected)
+
+    def test_apply_top_k_top_p_can_disable_custom_op_with_env(self):
+        logits = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float32)
+        k = torch.tensor([2], dtype=torch.int32)
+
+        with patch.object(
+            sampler_module,
+            "get_ascend_config",
+            return_value=SimpleNamespace(enable_reduce_sample=False),
+        ):
+            expected = sampler_module._apply_top_k_top_p_pytorch(logits.clone(), k, None)
+
+        with patch.dict(
+            "os.environ",
+            {"VLLM_ASCEND_DISABLE_TOP_K_TOP_P_CUSTOM_OP": "1"},
+        ), patch.object(
+            sampler_module,
+            "get_ascend_config",
+            return_value=SimpleNamespace(enable_reduce_sample=False),
+        ), patch.object(
+            sampler_module,
+            "get_ascend_device_type",
+            return_value=sampler_module.AscendDeviceType.A2,
+        ), patch.object(
+            sampler_module,
+            "_apply_top_k_top_p_ascendc",
+            side_effect=AssertionError("custom op path should be disabled"),
+        ), patch.object(
+            sampler_module.torch.ops,
+            "_C_ascend",
+            SimpleNamespace(npu_apply_top_k_top_p=object()),
+            create=True,
+        ):
             actual = sampler_module.apply_top_k_top_p(logits.clone(), k, None)
 
         torch.testing.assert_close(actual, expected)

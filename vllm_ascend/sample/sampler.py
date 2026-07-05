@@ -1,3 +1,5 @@
+import os
+
 import torch
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_tp_group
@@ -16,6 +18,11 @@ logger = init_logger(__name__)
 _MISSING_TOP_K_TOP_P_OP_WARNED = False
 
 _SAMPLING_EPS = 1e-5
+
+
+def _disable_top_k_top_p_custom_op() -> bool:
+    value = os.getenv("VLLM_ASCEND_DISABLE_TOP_K_TOP_P_CUSTOM_OP", "0")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def random_sample(
@@ -298,6 +305,8 @@ def _apply_top_k_top_p_ascendc(
 
 
 def _has_ascend_top_k_top_p_op() -> bool:
+    if _disable_top_k_top_p_custom_op():
+        return False
     ascend_namespace = getattr(torch.ops, "_C_ascend", None)
     return hasattr(ascend_namespace, "npu_apply_top_k_top_p")
 
