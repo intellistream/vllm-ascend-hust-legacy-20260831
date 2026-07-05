@@ -274,9 +274,13 @@ public:
 
     bool IsRegbaseSocVersion()
     {
+#ifdef ENABLE_ASCEND950_OP_CONFIG
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(context_->GetPlatformInfo());
         auto socVersion = ascendcPlatform.GetSocVersion();
         return socVersion == platform_ascendc::SocVersion::ASCEND950;
+#else
+        return false;
+#endif
     }
 
     ge::graphStatus DoTiling()
@@ -320,7 +324,11 @@ public:
     }
 
 protected:
+#ifdef ENABLE_ASCEND950_OP_CONFIG
     platform_ascendc::SocVersion socVersion_ = platform_ascendc::SocVersion::ASCEND950;
+#else
+    platform_ascendc::SocVersion socVersion_ = platform_ascendc::SocVersion::ASCEND910B;
+#endif
     int64_t b_{0};
     int64_t s_{0};
     int64_t n_{0};

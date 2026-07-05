@@ -81,10 +81,14 @@ public:
 
     bool IsCapable()
     {
+#ifdef ENABLE_ASCEND950_OP_CONFIG
         if (socVersion_ != platform_ascendc::SocVersion::ASCEND950) {
             return false;
         }
         return true;
+#else
+        return false;
+#endif
     }
     // 1、获取平台信息比如CoreNum、UB/L1/L0C资源大小
     ge::graphStatus GetPlatformInfo();

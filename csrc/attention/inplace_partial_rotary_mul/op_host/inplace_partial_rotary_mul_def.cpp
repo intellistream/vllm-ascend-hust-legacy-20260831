@@ -76,7 +76,9 @@ public:
             .DynamicRankSupportFlag(true)
             .DynamicShapeSupportFlag(true)
             .ExtendCfgInfo("opFile.value", "inplace_partial_rotary_mul");
+#ifdef ENABLE_ASCEND950_OP_CONFIG
         this->AICore().AddConfig("ascend950", config950);
+#endif
     }
 };
 

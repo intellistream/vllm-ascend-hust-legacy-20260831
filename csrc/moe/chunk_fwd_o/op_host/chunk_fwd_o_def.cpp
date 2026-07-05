@@ -95,7 +95,9 @@ public:
 
         this->AICore().AddConfig("ascend910b", aicore_config);
         this->AICore().AddConfig("ascend910_93", aicore_config);
+#ifdef ENABLE_ASCEND950_OP_CONFIG
         this->AICore().AddConfig("ascend950", aicore_config);
+#endif
         this->AICore().AddConfig("ascend310p", aicore_config);
     }
 };

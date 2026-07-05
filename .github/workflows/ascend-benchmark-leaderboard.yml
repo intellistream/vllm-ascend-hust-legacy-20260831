@@ -648,9 +648,11 @@ jobs:
           XDG_CACHE_HOME: ${{ env.CI_HOME }}/.cache
           XDG_CONFIG_HOME: ${{ env.CI_HOME }}/.config
           TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+          VLLM_ASCEND_EXPECTED_TORCH_VERSION: "2.9.0"
         run: |
           mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
           chmod 700 "$HOME"
+          bash scripts/install_ci_system_packages.sh patch
           source scripts/use_single_ascend_env.sh
           if ! hust_ascend_manager_run setup --install-python-stack --non-interactive; then
             echo "[WARN] hust-ascend-manager Python stack reconciliation failed; falling back to explicit pip installs"

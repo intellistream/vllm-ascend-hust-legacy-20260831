@@ -553,6 +553,10 @@ class cmake_build_ext(build_ext):
         # add TORCH_NPU_PATH
         cmake_args += [f"-DTORCH_NPU_PATH={torch_npu_path}"]
 
+        expected_torch_version = os.environ.get("VLLM_ASCEND_EXPECTED_TORCH_VERSION")
+        if expected_torch_version:
+            cmake_args += [f"-DVLLM_ASCEND_EXPECTED_TORCH_VERSION={expected_torch_version}"]
+
         # Pass VLLM_ASCEND_ENABLE_BATCH_MEMCPY to CMake if explicitly set.
         # When unset (None), CMake will auto-detect from CANN headers.
         if envs.VLLM_ASCEND_ENABLE_BATCH_MEMCPY is not None:

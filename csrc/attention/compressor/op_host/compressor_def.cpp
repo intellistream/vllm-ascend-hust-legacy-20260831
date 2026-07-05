@@ -184,7 +184,9 @@ public:
             .ExtendCfgInfo("aclnnSupport.value", "support_aclnn");
         this->AICore().AddConfig("ascend910b", config910);
         this->AICore().AddConfig("ascend910_93", config910);
+#ifdef ENABLE_ASCEND950_OP_CONFIG
         this->AICore().AddConfig("ascend950", aicore_config);
+#endif
     }
 };
 OP_ADD(Compressor, optiling::CompressorCompileInfo);

@@ -79,10 +79,14 @@ public:
 protected:
     bool IsCapable() override
     {
+#ifdef ENABLE_ASCEND950_OP_CONFIG
         if (socVersion != platform_ascendc::SocVersion::ASCEND950) {
             return false;
         }
         return true;
+#else
+        return false;
+#endif
     }
 
     ge::graphStatus GetPlatformInfo() override;

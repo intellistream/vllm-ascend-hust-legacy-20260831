@@ -45,12 +45,16 @@ public:
 protected:
     bool IsCapable() override
     {
+#ifdef ENABLE_ASCEND950_OP_CONFIG
         auto platformInfo = context_->GetPlatformInfo();
         if (platformInfo == nullptr) {
             return false;
         }
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
         return ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950;
+#else
+        return false;
+#endif
     }
 
     ge::graphStatus GetShapeAttrsInfo() override

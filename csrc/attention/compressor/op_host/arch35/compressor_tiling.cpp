@@ -196,7 +196,11 @@ ge::graphStatus CompressorTiling::SetTemplateId()
     if (context_->templateId == TemplateId::EMPTY_X) {
         return ge::GRAPH_SUCCESS;
     }
-    if (socVersion_ == platform_ascendc::SocVersion::ASCEND950) {
+    bool isAscend950 = false;
+#ifdef ENABLE_ASCEND950_OP_CONFIG
+    isAscend950 = (socVersion_ == platform_ascendc::SocVersion::ASCEND950);
+#endif
+    if (isAscend950) {
         // 设置高性能模板
         if (context_->layout == LayoutType::LAYOUT_BSH && baseParams_->seqSize <= 4 && baseParams_->tokenSize <= 256) {
             context_->templateId = TemplateId::FULL_LOAD;

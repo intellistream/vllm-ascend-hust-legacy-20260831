@@ -46,8 +46,10 @@ static aclnnStatus aclnnGroupedMatmulSwigluQuantGetWorkspaceSizeCommon(const cha
     auto npuArch = op::GetCurrentPlatformInfo().GetCurNpuArch();
     factory.registerHandler(NpuArch::DAV_2201,
         std::make_unique<gmm_dsq_base::GroupedMatmulSwigluQuantBaseHandler>());
+#ifdef ENABLE_ASCEND950_OP_CONFIG
     factory.registerHandler(NpuArch::DAV_3510,
         std::make_unique<gmmSwigluQuantV2::GroupedMatmulSwigluQuantBaseHandler>());
+#endif
 
     if (auto *handler = factory.getHandler(npuArch)) {
         handler->Initialize(interfaceName, params, workspaceSize, executor);

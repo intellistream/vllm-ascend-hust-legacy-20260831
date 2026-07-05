@@ -42,6 +42,7 @@ set(ARCH_DIRECTORY_LIST arch22 arch32 arch32 arch35 arch32)
 if ("ascend950" IN_LIST ASCEND_COMPUTE_UNIT)
 message(STATUS "build with 3~8 packages........")
 set(BUILD_WITH_3_8_PACKAGE  ON CACHE BOOL "build with 3~8 package and opsbase")
+add_compile_definitions(ENABLE_ASCEND950_OP_CONFIG)
 endif()
 
 foreach(SOC_VERSION ${ASCEND_COMPUTE_UNIT})

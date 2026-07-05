@@ -95,9 +95,12 @@ ge::graphStatus LIInfoParser::GetNpuInfo()
     OP_CHECK_IF(aicNum == 0 || aivNum == 0, OP_LOGE(opName_, "num of core obtained is 0."), return GRAPH_FAILED);
 
     socVersion_ = ascendcPlatform.GetSocVersion();
-    if ((socVersion_ != platform_ascendc::SocVersion::ASCEND910B) &&
-        (socVersion_ != platform_ascendc::SocVersion::ASCEND910_93) &&
-        (socVersion_ != platform_ascendc::SocVersion::ASCEND950)) {
+    bool isSupportedSoc = (socVersion_ == platform_ascendc::SocVersion::ASCEND910B) ||
+                          (socVersion_ == platform_ascendc::SocVersion::ASCEND910_93);
+#ifdef ENABLE_ASCEND950_OP_CONFIG
+    isSupportedSoc = isSupportedSoc || (socVersion_ == platform_ascendc::SocVersion::ASCEND950);
+#endif
+    if (!isSupportedSoc) {
         OP_LOGE(opName_, "SOC Version[%d] is not support.", static_cast<int32_t>(socVersion_));
         return GRAPH_FAILED;
     }
@@ -226,7 +229,11 @@ ge::graphStatus LIInfoParser::GetAndCheckInOutDataType()
     OP_CHECK_IF(((inputQType_ != ge::DT_FLOAT16) && (inputQType_ != ge::DT_BF16)),
                OP_LOGE(opName_, "The data types of the input query, key must be float16 or bfloat16."),
                return ge::GRAPH_FAILED);
-    if (socVersion_ == platform_ascendc::SocVersion::ASCEND950) {
+    bool isAscend950 = false;
+#ifdef ENABLE_ASCEND950_OP_CONFIG
+    isAscend950 = (socVersion_ == platform_ascendc::SocVersion::ASCEND950);
+#endif
+    if (isAscend950) {
         OP_CHECK_IF((inputQType_ != weightsType_),
                 OP_LOGE(opName_, "The data types of the input query, key, and weights must be the same."),
                 return ge::GRAPH_FAILED);
@@ -759,7 +766,11 @@ ge::graphStatus LightningIndexerTiling::DoTiling(LITilingInfo *tilingInfo)
     constexpr uint32_t TOPK_MAX_SIZE = 2048;          // TopK选取个数
     uint32_t workspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
     // 主流程需Workspace大小
-    if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510) {
+    bool isDav3510 = false;
+#ifdef ENABLE_ASCEND950_OP_CONFIG
+    isDav3510 = (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510);
+#endif
+    if (isDav3510) {
         constexpr uint32_t s1BaseSize = 4;
         constexpr uint32_t s2BaseSize = 128;
         workspaceSize +=

@@ -27,10 +27,15 @@ static const gert::Shape g_vec_1_shape = {1};
 
 static bool IsRegbaseNpuArch(NpuArch npuArch)
 {
+#ifdef ENABLE_ASCEND950_OP_CONFIG
     const static std::set<NpuArch> regbaseNpuArchs = {
         NpuArch::DAV_3510,
         NpuArch::DAV_5102};
     return regbaseNpuArchs.find(npuArch) != regbaseNpuArchs.end();
+#else
+    (void)npuArch;
+    return false;
+#endif
 }
 
 static inline bool IsRegbaseSocVersion(const gert::TilingParseContext* context)

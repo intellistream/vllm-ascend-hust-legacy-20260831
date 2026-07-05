@@ -349,7 +349,11 @@ public:
         auto ret = CheckParams();
         CHECK_RET(ret == ACLNN_SUCCESS, ret);
 
-        if (op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510) {
+        bool isDav3510 = false;
+#ifdef ENABLE_ASCEND950_OP_CONFIG
+        isDav3510 = (op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510);
+#endif
+        if (isDav3510) {
             auto x1MDim = gmmDsqParams_.x->GetViewShape().GetDim(0);
             auto x2NIndex = (*gmmDsqParams_.weight)[0]->GetViewShape().GetDimNum() - 1;
             auto x2NDim = (*gmmDsqParams_.weight)[0]->GetViewShape().GetDim(x2NIndex);

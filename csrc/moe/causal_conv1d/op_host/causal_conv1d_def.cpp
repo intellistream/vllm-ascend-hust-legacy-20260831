@@ -86,7 +86,9 @@ public:
             .ExtendCfgInfo("coreType.value", "AiCore");
         this->AICore().AddConfig("ascend910b", aicoreConfig);
         this->AICore().AddConfig("ascend910_93", aicoreConfig);
+#ifdef ENABLE_ASCEND950_OP_CONFIG
         this->AICore().AddConfig("ascend950", aicoreConfig);
+#endif
     }
 };
 OP_ADD(CausalConv1d);

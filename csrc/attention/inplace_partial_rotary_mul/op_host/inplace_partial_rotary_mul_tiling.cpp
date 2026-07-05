@@ -76,7 +76,11 @@ ge::graphStatus Tiling4RotaryPositionEmbedding(gert::TilingContext *context)
     if (useFp32Rope && supportFp32Rope) {
         return Tiling4InplacePartialRotaryMul(context);
     }
-    if (socVersion == platform_ascendc::SocVersion::ASCEND950)
+    bool isAscend950 = false;
+#ifdef ENABLE_ASCEND950_OP_CONFIG
+    isAscend950 = (socVersion == platform_ascendc::SocVersion::ASCEND950);
+#endif
+    if (isAscend950)
     {
         std::vector<std::unique_ptr<RopeRegBaseTilingClass>> regBaseTilingCases;
         regBaseTilingCases.push_back(std::unique_ptr<RopeRegBaseTilingClass>(new RopeRegBaseTilingClassAAndB(context)));

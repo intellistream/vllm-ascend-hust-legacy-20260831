@@ -103,9 +103,12 @@ ge::graphStatus QLIInfoParser::GetNpuInfo()
     OP_CHECK_IF(aicNum == 0 || aivNum == 0, OP_LOGE(opName_, "num of core obtained is 0."), return GRAPH_FAILED);
 
     socVersion_ = ascendcPlatform.GetSocVersion();
-    if ((socVersion_ != platform_ascendc::SocVersion::ASCEND910B) &&
-        (socVersion_ != platform_ascendc::SocVersion::ASCEND910_93) &&
-        (socVersion_ != platform_ascendc::SocVersion::ASCEND950)) {
+    bool isSupportedSoc = (socVersion_ == platform_ascendc::SocVersion::ASCEND910B) ||
+                          (socVersion_ == platform_ascendc::SocVersion::ASCEND910_93);
+#ifdef ENABLE_ASCEND950_OP_CONFIG
+    isSupportedSoc = isSupportedSoc || (socVersion_ == platform_ascendc::SocVersion::ASCEND950);
+#endif
+    if (!isSupportedSoc) {
         OP_LOGE(opName_, "SOC Version[%d] is not support.", static_cast<int32_t>(socVersion_));
         return GRAPH_FAILED;
     }
@@ -229,7 +232,9 @@ ge::graphStatus QLIInfoParser::CheckAttrParaInfo()
                     ((*opParamInfo_.cmpRatio & (*opParamInfo_.cmpRatio - 1)) != 0),
                 OP_LOGE(opName_, "input attr cmpRatio must > 0 and <= 128 and should be powers of 2, but now cmpRatio is %ld.",
                 *opParamInfo_.cmpRatio), return ge::GRAPH_FAILED);
-    } else if (socVersion_ == platform_ascendc::SocVersion::ASCEND950) {
+    }
+#ifdef ENABLE_ASCEND950_OP_CONFIG
+    else if (socVersion_ == platform_ascendc::SocVersion::ASCEND950) {
         OP_CHECK_IF(!((*opParamInfo_.sparseCount > 0) && (*opParamInfo_.sparseCount <= SPARSE_LIMIT)),
                 OP_LOGE(opName_, "input attr sparse_count must > 0 and <= %d, but now sparse_count is %d",
                        SPARSE_LIMIT, *opParamInfo_.sparseCount),return ge::GRAPH_FAILED);
@@ -237,6 +242,7 @@ ge::graphStatus QLIInfoParser::CheckAttrParaInfo()
                 OP_LOGE(opName_, "input attr cmpRatio must be 1、4 or 128, but now cmpRatio is %ld.",
                 *opParamInfo_.cmpRatio), return ge::GRAPH_FAILED);
     }
+#endif
 
     OP_CHECK_IF(((std::string(opParamInfo_.layOutQuery) != "BSND") && (std::string(opParamInfo_.layOutQuery) != "TND")),
                OP_LOGE(opName_, "input attr layout_query only supported BSND or TND."), return ge::GRAPH_FAILED);
@@ -307,7 +313,9 @@ ge::graphStatus QLIInfoParser::GetAndCheckInOutDataType()
             inputQueryScaleType_ != ge::DT_FLOAT16,
             OP_LOGE(opName_, "The data types of the input query_dequant_scale and key_dequant_scale must be float16."),
             return ge::GRAPH_FAILED);
-    } else if (socVersion_ == platform_ascendc::SocVersion::ASCEND950) {
+    }
+#ifdef ENABLE_ASCEND950_OP_CONFIG
+    else if (socVersion_ == platform_ascendc::SocVersion::ASCEND950) {
         OP_CHECK_IF(inputQType_ != ge::DT_FLOAT8_E4M3FN,
                OP_LOGE(opName_, "The data types of the input query and key must be float8_e4m3."), return ge::GRAPH_FAILED);
         OP_CHECK_IF(
@@ -315,15 +323,19 @@ ge::graphStatus QLIInfoParser::GetAndCheckInOutDataType()
             OP_LOGE(opName_, "The data types of the input query_dequant_scale and key_dequant_scale must be float."),
             return ge::GRAPH_FAILED);
     }
+#endif
 
     if ((socVersion_ == platform_ascendc::SocVersion::ASCEND910B) ||
         (socVersion_ == platform_ascendc::SocVersion::ASCEND910_93)) {
         OP_CHECK_IF(weightsType_ != ge::DT_FLOAT16,
                 OP_LOGE(opName_, "The data types of the input weights must be float16."), return ge::GRAPH_FAILED);
-    } else if (socVersion_ == platform_ascendc::SocVersion::ASCEND950) {
+    }
+#ifdef ENABLE_ASCEND950_OP_CONFIG
+    else if (socVersion_ == platform_ascendc::SocVersion::ASCEND950) {
             OP_CHECK_IF(weightsType_ != ge::DT_FLOAT,
                 OP_LOGE(opName_, "The data types of the input weights must be float."), return ge::GRAPH_FAILED);
     }
+#endif
 
     OP_CHECK_IF(outputType_ != ge::DT_INT32,
                OP_LOGE(opName_, "The data types of the output sparse_indices must be int32."),
@@ -876,7 +888,11 @@ ge::graphStatus VllmQuantLightningIndexerTiling::DoTiling(QLITilingInfo *tilingI
     uint32_t workspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
     // 主流程需Workspace大小
     platform_ascendc::SocVersion socVersion_ = ascendcPlatform.GetSocVersion();
-    if (socVersion_ == platform_ascendc::SocVersion::ASCEND950) {
+    bool isAscend950 = false;
+#ifdef ENABLE_ASCEND950_OP_CONFIG
+    isAscend950 = (socVersion_ == platform_ascendc::SocVersion::ASCEND950);
+#endif
+    if (isAscend950) {
         constexpr uint32_t s1Base = ASCEND950_S1_BASE_SIZE;
         constexpr uint32_t s2Base = ASCEND950_S2_BASE_SIZE;
         workspaceSize += s1Base * ((tilingInfo->s2Size + s2Base - 1) / s2Base) * s2Base * sizeof(uint32_t) * aicNum;

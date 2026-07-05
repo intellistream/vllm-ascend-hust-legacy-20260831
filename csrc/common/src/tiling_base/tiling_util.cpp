@@ -23,10 +23,15 @@ static const gert::Shape g_vec_1_shape = {1};
 
 static bool IsRegbaseSocVersion(platform_ascendc::SocVersion version)
 {
+#ifdef ENABLE_ASCEND950_OP_CONFIG
     const static std::set<platform_ascendc::SocVersion> regbaseSocVersions = {
         platform_ascendc::SocVersion::ASCEND950};
 
     return regbaseSocVersions.find(version) != regbaseSocVersions.end();
+#else
+    (void)version;
+    return false;
+#endif
 }
 
 bool IsRegbaseSocVersion(const gert::TilingParseContext* context)

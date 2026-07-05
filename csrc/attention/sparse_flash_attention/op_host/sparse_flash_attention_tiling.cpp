@@ -739,7 +739,11 @@ ge::graphStatus SFATilingCheck::CheckSingleParaSparseBlockSize() const
             *opParamInfo_.sparseBlockSize),
         return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF((npuArch_ == NpuArch::DAV_3510 && *opParamInfo_.sparseBlockSize != 1),
+    bool isDav3510 = false;
+#ifdef ENABLE_ASCEND950_OP_CONFIG
+    isDav3510 = (npuArch_ == NpuArch::DAV_3510);
+#endif
+    OP_CHECK_IF((isDav3510 && *opParamInfo_.sparseBlockSize != 1),
         OP_LOGE(opName_, "when soc version is Ascend950, sparse_block_size only support 1, but now is %d.",
         *opParamInfo_.sparseBlockSize), return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
@@ -1613,8 +1617,11 @@ ge::graphStatus SFAInfoParser::GetNpuInfo()
         OPS_REPORT_VECTOR_INNER_ERR(opName_, "num of core obtained is 0."), return GRAPH_FAILED);
 
     npuArch_ = ascendcPlatform.GetCurNpuArch();
+    isA5_ = false;
+#ifdef ENABLE_ASCEND950_OP_CONFIG
     isA5_ = (npuArch_ == NpuArch::DAV_3510);
-    if (npuArch_ != NpuArch::DAV_2201 && npuArch_ != NpuArch::DAV_3510) {
+#endif
+    if (npuArch_ != NpuArch::DAV_2201 && !isA5_) {
         OPS_REPORT_VECTOR_INNER_ERR(opName_, "Npu Arch Version[%d] is not support.", static_cast<int32_t>(npuArch_));
         return GRAPH_FAILED;
     }
