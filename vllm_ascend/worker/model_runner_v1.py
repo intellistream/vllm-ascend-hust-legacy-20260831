@@ -52,6 +52,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -260,6 +261,8 @@ class ExecuteModelState(NamedTuple):
 
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        self.pin_memory = is_pin_memory_available()
+
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
         # used to expand some buffers, which need to be reverted after
         # the following PR is merged:
