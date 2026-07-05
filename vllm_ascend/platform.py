@@ -511,6 +511,16 @@ class NPUPlatform(Platform):
         )
 
     @classmethod
+    def _maybe_validate_layer_sharding_config(cls, vllm_config: VllmConfig) -> None:
+        validator = getattr(
+            super(NPUPlatform, cls),
+            "_validate_layer_sharding_config",
+            None,
+        )
+        if validator is not None:
+            validator(vllm_config)
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
 
@@ -528,7 +538,7 @@ class NPUPlatform(Platform):
 
         maybe_auto_detect_quantization(vllm_config)
 
-        cls._validate_layer_sharding_config(vllm_config)
+        cls._maybe_validate_layer_sharding_config(vllm_config)
         cls._validate_draft_decode_context_parallel_config(vllm_config)
         cls._validate_parallel_config(vllm_config)
         cls._validate_pd_pp_mtp_config(vllm_config)
