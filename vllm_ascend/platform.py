@@ -528,7 +528,9 @@ class NPUPlatform(Platform):
 
         maybe_auto_detect_quantization(vllm_config)
 
-        cls._validate_layer_sharding_config(vllm_config)
+        validate_layer_sharding = getattr(cls, "_validate_layer_sharding_config", None)
+        if validate_layer_sharding is not None:
+            validate_layer_sharding(vllm_config)
         cls._validate_draft_decode_context_parallel_config(vllm_config)
         cls._validate_parallel_config(vllm_config)
         cls._validate_pd_pp_mtp_config(vllm_config)
@@ -557,11 +559,16 @@ class NPUPlatform(Platform):
         cache_config = vllm_config.cache_config
         ascend_compilation_config = ascend_config.ascend_compilation_config
         if ascend_compilation_config:
-            vllm_config.additional_config.setdefault("ascend_compilation_config", {}).update(
+            ascend_compilation_defaults = (
                 vars(ascend_compilation_config)
                 if not isinstance(ascend_compilation_config, dict)
                 else ascend_compilation_config
             )
+            user_ascend_compilation_config = vllm_config.additional_config.setdefault(
+                "ascend_compilation_config", {}
+            )
+            for key, value in ascend_compilation_defaults.items():
+                user_ascend_compilation_config.setdefault(key, value)
 
         ascend_config.update_compile_ranges_split_points()
 

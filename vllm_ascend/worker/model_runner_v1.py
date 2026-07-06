@@ -319,6 +319,7 @@ class NPUModelRunner(GPUModelRunner):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.pin_memory = False
         self._init_dp_metadata_buffers()
 
         self.sampler = AscendSampler()
