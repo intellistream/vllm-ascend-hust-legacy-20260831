@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import functools
+import importlib
 import json
 import math
 import os
@@ -705,16 +706,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendVocabParallelEmbedding,
     )
 
-    try:
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
-    except ModuleNotFoundError as exc:
-        logger.warning(
-            "Skipping Ascend fused MoE custom op registration because an optional "
-            "upstream dependency is unavailable: %s",
-            exc,
-        )
-        AscendFusedMoE = None
-        AscendSharedFusedMoE = None
+    fused_moe_module = importlib.import_module("vllm_ascend.ops.fused_moe.fused_moe")
+    AscendFusedMoE = getattr(fused_moe_module, "AscendFusedMoE", None)
+    AscendSharedFusedMoE = getattr(fused_moe_module, "AscendSharedFusedMoE", None)
     is_moe_model = bool(
         vllm_config is not None
         and vllm_config.model_config is not None
@@ -767,14 +761,17 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
         REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
 
-    if is_moe_model:
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
-
+    if is_moe_model and AscendFusedMoE is not None and AscendSharedFusedMoE is not None:
         REGISTERED_ASCEND_OPS.update(
             {
                 "FusedMoE": AscendFusedMoE,
                 "SharedFusedMoE": AscendSharedFusedMoE,
             }
+        )
+    elif is_moe_model:
+        logger.debug(
+            "Skipping legacy Ascend fused MoE custom op registration because "
+            "the current fused MoE module uses runner-based integration."
         )
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
