@@ -81,7 +81,7 @@ class FusedExpertsResult:
     # For dynamic_eplb
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
-    swiglu_limit: int = 0
+    swiglu_limit: float = 0.0
 
 
 class MoECommMethod(ABC):
@@ -290,10 +290,6 @@ class FusedMC2CommImpl(MoECommMethod):
             "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
         )
 
-        assert not (
-            fused_experts_input.weights.w1_scale_bias is None or fused_experts_input.weights.w2_scale_bias is None
-        ), "w1_scale_bias and w2_scale_bias cannot be None for FusedMC2CommImpl."
-
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
         )
@@ -305,6 +301,10 @@ class FusedMC2CommImpl(MoECommMethod):
 
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
+            assert not (
+                fused_experts_input.weights.w1_scale_bias is None or fused_experts_input.weights.w2_scale_bias is None
+            ), "w1_scale_bias and w2_scale_bias cannot be None when enable_fused_mc2=1."
+
             out = torch.empty_like(fused_experts_input.hidden_states)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=fused_experts_input.hidden_states,

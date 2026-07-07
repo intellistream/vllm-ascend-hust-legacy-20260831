@@ -21,6 +21,15 @@ class PolicyFactory:
             # Dynamic EPLB policy V2: expert replacement with constrained number of expert shuffle
             2: SwiftBalanceEplb,
         }
+        if policy_type == 3:
+            # FlashLB depends on optional numba-based kernels that are not needed
+            # for the default non-EPLB serving path.
+            from .policy_flashlb import FlashLB, warm_up
+
+            warm_up()
+            logger.info("[eplb/policy] Policy: %s (type=%s)", FlashLB.__name__, policy_type)
+            return FlashLB()
+
         policy_class = policy.get(policy_type)
         if policy_class is None:
             policy_class = RandomLoadBalance

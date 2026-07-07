@@ -77,6 +77,7 @@ from vllm_ascend.ops.fused_moe.moe_stage_params import (
     MoERoutingParams,
 )
 from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import vllm_version_is
 
 
 def _build_mxfp_params(
@@ -141,11 +142,16 @@ def build_fused_experts_input(
     is_per_channel_weight: bool = False,
     w1_scale: list[torch.Tensor] | torch.Tensor | None = None,
     w2_scale: list[torch.Tensor] | torch.Tensor | None = None,
-    w1_scale_bias: torch.Tensor | None = None,
-    w2_scale_bias: torch.Tensor | None = None,
+    w1_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
+    w2_scale_bias: list[torch.Tensor] | torch.Tensor | None = None,
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
+    swiglu_limit: float | None = 0.0,
 ) -> MoEFusedExpertsInput:
+    if not vllm_version_is("0.23.0") and swiglu_limit is None:
+        swiglu_limit = 0.0
+    assert swiglu_limit is not None
+
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
         topk_weights=topk_weights,
@@ -186,6 +192,7 @@ def build_fused_experts_input(
             ),
             is_per_channel_weight=is_per_channel_weight,
         ),
+        swiglu_limit=swiglu_limit,
     )
 
 
@@ -226,6 +233,7 @@ def build_mlp_compute_input(
         activation=fused_experts_input.activation,
         need_trans=fused_experts_input.need_trans,
         dynamic_eplb=fused_experts_input.dynamic_eplb,
+        swiglu_limit=fused_experts_input.swiglu_limit,
     )
 
 

@@ -33,6 +33,7 @@ from typing import Any
 from .base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, QuantType
 
 # Import all scheme classes for external access
+from .fp8 import AscendW4A8MXFPDSDynamicFusedMoEMethod, AscendW8A8MXFP8DSDynamicLinearMethod
 from .kv_c8 import AscendFAQuantAttentionMethod
 
 # Import registry functions
@@ -40,6 +41,7 @@ from .registry import get_scheme_class, register_scheme
 from .w4a4_flatquant import AscendW4A4FlatQuantDynamicLinearMethod
 from .w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 from .w4a4_mxfp4 import AscendW4A4MXFP4DynamicFusedMoEMethod, AscendW4A4MXFP4DynamicLinearMethod
+from .w4a4_mxfp4_flatquant import AscendW4A4MXFP4FlatQuantDynamicLinearMethod
 from .w4a8 import AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod
 from .w4a8_mxfp4 import AscendW4A8MXFPDynamicFusedMoEMethod, AscendW4A8MXFPDynamicLinearMethod
 from .w4a16 import AscendW4A16FusedMoEMethod
@@ -93,4 +95,7 @@ __all__ = [
     "AscendFAQuantAttentionMethod",
     "AscendW4A4MXFP4DynamicLinearMethod",
     "AscendW4A4MXFP4DynamicFusedMoEMethod",
+    "AscendW4A4MXFP4FlatQuantDynamicLinearMethod",
+    "AscendW8A8MXFP8DSDynamicLinearMethod",
+    "AscendW4A8MXFPDSDynamicFusedMoEMethod",
 ]

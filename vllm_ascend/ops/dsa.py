@@ -43,6 +43,7 @@ class DSAModules:
 
     wq_a: torch.nn.Module
     q_norm: torch.nn.Module
+    q_norm_without_weight: torch.nn.Module
     wq_b: torch.nn.Module
     wkv: torch.nn.Module
     kv_norm: torch.nn.Module
@@ -97,6 +98,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
 
         self.wq_a = dsa_modules.wq_a
         self.q_norm = dsa_modules.q_norm
+        self.q_norm_without_weight = dsa_modules.q_norm_without_weight
         self.wq_b = dsa_modules.wq_b
         self.wkv = dsa_modules.wkv
         self.kv_norm = dsa_modules.kv_norm
@@ -134,6 +136,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
             wq_b=self.wq_b,
             wkv=self.wkv,
             q_norm=self.q_norm,
+            q_norm_without_weight=self.q_norm_without_weight,
             kv_norm=self.kv_norm,
             indexer=self.indexer,
             compressor=self.compressor,
@@ -163,9 +166,9 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
 
         output = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)
 
-        # All DSA forward paths run inside dsa_forward custom op boundary,
-        # which is required for ACL graph capture (registered with
-        # dispatch_key="PrivateUse1").
+        # All DSA forward paths (attention + o_proj, including OTP HCCL
+        # collectives) run inside the dsa_forward custom op, which is required
+        # for ACL graph capture (registered with dispatch_key="PrivateUse1").
         torch.ops.vllm.dsa_forward(hidden_states, need_gather_q_kv, output, self.prefix)
 
         output = output.view(-1, output_shape[-1])
@@ -186,8 +189,9 @@ def dsa_forward(
         attn_metadata = forward_context.attn_metadata
 
     if attn_metadata is None:
-        self.dsa_attn.impl.dsa_warmup_with_multistream(hidden_states)
-        output.fill_(0)
+        # Profiling run: forward() handles OTP by running _forward_o_proj on a
+        # zero input so HCCL collectives are captured by the ACL graph.
+        self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, None, None, need_gather_q_kv, output)
         return
 
     kv_cache = _build_kv_cache(self, forward_context)
@@ -229,6 +233,7 @@ def _build_kv_cache(self, forward_context):
     indexer_state_cache = None
     indexer_k_cache = None
     indexer_scale_cache = None
+    indexer_full_cache = None
 
     if self.compress_ratio > 1:
         state_cache = self.compressor.state_cache.kv_cache
@@ -238,24 +243,48 @@ def _build_kv_cache(self, forward_context):
             compress_kv_cache = compress_kv_cache[virtual_engine]
     if self.compress_ratio == 4:
         indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
-        indexer_k_cache, indexer_scale_cache = (
-            self.indexer.k_cache.kv_cache[0][0],
-            self.indexer.k_cache.kv_cache[0][1],
-        )
-
-    return tuple(
-        [
-            unfold_kvcache(cache)
-            for cache in (
-                compress_kv_cache,
-                swa_kv_cache,
-                state_cache,
-                indexer_state_cache,
-                indexer_k_cache,
-                indexer_scale_cache,
+        if get_ascend_device_type() in {AscendDeviceType.A5}:
+            indexer_k_cache, indexer_scale_cache, indexer_full_cache = (
+                self.indexer.k_cache.kv_cache[0][0],
+                self.indexer.k_cache.kv_cache[0][1],
+                self.indexer.k_cache.kv_cache[0][2],
             )
-        ]
-    )
+        else:
+            indexer_k_cache, indexer_scale_cache = (
+                self.indexer.k_cache.kv_cache[0][0],
+                self.indexer.k_cache.kv_cache[0][1],
+            )
+
+    if get_ascend_device_type() in {AscendDeviceType.A5}:
+        kv_cache = tuple(
+            [
+                unfold_kvcache(cache)
+                for cache in (
+                    compress_kv_cache,
+                    swa_kv_cache,
+                    state_cache,
+                    indexer_state_cache,
+                    indexer_k_cache,
+                    indexer_scale_cache,
+                    indexer_full_cache,
+                )
+            ]
+        )
+    else:
+        kv_cache = tuple(
+            [
+                unfold_kvcache(cache)
+                for cache in (
+                    compress_kv_cache,
+                    swa_kv_cache,
+                    state_cache,
+                    indexer_state_cache,
+                    indexer_k_cache,
+                    indexer_scale_cache,
+                )
+            ]
+        )
+    return kv_cache
 
 
 def unfold_kvcache(kvcache):

@@ -50,7 +50,7 @@ protected:
             return false;
         }
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
-        return ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::VLLM_ASCEND_950_SOC_ENUM;
+        return ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::ASCEND950;
     }
 
     ge::graphStatus GetShapeAttrsInfo() override

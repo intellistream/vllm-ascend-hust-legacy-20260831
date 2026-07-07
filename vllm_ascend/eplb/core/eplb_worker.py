@@ -19,7 +19,7 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.distributed as dist
+from vllm.distributed import get_ep_group
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
@@ -27,13 +27,20 @@ from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory
 
 
 class EplbWorker:
-    def __init__(self, shared_dict, policy_type, enable_d2d: bool = True):
+    def __init__(
+        self,
+        shared_dict,
+        policy_type,
+        enable_d2d: bool = True,
+        tp_size: int | None = None,
+    ):
         self.policy_type = policy_type
         self.policy = PolicyFactory.generate_policy(policy_type)
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
-        self.rank_id = dist.get_rank()
+        self.tp_size = tp_size
+        self.rank_id = get_ep_group().rank_in_group
         self.multi_stage = policy_type == 3
 
     def do_update(self):
@@ -68,8 +75,22 @@ class EplbWorker:
                 hotness = self._calculate_hotness(old_placement, load_info.sum(0))
             else:
                 hotness = self._calculate_hotness(old_placement, load_info)
-            current_mean, current_max = self._compute_imbalance(old_placement, hotness)
-            update_mean, update_max = self._compute_imbalance(new_placement, hotness)
+            # ms-service-metric begin: expose EPLB hotness details for metrics collection.
+            current_mean, current_max, current_imbalance_list = self._compute_imbalance(
+                old_placement, hotness, return_list=True
+            )
+            update_mean, update_max, update_imbalance_list = self._compute_imbalance(
+                new_placement, hotness, return_list=True
+            )
+            self.latest_expert_hotness = {
+                "current_mean": current_mean,
+                "current_max": current_max,
+                "update_mean": update_mean,
+                "update_max": update_max,
+                "current_imbalance_list": current_imbalance_list,
+                "update_imbalance_list": update_imbalance_list,
+            }
+            # ms-service-metric end.
             logger.info(
                 "[eplb/worker] Expert hotness imbalance, current: mean=%.3f max=%.3f, updated: mean=%.3f max=%.3f",
                 current_mean,
@@ -273,7 +294,11 @@ class EplbWorker:
 
             rank_maps.append(new_expert_map[self.rank_id])
 
-            log2phy_map = generate_log2phy_map(new_expert_map, self.rank_id)
+            log2phy_map = generate_log2phy_map(
+                new_expert_map,
+                self.rank_id,
+                tp_size=self.tp_size,
+            )
             log2phy_maps.append(log2phy_map)
 
             layer_ids.append(layer_id)
@@ -297,7 +322,7 @@ class EplbWorker:
         return [tensor.tolist() for tensor in tensors]
 
     @staticmethod
-    def _compute_imbalance(deployment_all_layer, hotness_all_layer: np.ndarray):
+    def _compute_imbalance(deployment_all_layer, hotness_all_layer: np.ndarray, return_list: bool = False):
         imbalance_list = []
         deployment_all_layer = np.array(deployment_all_layer)
         for deployment, hotness in zip(deployment_all_layer, hotness_all_layer):
@@ -311,6 +336,10 @@ class EplbWorker:
 
         max_val = max(imbalance_list)
         mean_val = sum(imbalance_list) / len(imbalance_list)
+        # ms-service-metric begin: optionally expose per-layer imbalance without recomputing it.
+        if return_list:
+            return mean_val, max_val, imbalance_list
+        # ms-service-metric end.
         return mean_val, max_val
 
     @staticmethod
@@ -328,7 +357,13 @@ class EplbWorker:
 
 
 class EplbProcess:
-    def __init__(self, shared_dict, policy_type: int = 0, enable_d2d: bool = True):
+    def __init__(
+        self,
+        shared_dict,
+        policy_type: int = 0,
+        enable_d2d: bool = True,
+        tp_size: int | None = None,
+    ):
         """
         Args:
             shared_dict: Cross-process shared dict returned by Manager().dict()
@@ -342,7 +377,12 @@ class EplbProcess:
         self.block_update_q: Queue[Any] = Queue(maxsize=1)
 
         # Create EplbWorker instance
-        self.worker = EplbWorker(self.shared_dict, self.policy_type, self.enable_d2d)
+        self.worker = EplbWorker(
+            self.shared_dict,
+            self.policy_type,
+            self.enable_d2d,
+            tp_size=tp_size,
+        )
 
     def worker_process(self, planner_q, block_update_q):
         """

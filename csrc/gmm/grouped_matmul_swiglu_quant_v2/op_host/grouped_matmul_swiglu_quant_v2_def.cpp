@@ -70,7 +70,7 @@ public:
         this->Attr("transpose_weight").AttrType(OPTIONAL).Bool(0);
         this->Attr("group_list_type").AttrType(OPTIONAL).Int(0);
         this->Attr("tuning_config").AttrType(OPTIONAL).ListInt({0});
-        this->Attr("swiglu_limit").AttrType(OPTIONAL).Float(1000000.0f);
+        this->Attr("swiglu_limit").AttrType(OPTIONAL).Float(0.0f);
 
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)
@@ -253,7 +253,7 @@ public:
             .ExtendCfgInfo("coreType.value", "AiCore")
             .ExtendCfgInfo("aclnnSupport.value", "support_aclnn")
             .ExtendCfgInfo("opFile.value","grouped_matmul_swiglu_quant_v2_apt");
-        this->AICore().AddConfig(VLLM_ASCEND_950_SOC_CONFIG, config950);
+        this->AICore().AddConfig("ascend950", config950);
     }
 };
 

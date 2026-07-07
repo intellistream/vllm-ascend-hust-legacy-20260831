@@ -54,7 +54,7 @@ public:
 
     bool IsCapable()
     {
-        if (socVersion_ != platform_ascendc::SocVersion::VLLM_ASCEND_950_SOC_ENUM) {
+        if (socVersion_ != platform_ascendc::SocVersion::ASCEND950) {
             return false;
         }
         return true;

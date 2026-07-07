@@ -74,7 +74,7 @@ public:
             .DynamicRankSupportFlag(true)
             .DynamicShapeSupportFlag(true)
             .ExtendCfgInfo("opFile.value", "hc_pre_sinkhorn");
-        this->AICore().AddConfig(VLLM_ASCEND_950_SOC_CONFIG, regbaseCfg);
+        this->AICore().AddConfig("ascend950", regbaseCfg);
     }
 };
 
