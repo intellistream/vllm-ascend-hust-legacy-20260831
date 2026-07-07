@@ -84,6 +84,7 @@ from vllm_ascend.utils import (
     extract_dsv4_layer_index,
     get_ascend_device_type,
     get_dsv4_compress_ratio,
+    vllm_version_is,
 )
 
 if vllm_version_is("0.21.0"):

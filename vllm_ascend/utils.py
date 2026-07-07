@@ -1510,3 +1510,19 @@ def get_compressed_pos_and_indices(
         positions_compressed_list.append(compressed_pos_ids)
         num_scheduled_tokens_compressed_list.append(num_new_compressed_pos)
     return positions_compressed_list, req_indices_compressed_list, num_scheduled_tokens_compressed_list
+
+
+def extract_dsv4_layer_index(config, layer_name: str) -> int:
+    from vllm.model_executor.models.utils import extract_layer_index
+
+    layer_idx = extract_layer_index(layer_name)
+    if ".mtp." in f".{layer_name}." and layer_idx < config.num_hidden_layers:
+        return config.num_hidden_layers + layer_idx
+    return layer_idx
+
+
+def get_dsv4_compress_ratio(config, layer_idx: int) -> int:
+    compress_ratios = getattr(config, "compress_ratios", None)
+    if compress_ratios is None or layer_idx >= len(compress_ratios):
+        return 0
+    return compress_ratios[layer_idx]
