@@ -29,21 +29,40 @@ jobs:
     runs-on: linux-aarch64-a2b3-0
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     timeout-minutes: 30
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v7
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git -c http.extraheader="AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
+            fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
+          git checkout --force FETCH_HEAD
 
       - name: Collect changed docs files
         id: changed-docs
         if: ${{ github.event_name == 'pull_request' }}
-        uses: tj-actions/changed-files@v45
-        with:
-          use_rest_api: true
-          files: |
-            docs/source/**/*.md
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git -c http.extraheader="AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
+            fetch --no-tags --depth=1 origin "${BASE_SHA}"
+          mapfile -t changed_docs < <(
+            git diff --name-only "${BASE_SHA}" HEAD -- 'docs/source/**/*.md' |
+              sed '/^$/d'
+          )
+          if (( ${#changed_docs[@]} )); then
+            echo "any_changed=true" >> "${GITHUB_OUTPUT}"
+            printf 'all_changed_files=%s\n' "${changed_docs[*]}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "any_changed=false" >> "${GITHUB_OUTPUT}"
+            echo "all_changed_files=" >> "${GITHUB_OUTPUT}"
+          fi
 
       - name: Install docs dependencies
         if: ${{ github.event_name != 'pull_request' || steps.changed-docs.outputs.any_changed == 'true' }}
@@ -118,13 +137,13 @@ jobs:
           /tmp/retry-linkcheck-failed-links.sh \
             "${LINKCHECK_EXIT_CODE}" docs/_build/linkcheck/output.json
 
-      - name: Upload linkcheck reports
+      - name: Summarize linkcheck reports
         if: ${{ always() && github.event_name != 'pull_request' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: sphinx-linkcheck-report
-          path: |
-            docs/_build/linkcheck/output.txt
-            docs/_build/linkcheck/output.json
-          if-no-files-found: warn
-          retention-days: 5
+        run: |
+          for report in docs/_build/linkcheck/output.txt docs/_build/linkcheck/output.json; do
+            if [[ -f "${report}" ]]; then
+              echo "Generated ${report}"
+            else
+              echo "Report not found: ${report}"
+            fi
+          done
