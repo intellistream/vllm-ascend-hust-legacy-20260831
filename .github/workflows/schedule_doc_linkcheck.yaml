@@ -32,12 +32,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Collect changed docs files
         id: changed-docs
         if: ${{ github.event_name == 'pull_request' }}
-        uses: tj-actions/changed-files@v47
+        uses: tj-actions/changed-files@v45
         with:
           use_rest_api: true
           files: |
@@ -118,7 +118,7 @@ jobs:
 
       - name: Upload linkcheck reports
         if: ${{ always() && github.event_name != 'pull_request' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: sphinx-linkcheck-report
           path: |

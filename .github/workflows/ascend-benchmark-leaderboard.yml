@@ -656,9 +656,21 @@ jobs:
           fi
           export PYTHONPATH="$VLLM_HUST_REPO:$VLLM_HUST_BENCHMARK_REPO/src${PYTHONPATH:+:$PYTHONPATH}"
           echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
-          hust_run_pip install "torch==2.9.0" "torch-npu==2.9.0"
-          hust_run_pip install "numpy<2.0.0" scipy attrs decorator psutil
-          hust_run_pip install -r "$VLLM_HUST_REPO/requirements/common.txt"
+          torch_pin="$(awk '/^torch==/{print; exit}' requirements.txt)"
+          torch_npu_pin="$(awk '/^torch-npu==/{print; exit}' requirements.txt)"
+          if [[ -z "$torch_pin" || -z "$torch_npu_pin" ]]; then
+            echo "Could not resolve torch/torch-npu pins from requirements.txt" >&2
+            exit 1
+          fi
+          python_stack_constraints="${CI_RUNTIME_ROOT}/benchmark-python-stack-constraints.txt"
+          mkdir -p "$(dirname "$python_stack_constraints")"
+          printf '%s\n%s\n' "$torch_pin" "$torch_npu_pin" > "$python_stack_constraints"
+          echo "Using benchmark Python stack constraints:"
+          sed 's/^/  /' "$python_stack_constraints"
+          echo "BENCHMARK_PYTHON_STACK_CONSTRAINTS=$python_stack_constraints" >> "$GITHUB_ENV"
+          hust_run_pip install -c "$python_stack_constraints" "$torch_pin" "$torch_npu_pin"
+          hust_run_pip install -c "$python_stack_constraints" "numpy<2.0.0" scipy attrs decorator psutil
+          hust_run_pip install -c "$python_stack_constraints" -r "$VLLM_HUST_REPO/requirements/common.txt"
           PYTHON_BIN="$(hust_resolve_python_bin)"
           echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"
           "$PYTHON_BIN" - <<'PY'
@@ -677,8 +689,8 @@ jobs:
           print(f"torch_npu={torch_npu.__version__}")
           PY
           bash scripts/install_local_ascend_plugin.sh "$GITHUB_WORKSPACE"
-          hust_run_pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]" jsonschema
-          hust_run_pip install "huggingface_hub>=0.20"
+          hust_run_pip install -c "$python_stack_constraints" -e "${VLLM_HUST_BENCHMARK_REPO}[publish]" jsonschema
+          hust_run_pip install -c "$python_stack_constraints" "huggingface_hub>=0.20"
 
       - name: Verify installation
         env:
