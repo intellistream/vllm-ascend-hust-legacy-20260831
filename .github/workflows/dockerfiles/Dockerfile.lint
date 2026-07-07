@@ -41,7 +41,13 @@ RUN python3 -m pip install --only-binary=:all: "Cython>=3,<4" "pandas>=2.2.0" &&
 
 COPY . /vllm-workspace/vllm-ascend/
 
+RUN printf '%s\n' \
+    'Cython>=3,<4' \
+    'pandas>=2.2.0' \
+    > /tmp/lint-constraints.txt
+
 RUN pip install -r /vllm-workspace/vllm-ascend/requirements-dev.txt \
+    -c /tmp/lint-constraints.txt \
     --extra-index-url https://download.pytorch.org/whl/cpu \
     --extra-index-url https://repo.huaweicloud.com/ascend/repos/pypi && \
     pip cache purge && \
