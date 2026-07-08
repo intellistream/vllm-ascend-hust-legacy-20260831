@@ -39,7 +39,7 @@ concurrency:
 
 jobs:
   lint-and-select-tests:
-    if: ${{ github.event.label.name == 'ready' }}
+    if: ${{ github.event.label.name == 'e2e' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -199,7 +199,7 @@ jobs:
 
   run-selected-tests:
     needs: lint-and-select-tests
-    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'ready') }}
+    if: ${{ needs.lint-and-select-tests.outputs.has_tests == 'true' && contains(github.event.pull_request.labels.*.name, 'e2e') }}
     strategy:
       matrix:
         vllm_version:
