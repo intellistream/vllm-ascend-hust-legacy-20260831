@@ -15,6 +15,11 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import atexit
+import json
+import os
+import time
+from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
 
@@ -70,6 +75,83 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
+_ATTN_PATH_PROBE_COUNTS: Counter[str] = Counter()
+_ATTN_PATH_PROBE_RECORDS = 0
+_ATTN_PATH_PROBE_REGISTERED = False
+
+
+def _attention_path_probe_path() -> str:
+    return os.getenv("VLLM_ASCEND_ATTENTION_PATH_PROBE_JSONL", "").strip()
+
+
+def _attention_path_probe_max_records() -> int:
+    raw_value = os.getenv("VLLM_ASCEND_ATTENTION_PATH_PROBE_MAX_RECORDS", "2048")
+    try:
+        return max(0, int(raw_value))
+    except ValueError:
+        return 2048
+
+
+def _write_attention_path_probe_record(record: dict) -> None:
+    probe_path = _attention_path_probe_path()
+    if not probe_path:
+        return
+    probe_dir = os.path.dirname(probe_path)
+    if probe_dir:
+        os.makedirs(probe_dir, exist_ok=True)
+    with open(probe_path, "a", encoding="utf-8") as probe_file:
+        probe_file.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _flush_attention_path_probe_summary() -> None:
+    if not _attention_path_probe_path() or not _ATTN_PATH_PROBE_COUNTS:
+        return
+    _write_attention_path_probe_record(
+        {
+            "event": "summary",
+            "ts": time.time(),
+            "counts": dict(sorted(_ATTN_PATH_PROBE_COUNTS.items())),
+        }
+    )
+
+
+def _record_attention_path_probe(
+    *,
+    path: str,
+    query: torch.Tensor,
+    attn_metadata: "AscendMetadata",
+    sliding_window: int | None,
+) -> None:
+    global _ATTN_PATH_PROBE_RECORDS, _ATTN_PATH_PROBE_REGISTERED
+    probe_path = _attention_path_probe_path()
+    if not probe_path:
+        return
+    if not _ATTN_PATH_PROBE_REGISTERED:
+        atexit.register(_flush_attention_path_probe_summary)
+        _ATTN_PATH_PROBE_REGISTERED = True
+    _ATTN_PATH_PROBE_COUNTS[path] += 1
+    _ATTN_PATH_PROBE_COUNTS[f"{path}:{attn_metadata.attn_state.name}"] += 1
+    if _ATTN_PATH_PROBE_RECORDS >= _attention_path_probe_max_records():
+        return
+    _ATTN_PATH_PROBE_RECORDS += 1
+    seq_lens_list = attn_metadata.seq_lens_list or []
+    _write_attention_path_probe_record(
+        {
+            "event": "attention_path",
+            "ts": time.time(),
+            "path": path,
+            "attn_state": attn_metadata.attn_state.name,
+            "query_tokens": int(query.shape[0]),
+            "num_actual_tokens": int(attn_metadata.num_actual_tokens or 0),
+            "num_decode_tokens": int(attn_metadata.num_decode_tokens or 0),
+            "num_prefills": int(attn_metadata.num_prefills or 0),
+            "num_decodes": int(attn_metadata.num_decodes or 0),
+            "seq_count": len(seq_lens_list),
+            "seq_lens_head": [int(value) for value in seq_lens_list[:8]],
+            "sliding_window": sliding_window,
+            "capturing": bool(_EXTRA_CTX.capturing),
+        }
+    )
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -1239,6 +1321,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
+        _record_attention_path_probe(
+            path="fused_infer_attention",
+            query=query,
+            attn_metadata=attn_metadata,
+            sliding_window=self.sliding_window,
+        )
         if _EXTRA_CTX.capturing:
             if self.sinks is not None:
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
@@ -1354,6 +1442,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        _record_attention_path_probe(
+            path="paged_attention",
+            query=query,
+            attn_metadata=attn_metadata,
+            sliding_window=self.sliding_window,
+        )
         if _EXTRA_CTX.capturing:
             return self.full_graph_pa(query, attn_metadata, output)
         torch_npu._npu_paged_attention(
