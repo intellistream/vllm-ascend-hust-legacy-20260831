@@ -18,7 +18,13 @@
 name: E2E
 
 on:
-  workflow_dispatch:
+  pull_request:
+    types:
+      - labeled
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -34,9 +40,7 @@ concurrency:
 jobs:
   lint-and-select-tests:
     if: ${{ github.event.label.name == 'e2e' }}
-    runs-on: linux-amd64-cpu-8-hk
-    container:
-      image: quay.io/ascend-ci/vllm-ascend:lint
+    runs-on: ubuntu-latest
     outputs:
       has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
       test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
@@ -205,3 +209,4 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
+      startup_probe: true

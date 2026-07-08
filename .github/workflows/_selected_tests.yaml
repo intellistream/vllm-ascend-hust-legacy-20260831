@@ -47,6 +47,11 @@ on:
         required: false
         default: false
         description: 'Continue running the job even if tests fail'
+      startup_probe:
+        type: boolean
+        required: false
+        default: false
+        description: 'Validate reusable workflow startup without running selected tests'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -61,11 +66,18 @@ permissions:
 
 jobs:
   selected-tests:
+    if: ${{ !inputs.startup_probe }}
     name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }} card-${{ matrix.group.partition && format('(part {0})', matrix.group.partition) || '' }}
     strategy:
       fail-fast: false
       matrix:
-        group: ${{ fromJSON(inputs.test_groups) }}
+        group:
+          - npu_type: cpu
+            num_npus: 0
+            runner: ubuntu-latest
+            image_tag: 9.0.0-910b-ubuntu22.04-py3.12
+            tests: ""
+            partition: startup-probe
     runs-on: ${{ matrix.group.runner }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.group.image_tag }}
