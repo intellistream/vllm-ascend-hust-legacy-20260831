@@ -209,4 +209,3 @@ jobs:
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
-      startup_probe: true
