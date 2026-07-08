@@ -40,7 +40,9 @@ concurrency:
 jobs:
   lint-and-select-tests:
     if: ${{ github.event.label.name == 'e2e' }}
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-8-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
       has_tests: ${{ steps.scope.outputs.has_tests || steps.noop.outputs.has_tests }}
       test_groups: ${{ steps.scope.outputs.test_groups || steps.noop.outputs.test_groups }}
