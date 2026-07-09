@@ -138,6 +138,58 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Use the experimental mapped-host gather custom op for CPU offload loads.
+    "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER", "0"))
+    ),
+    # Optional torch extension containing _C_ascend.kv_cache_block_gather.
+    # This is mainly useful while testing without rebuilding vllm-ascend itself.
+    "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_LIB": lambda: os.getenv(
+        "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_LIB", None
+    ),
+    # Optional custom-op opapi library for the in-tree kv_cache_block_gather binding.
+    "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB": lambda: os.getenv(
+        "VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_OPAPI_LIB", None
+    ),
+    # Optional diagnostic timing for CPU-offload load paths. This records NPU
+    # event timing and enqueue wall time into ASCEND_HOST_GATHER_STATS_PATH.
+    "VLLM_ASCEND_CPU_OFFLOAD_PROFILE_TIMING": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_CPU_OFFLOAD_PROFILE_TIMING", "0"))
+    ),
+    # Optional real-path trace for CPU-offload restore and attention wait
+    # windows. This only writes diagnostic JSONL events when
+    # ASCEND_HOST_GATHER_STATS_PATH is set; it must not change transfer policy.
+    "VLLM_ASCEND_CPU_OFFLOAD_REAL_PATH_TRACE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_CPU_OFFLOAD_REAL_PATH_TRACE", "0"))
+    ),
+    # Experimental worker-local staging pool for CPU-offload restores. Disabled
+    # by default; when enabled, selected CPU KV blocks are packed into fixed
+    # registered CPU staging slabs before mapped-host gather.
+    "VLLM_ASCEND_CPU_OFFLOAD_STAGING_POOL": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_CPU_OFFLOAD_STAGING_POOL", "0"))
+    ),
+    "VLLM_ASCEND_CPU_OFFLOAD_STAGING_SLOTS": lambda: max(
+        1, int(os.getenv("VLLM_ASCEND_CPU_OFFLOAD_STAGING_SLOTS", "2"))
+    ),
+    "VLLM_ASCEND_CPU_OFFLOAD_STAGING_SLAB_BLOCKS": lambda: max(
+        1, int(os.getenv("VLLM_ASCEND_CPU_OFFLOAD_STAGING_SLAB_BLOCKS", "256"))
+    ),
+    "VLLM_ASCEND_CPU_OFFLOAD_STAGING_PACK_BACKEND": lambda: os.getenv(
+        "VLLM_ASCEND_CPU_OFFLOAD_STAGING_PACK_BACKEND", "cpp_pool"
+    ),
+    "VLLM_ASCEND_CPU_OFFLOAD_STAGING_PACK_THREADS": lambda: max(
+        1, int(os.getenv("VLLM_ASCEND_CPU_OFFLOAD_STAGING_PACK_THREADS", "8"))
+    ),
+    "VLLM_ASCEND_CPU_OFFLOAD_STAGING_PACK_FUSED_KV": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_CPU_OFFLOAD_STAGING_PACK_FUSED_KV", "1"))
+    ),
+    "VLLM_ASCEND_CPU_OFFLOAD_STAGING_PACK_BUILD_DIR": lambda: os.getenv(
+        "VLLM_ASCEND_CPU_OFFLOAD_STAGING_PACK_BUILD_DIR",
+        "/tmp/vllm-ascend-staging-pack",
+    ),
+    "VLLM_ASCEND_CPU_OFFLOAD_STAGING_FALLBACK_ON_ERROR": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_CPU_OFFLOAD_STAGING_FALLBACK_ON_ERROR", "1"))
+    ),
     # Disable AddRmsNormBias custom-op dependent fusion passes. This is useful
     # when the installed libopapi.so does not export the required symbols.
     "VLLM_ASCEND_DISABLE_ADD_RMS_NORM_BIAS_CUSTOM_OP": lambda: bool(

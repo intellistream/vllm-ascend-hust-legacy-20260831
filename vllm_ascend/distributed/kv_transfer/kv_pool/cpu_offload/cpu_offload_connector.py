@@ -8,7 +8,7 @@ import time
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
@@ -26,6 +26,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.cpu_offload.metadata import (
     MetadataServer,
     MetadataServerProc,
     MLAConfig,
+)
+import vllm_ascend.envs as ascend_envs
+from vllm_ascend.kv_offload.host_gather_stats import record_host_gather_event
+from vllm_ascend.kv_offload.staging_pool import (
+    StagingPoolConfig,
+    WorkerLocalStagingPool,
 )
 
 if TYPE_CHECKING:
@@ -226,6 +232,10 @@ class CPUOffloadingConnector(KVConnectorBase_V1):
             self.connector_scheduler.request_finished(request)
         return True, None
 
+    def shutdown(self) -> None:
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
+
 
 class CPUOffloadingConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig):
@@ -369,6 +379,71 @@ class CPUOffloadingConnectorWorker:
         self.done_sending_count: defaultdict[str, int] = defaultdict(int)
         self.use_indexed_copy = _indexed_copy_enabled()
         self.use_reverse_span_copy = _reverse_span_copy_enabled()
+        self.use_host_gather = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER
+        self.use_staging_pool = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_STAGING_POOL
+        self.staging_pool_config = StagingPoolConfig(
+            slots=ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_STAGING_SLOTS,
+            slab_blocks=ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_STAGING_SLAB_BLOCKS,
+            pack_backend=ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_STAGING_PACK_BACKEND,
+            pack_threads=ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_STAGING_PACK_THREADS,
+            fused_kv=ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_STAGING_PACK_FUSED_KV,
+            build_dir=ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_STAGING_PACK_BUILD_DIR,
+            fallback_on_error=ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_STAGING_FALLBACK_ON_ERROR,
+        )
+        self.profile_timing = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_PROFILE_TIMING
+        self.real_path_trace = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_REAL_PATH_TRACE
+        self.host_gather_op: Any | None = None
+        self.staging_pool: WorkerLocalStagingPool | None = None
+        self._host_gather_fallback_logged = False
+        self._staging_pool_fallback_logged = False
+        self._pending_load_profiles: list[dict[str, Any]] = []
+        self._staging_src_ids_cpu: torch.Tensor | None = None
+        self._staging_src_ids_npu: torch.Tensor | None = None
+        self._staging_dst_ids_npu: torch.Tensor | None = None
+        self._shutdown_done = False
+        if self.use_host_gather or self.use_staging_pool:
+            host_gather_lib = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_LIB
+            if host_gather_lib:
+                torch.ops.load_library(host_gather_lib)
+            else:
+                try:
+                    import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+                except Exception as exc:
+                    logger.warning(
+                        "CPU offload host gather/staging is enabled, but "
+                        "vllm_ascend_C could not be imported before checking "
+                        "kv_cache_block_gather: %s",
+                        exc,
+                    )
+            try:
+                self.host_gather_op = torch.ops._C_ascend.kv_cache_block_gather
+            except AttributeError:
+                logger.warning(
+                    "CPU offload host gather/staging is enabled, but "
+                    "torch.ops._C_ascend.kv_cache_block_gather is not available. "
+                    "Falling back to main span-copy."
+                )
+                self.use_host_gather = False
+                self.use_staging_pool = False
+        record_host_gather_event(
+            "cpu_offload_connector_worker",
+            "init",
+            host_gather_enabled=bool(ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER),
+            host_gather_active=bool(self.use_host_gather and self.host_gather_op is not None),
+            staging_pool_enabled=bool(ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_STAGING_POOL),
+            staging_pool_active=bool(self.use_staging_pool and self.host_gather_op is not None),
+            staging_pool_slots=int(self.staging_pool_config.slots),
+            staging_pool_slab_blocks=int(self.staging_pool_config.slab_blocks),
+            staging_pack_backend=str(self.staging_pool_config.pack_backend),
+            staging_pack_threads=int(self.staging_pool_config.pack_threads),
+            staging_pack_fused_kv=bool(self.staging_pool_config.fused_kv),
+            profile_timing=bool(self.profile_timing),
+            real_path_trace=bool(self.real_path_trace),
+            pp_rank=int(self.pp_rank),
+            tp_rank=int(self.tp_rank),
+            tp_world_size=int(self.tp_world_size),
+            use_mla=bool(self.use_mla),
+        )
 
         # start metadata server to init cpu_kv_cache_manager and handle rpc requests
         # all dp shared the same metadata server, only start the process on data_rank 0
@@ -399,6 +474,32 @@ class CPUOffloadingConnectorWorker:
             except Exception as e:
                 logger.info("wait for metadata server to start, error: %s", e)
                 time.sleep(1)
+
+    def shutdown(self) -> None:
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+        record_host_gather_event(
+            "cpu_offload_connector_worker",
+            "shutdown_start",
+            has_staging_pool=bool(self.staging_pool is not None),
+        )
+        if self.staging_pool is not None:
+            try:
+                self.staging_pool.close()
+            except Exception:
+                logger.debug("failed to close CPU offload staging pool", exc_info=True)
+        record_host_gather_event(
+            "cpu_offload_connector_worker",
+            "shutdown_done",
+            has_staging_pool=bool(self.staging_pool is not None),
+        )
+
+    def __del__(self):
+        try:
+            self.shutdown()
+        except Exception:
+            pass
 
     def bind_connector_metadata(self, connector_metadata: CPUOffloadingConnectorMetadata) -> None:
         started = time.perf_counter()
@@ -446,6 +547,404 @@ class CPUOffloadingConnectorWorker:
             self.load_pair_sample,
         ) = _block_pair_locality(self.load_block_mapping)
 
+    def _log_host_gather_fallback_once(self, reason: str) -> None:
+        record_host_gather_event("cpu_offload_connector_worker", "fallback", reason=reason)
+        if not self._host_gather_fallback_logged:
+            logger.info("CPU offload mapped-host gather fallback: %s", reason)
+            self._host_gather_fallback_logged = True
+
+    def _log_staging_pool_fallback_once(self, reason: str) -> None:
+        record_host_gather_event(
+            "cpu_offload_connector_worker",
+            "staging_pool_fallback",
+            reason=reason,
+        )
+        if not self._staging_pool_fallback_logged:
+            logger.info("CPU offload staging pool fallback: %s", reason)
+            self._staging_pool_fallback_logged = True
+
+    def _load_mapping_profile(self) -> dict[str, Any]:
+        if not self.load_block_mapping:
+            return {
+                "block_pairs": 0,
+                "src_min": None,
+                "src_max": None,
+                "src_span_blocks": 0,
+                "source_span_ratio": None,
+                "source_run_count": 0,
+                "source_dense": False,
+                "source_sparse": False,
+                "dst_min": None,
+                "dst_max": None,
+                "dst_span_blocks": 0,
+                "dst_run_count": 0,
+                "dst_dense": False,
+            }
+
+        def count_runs(values: list[int]) -> int:
+            if not values:
+                return 0
+            runs = 1
+            prev = values[0]
+            for value in values[1:]:
+                if value != prev + 1:
+                    runs += 1
+                prev = value
+            return runs
+
+        src_ids = [cpu_block_id for cpu_block_id, _ in self.load_block_mapping]
+        dst_ids = [gpu_block_id for _, gpu_block_id in self.load_block_mapping]
+        src_unique = sorted(set(src_ids))
+        dst_unique = sorted(set(dst_ids))
+        block_pairs = len(self.load_block_mapping)
+        src_min = min(src_ids)
+        src_max = max(src_ids)
+        dst_min = min(dst_ids)
+        dst_max = max(dst_ids)
+        src_span_blocks = src_max - src_min + 1
+        dst_span_blocks = dst_max - dst_min + 1
+        source_span_ratio = float(src_span_blocks) / float(block_pairs) if block_pairs else None
+        source_run_count = count_runs(src_unique)
+        dst_run_count = count_runs(dst_unique)
+        source_dense = len(src_unique) == src_span_blocks and len(src_unique) == block_pairs
+        dst_dense = len(dst_unique) == dst_span_blocks and len(dst_unique) == block_pairs
+        return {
+            "block_pairs": int(block_pairs),
+            "src_min": int(src_min),
+            "src_max": int(src_max),
+            "src_span_blocks": int(src_span_blocks),
+            "source_span_ratio": source_span_ratio,
+            "source_run_count": int(source_run_count),
+            "source_dense": bool(source_dense),
+            "source_sparse": bool(source_run_count > 1 or not source_dense),
+            "dst_min": int(dst_min),
+            "dst_max": int(dst_max),
+            "dst_span_blocks": int(dst_span_blocks),
+            "dst_run_count": int(dst_run_count),
+            "dst_dense": bool(dst_dense),
+        }
+
+    def _can_gather_kv_part(
+        self,
+        cpu_layer_part: torch.Tensor,
+        gpu_layer_part: torch.Tensor,
+        *,
+        log_fallback: Callable[[str], None],
+    ) -> bool:
+        if self.host_gather_op is None:
+            log_fallback("mapped-host gather op is not available")
+            return False
+        if not cpu_layer_part.is_contiguous() or not gpu_layer_part.is_contiguous():
+            log_fallback("cpu/gpu KV cache part is not contiguous")
+            return False
+        if cpu_layer_part.dtype != gpu_layer_part.dtype:
+            log_fallback("cpu/gpu KV cache dtype mismatch")
+            return False
+        if cpu_layer_part.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+            log_fallback(f"unsupported KV cache dtype {cpu_layer_part.dtype}")
+            return False
+        return True
+
+    def _make_host_gather_indices(self, device: torch.device) -> tuple[int, int, torch.Tensor, torch.Tensor]:
+        src_min = min(cpu_block_id for cpu_block_id, _ in self.load_block_mapping)
+        src_max = max(cpu_block_id for cpu_block_id, _ in self.load_block_mapping)
+        src_block_ids = torch.tensor(
+            [cpu_block_id - src_min for cpu_block_id, _ in self.load_block_mapping],
+            dtype=torch.int32,
+            device=device,
+        )
+        dst_block_ids = torch.tensor(
+            [gpu_block_id for _, gpu_block_id in self.load_block_mapping],
+            dtype=torch.int32,
+            device=device,
+        )
+        return src_min, src_max, src_block_ids, dst_block_ids
+
+    def _make_staging_indices(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        block_pairs = len(self.load_block_mapping)
+        if self._staging_src_ids_cpu is None or int(self._staging_src_ids_cpu.numel()) != block_pairs:
+            self._staging_src_ids_cpu = torch.tensor(
+                [cpu_block_id for cpu_block_id, _ in self.load_block_mapping],
+                dtype=torch.long,
+                device="cpu",
+            )
+        if (
+            self._staging_src_ids_npu is None
+            or int(self._staging_src_ids_npu.numel()) != block_pairs
+            or self._staging_src_ids_npu.device != device
+        ):
+            self._staging_src_ids_npu = torch.arange(block_pairs, dtype=torch.int32, device=device)
+        if (
+            self._staging_dst_ids_npu is None
+            or int(self._staging_dst_ids_npu.numel()) != block_pairs
+            or self._staging_dst_ids_npu.device != device
+        ):
+            self._staging_dst_ids_npu = torch.tensor(
+                [gpu_block_id for _, gpu_block_id in self.load_block_mapping],
+                dtype=torch.int32,
+                device=device,
+            )
+        return self._staging_src_ids_cpu, self._staging_src_ids_npu, self._staging_dst_ids_npu
+
+    def _ensure_staging_pool(self, cpu_parts: Sequence[torch.Tensor]) -> WorkerLocalStagingPool | None:
+        if not self.use_staging_pool or self.host_gather_op is None:
+            return None
+        if self.staging_pool is not None:
+            return self.staging_pool
+        part_shapes = [list(part.shape) for part in cpu_parts]
+        if not part_shapes:
+            self._log_staging_pool_fallback_once("no CPU KV parts available")
+            return None
+        dtype = cpu_parts[0].dtype
+        try:
+            self.staging_pool = WorkerLocalStagingPool(
+                config=self.staging_pool_config,
+                part_shapes=part_shapes,
+                dtype=dtype,
+            )
+            return self.staging_pool
+        except Exception as exc:
+            self._log_staging_pool_fallback_once(
+                f"failed to initialize staging pool: {type(exc).__name__}: {exc}"
+            )
+            if not self.staging_pool_config.fallback_on_error:
+                raise
+            self.use_staging_pool = False
+            return None
+
+    def _can_use_staging_pool(
+        self,
+        cpu_parts: Sequence[torch.Tensor],
+        gpu_parts: Sequence[torch.Tensor],
+    ) -> bool:
+        if not self.use_staging_pool or self.host_gather_op is None:
+            return False
+        if not self.load_block_mapping:
+            return False
+        if len(cpu_parts) != len(gpu_parts):
+            self._log_staging_pool_fallback_once("CPU/GPU KV part count mismatch")
+            return False
+        if len(self.load_block_mapping) > int(self.staging_pool_config.slab_blocks):
+            self._log_staging_pool_fallback_once("restore block count exceeds staging slab blocks")
+            return False
+        for cpu_part, gpu_part in zip(cpu_parts, gpu_parts):
+            if not self._can_gather_kv_part(
+                cpu_part,
+                gpu_part,
+                log_fallback=self._log_staging_pool_fallback_once,
+            ):
+                return False
+        return True
+
+    def _flush_pending_load_profiles(self, layer: int | None = None) -> None:
+        remaining_profiles: list[dict[str, Any]] = []
+        for profile in self._pending_load_profiles:
+            if layer is not None and profile.get("layer") != layer:
+                remaining_profiles.append(profile)
+                continue
+            start_event = profile.pop("start_event")
+            end_event = profile.pop("end_event")
+            try:
+                device_elapsed_ms = float(start_event.elapsed_time(end_event))
+            except Exception as exc:
+                device_elapsed_ms = -1.0
+                profile["timing_error"] = str(exc)
+            record_host_gather_event(
+                "cpu_offload_connector_worker",
+                "load_part_timing",
+                **profile,
+                device_elapsed_ms=device_elapsed_ms,
+            )
+        self._pending_load_profiles = remaining_profiles
+
+    def _load_kv_layer_staging_pool(
+        self,
+        *,
+        layer: int,
+        cpu_parts: Sequence[torch.Tensor],
+        gpu_parts: Sequence[torch.Tensor],
+        mapping_profile: dict[str, Any],
+    ) -> bool:
+        if not self._can_use_staging_pool(cpu_parts, gpu_parts):
+            return False
+        pool = self._ensure_staging_pool(cpu_parts)
+        if pool is None:
+            return False
+
+        index_start_s = time.perf_counter()
+        src_ids_cpu, staging_src_ids, dst_block_ids = self._make_staging_indices(gpu_parts[0].device)
+        index_wall_ms = (time.perf_counter() - index_start_s) * 1000.0
+        if self.profile_timing or self.real_path_trace:
+            record_host_gather_event(
+                "cpu_offload_connector_worker",
+                "make_staging_indices_timing",
+                layer=int(layer),
+                wall_ms=float(index_wall_ms),
+                **mapping_profile,
+            )
+
+        try:
+            slot, slot_wait_ms = pool.acquire()
+            pack_wall_ms = pool.pack(
+                layer=layer,
+                slot=slot,
+                src_parts=cpu_parts,
+                src_ids=src_ids_cpu,
+            )
+        except Exception as exc:
+            self._log_staging_pool_fallback_once(f"staging pack failed: {type(exc).__name__}: {exc}")
+            if not self.staging_pool_config.fallback_on_error:
+                raise
+            return False
+
+        block_pairs = len(self.load_block_mapping)
+        for staging_part, gpu_part in zip(slot.parts, gpu_parts):
+            if not self._can_gather_kv_part(
+                staging_part[:block_pairs],
+                gpu_part,
+                log_fallback=self._log_staging_pool_fallback_once,
+            ):
+                if not self.staging_pool_config.fallback_on_error:
+                    raise RuntimeError("staging gather capability check failed")
+                return False
+
+        done_event = torch.npu.Event()
+        gathered = 0
+        for part_index, (staging_part, gpu_part) in enumerate(zip(slot.parts, gpu_parts)):
+            staging_span = staging_part[:block_pairs]
+            record_host_gather_event(
+                "cpu_offload_connector_worker",
+                "mapped_gather_call",
+                mode="staging_pool",
+                layer=int(layer),
+                part_index=int(part_index),
+                dtype=str(staging_span.dtype),
+                src_shape=list(staging_span.shape),
+                dst_shape=list(gpu_part.shape),
+                staging_slot=int(slot.index),
+                staging_pack_wall_ms=float(pack_wall_ms),
+                staging_slot_wait_ms=float(slot_wait_ms),
+                **mapping_profile,
+            )
+            start_event: torch.npu.Event | None = None
+            end_event: torch.npu.Event | None = None
+            if self.profile_timing:
+                start_event = torch.npu.Event(enable_timing=True)
+                end_event = torch.npu.Event(enable_timing=True)
+                start_event.record(self.load_stream)
+            enqueue_start_s = time.perf_counter()
+            self.host_gather_op(staging_src_ids, staging_span, dst_block_ids, gpu_part)
+            enqueue_wall_ms = (time.perf_counter() - enqueue_start_s) * 1000.0
+            gathered += 1
+            if self.profile_timing and start_event is not None and end_event is not None:
+                end_event.record(self.load_stream)
+                block_bytes = int(staging_span.stride(0) * staging_span.element_size())
+                self._pending_load_profiles.append(
+                    {
+                        "mode": "staging_pool",
+                        "copy_reason": "",
+                        "layer": int(layer),
+                        "part_index": int(part_index),
+                        "logical_bytes": int(block_pairs * block_bytes),
+                        "source_span_bytes": int(block_pairs * block_bytes),
+                        "block_bytes": block_bytes,
+                        "enqueue_wall_ms": float(enqueue_wall_ms),
+                        "staging_pack_wall_ms": float(pack_wall_ms),
+                        "staging_slot_wait_ms": float(slot_wait_ms),
+                        **mapping_profile,
+                        "start_event": start_event,
+                        "end_event": end_event,
+                    }
+                )
+
+        done_event.record(self.load_stream)
+        pool.mark_inflight(slot, done_event)
+        record_host_gather_event(
+            "cpu_offload_connector_worker",
+            "staging_pool_layer_enqueue_done",
+            layer=int(layer),
+            slot=int(slot.index),
+            gathered_part_count=int(gathered),
+            slot_wait_ms=float(slot_wait_ms),
+            pack_wall_ms=float(pack_wall_ms),
+            **mapping_profile,
+        )
+        return True
+
+    def _load_kv_layer_host_gather(
+        self,
+        *,
+        layer: int,
+        cpu_parts: Sequence[torch.Tensor],
+        gpu_parts: Sequence[torch.Tensor],
+        mapping_profile: dict[str, Any],
+    ) -> bool:
+        if not self.use_host_gather or self.host_gather_op is None:
+            return False
+        if len(cpu_parts) != len(gpu_parts):
+            self._log_host_gather_fallback_once("CPU/GPU KV part count mismatch")
+            return False
+        index_start_s = time.perf_counter()
+        src_min, src_max, src_block_ids, dst_block_ids = self._make_host_gather_indices(gpu_parts[0].device)
+        index_wall_ms = (time.perf_counter() - index_start_s) * 1000.0
+        if self.profile_timing or self.real_path_trace:
+            record_host_gather_event(
+                "cpu_offload_connector_worker",
+                "make_host_gather_indices_timing",
+                layer=int(layer),
+                wall_ms=float(index_wall_ms),
+                **mapping_profile,
+            )
+        cpu_spans = [cpu_part[src_min : src_max + 1] for cpu_part in cpu_parts]
+        for cpu_span, gpu_part in zip(cpu_spans, gpu_parts):
+            if not self._can_gather_kv_part(
+                cpu_span,
+                gpu_part,
+                log_fallback=self._log_host_gather_fallback_once,
+            ):
+                return False
+
+        for part_index, (cpu_span, gpu_part) in enumerate(zip(cpu_spans, gpu_parts)):
+            record_host_gather_event(
+                "cpu_offload_connector_worker",
+                "mapped_gather_call",
+                mode="mapped",
+                layer=int(layer),
+                part_index=int(part_index),
+                dtype=str(cpu_span.dtype),
+                src_shape=list(cpu_span.shape),
+                dst_shape=list(gpu_part.shape),
+                **mapping_profile,
+            )
+            start_event: torch.npu.Event | None = None
+            end_event: torch.npu.Event | None = None
+            if self.profile_timing:
+                start_event = torch.npu.Event(enable_timing=True)
+                end_event = torch.npu.Event(enable_timing=True)
+                start_event.record(self.load_stream)
+            enqueue_start_s = time.perf_counter()
+            self.host_gather_op(src_block_ids, cpu_span, dst_block_ids, gpu_part)
+            enqueue_wall_ms = (time.perf_counter() - enqueue_start_s) * 1000.0
+            if self.profile_timing and start_event is not None and end_event is not None:
+                end_event.record(self.load_stream)
+                block_bytes = int(cpu_span.stride(0) * cpu_span.element_size())
+                self._pending_load_profiles.append(
+                    {
+                        "mode": "mapped",
+                        "copy_reason": "",
+                        "layer": int(layer),
+                        "part_index": int(part_index),
+                        "logical_bytes": int(len(self.load_block_mapping) * block_bytes),
+                        "source_span_bytes": int((src_max - src_min + 1) * block_bytes),
+                        "block_bytes": block_bytes,
+                        "enqueue_wall_ms": float(enqueue_wall_ms),
+                        **mapping_profile,
+                        "start_event": start_event,
+                        "end_event": end_event,
+                    }
+                )
+        return True
+
     def register_kv_caches(self, kv_caches: dict[str, Sequence[torch.Tensor]]):
         self.gpu_kv_caches = kv_caches
         model_config = self.vllm_config.model_config
@@ -467,6 +966,15 @@ class CPUOffloadingConnectorWorker:
     def start_load_kv(self) -> None:
         self.current_layer = 0
         self.gpu_kv_caches_load_iter = iter(self.gpu_kv_caches.values())
+        self._staging_src_ids_cpu = None
+        self._staging_src_ids_npu = None
+        self._staging_dst_ids_npu = None
+        record_host_gather_event(
+            "cpu_offload_connector_worker",
+            "start_load_kv",
+            load_mapping_count=int(len(self.load_block_mapping)),
+            **self._load_mapping_profile(),
+        )
         self.load_kv_layer(0)
 
     def wait_for_layer_load(self) -> None:
@@ -483,6 +991,8 @@ class CPUOffloadingConnectorWorker:
                 len(self.load_block_mapping),
                 _elapsed_ms(started),
             )
+        if self.profile_timing:
+            self._flush_pending_load_profiles(layer=self.current_layer)
         self.current_layer += 1
         self.load_kv_layer(self.current_layer)
 
@@ -495,6 +1005,9 @@ class CPUOffloadingConnectorWorker:
         gpu_kv_caches = next(self.gpu_kv_caches_load_iter)
         cpu_kv_caches = self.cpu_kv_caches[layer]
         layer_parts = list(zip(gpu_kv_caches, cpu_kv_caches))
+        gpu_parts = tuple(gpu_layer_part for gpu_layer_part, _ in layer_parts)
+        cpu_parts = tuple(cpu_layer_part for _, cpu_layer_part in layer_parts)
+        mapping_profile = self._load_mapping_profile()
         block_spans = self.load_block_spans
         directional_block_spans = self.load_directional_block_spans
         original_copy_ops = len(self.load_block_mapping) * len(layer_parts)
@@ -504,6 +1017,79 @@ class CPUOffloadingConnectorWorker:
         copy_ops = 0
         copy_mode = "span"
         with torch.npu.stream(self.load_stream):
+            if self.real_path_trace:
+                record_host_gather_event(
+                    "cpu_offload_connector_worker",
+                    "load_layer_enqueue_start",
+                    layer=int(layer),
+                    mode=(
+                        "staging_pool"
+                        if self.use_staging_pool and self.host_gather_op is not None
+                        else "mapped"
+                        if self.use_host_gather and self.host_gather_op is not None
+                        else "copy"
+                    ),
+                    **mapping_profile,
+                )
+            if self.use_staging_pool and self.host_gather_op is not None:
+                staging_loaded = self._load_kv_layer_staging_pool(
+                    layer=layer,
+                    cpu_parts=cpu_parts,
+                    gpu_parts=gpu_parts,
+                    mapping_profile=mapping_profile,
+                )
+                if staging_loaded:
+                    if self.real_path_trace:
+                        record_host_gather_event(
+                            "cpu_offload_connector_worker",
+                            "load_layer_enqueue_end",
+                            layer=int(layer),
+                            mode="staging_pool",
+                            **mapping_profile,
+                        )
+                    if _profile_enabled():
+                        logger.info(
+                            "[cpu-offload-profile] worker_schedule_layer_load layer=%d mode=staging_pool "
+                            "load_blocks=%d spans=%d schedule_ms=%.3f",
+                            layer,
+                            len(self.load_block_mapping),
+                            len(block_spans),
+                            _elapsed_ms(started),
+                        )
+                    return
+            if self.use_host_gather and self.host_gather_op is not None:
+                mapped_loaded = self._load_kv_layer_host_gather(
+                    layer=layer,
+                    cpu_parts=cpu_parts,
+                    gpu_parts=gpu_parts,
+                    mapping_profile=mapping_profile,
+                )
+                if mapped_loaded:
+                    if self.real_path_trace:
+                        record_host_gather_event(
+                            "cpu_offload_connector_worker",
+                            "load_layer_enqueue_end",
+                            layer=int(layer),
+                            mode="mapped",
+                            **mapping_profile,
+                        )
+                    if _profile_enabled():
+                        logger.info(
+                            "[cpu-offload-profile] worker_schedule_layer_load layer=%d mode=mapped "
+                            "load_blocks=%d spans=%d schedule_ms=%.3f",
+                            layer,
+                            len(self.load_block_mapping),
+                            len(block_spans),
+                            _elapsed_ms(started),
+                        )
+                    return
+            copy_start_event: torch.npu.Event | None = None
+            copy_end_event: torch.npu.Event | None = None
+            if self.profile_timing:
+                copy_start_event = torch.npu.Event(enable_timing=True)
+                copy_end_event = torch.npu.Event(enable_timing=True)
+                copy_start_event.record(self.load_stream)
+            copy_enqueue_start_s = time.perf_counter()
             if self.use_indexed_copy and len(block_spans) > 1:
                 try:
                     cpu_indices = torch.tensor(
@@ -591,6 +1177,33 @@ class CPUOffloadingConnectorWorker:
                                 non_blocking=True,
                             )
                             copy_ops += 1
+            copy_enqueue_wall_ms = (time.perf_counter() - copy_enqueue_start_s) * 1000.0
+            if self.profile_timing and copy_start_event is not None and copy_end_event is not None:
+                copy_end_event.record(self.load_stream)
+                block_bytes = [int(part.stride(0) * part.element_size()) for part in cpu_parts]
+                self._pending_load_profiles.append(
+                    {
+                        "mode": copy_mode,
+                        "copy_reason": "main_span_copy",
+                        "layer": int(layer),
+                        "part_index": None,
+                        "logical_bytes": int(len(self.load_block_mapping) * sum(block_bytes)),
+                        "source_span_bytes": int(sum(span_len for _, _, span_len in block_spans) * sum(block_bytes)),
+                        "block_bytes": int(block_bytes[0]) if block_bytes else 0,
+                        "enqueue_wall_ms": float(copy_enqueue_wall_ms),
+                        **mapping_profile,
+                        "start_event": copy_start_event,
+                        "end_event": copy_end_event,
+                    }
+                )
+            if self.real_path_trace:
+                record_host_gather_event(
+                    "cpu_offload_connector_worker",
+                    "load_layer_enqueue_end",
+                    layer=int(layer),
+                    mode=copy_mode,
+                    **mapping_profile,
+                )
         if _profile_enabled() and self.load_block_mapping:
             logger.info(
                 "[cpu-offload-profile] worker_schedule_layer_load layer=%d mode=%s load_blocks=%d spans=%d "
