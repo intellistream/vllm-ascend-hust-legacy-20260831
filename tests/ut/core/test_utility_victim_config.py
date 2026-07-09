@@ -7,6 +7,7 @@ from vllm.config import VllmConfig
 from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 
 
+@patch("vllm.config.device.DeviceConfig.__post_init__", MagicMock())
 @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
 @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
 def test_utility_selector_config_defaults(_mock_fix):
@@ -32,6 +33,7 @@ def test_utility_selector_config_defaults(_mock_fix):
     clear_ascend_config()
 
 
+@patch("vllm.config.device.DeviceConfig.__post_init__", MagicMock())
 @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
 @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
 def test_utility_selector_config_validation(_mock_fix):

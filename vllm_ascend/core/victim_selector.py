@@ -137,6 +137,24 @@ def get_victim_selector(vllm_config) -> VictimSelector:
 
 
 # ---------------------------------------------------------------------------
+# Backward-compatible wrapper (used by patch_balance_schedule.py)
+# ---------------------------------------------------------------------------
+
+
+class UnifiedVictimSelector:
+    """Backward-compatible wrapper around :func:`get_victim_selector`.
+
+    Previously this was a concrete class; after the plugin refactor it
+    delegates to the factory which discovers and instantiates the
+    appropriate selector (plugin or no-op).
+    """
+
+    @classmethod
+    def from_vllm_config(cls, vllm_config) -> VictimSelector:
+        return get_victim_selector(vllm_config)
+
+
+# ---------------------------------------------------------------------------
 # Shared helpers (kept in vllm-ascend so schedulers don't depend on plugins)
 # ---------------------------------------------------------------------------
 

@@ -791,6 +791,13 @@ class NPUPlatform(Platform):
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(vllm_config)
             vllm_config.scheduler_config = recompute_scheduler_config
 
+            # Override scheduler policy based on utility_strategy:
+            # PE uses FCFS (default); all other strategies use PRIORITY (SJF).
+            if ascend_config.enable_utility_victim_selection:
+                _sjf_strategies = {"pe-sjf", "static-random", "largest-first", "bidkv"}
+                if ascend_config.utility_strategy in _sjf_strategies:
+                    vllm_config.scheduler_config.policy = "priority"
+
         # Extend original scheduler_config to use SchedulerDynamicBatch.
         if ascend_config.SLO_limits_for_dynamic_batch != -1:
             vllm_config.scheduler_config.scheduler_cls = (

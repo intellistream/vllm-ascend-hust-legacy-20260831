@@ -99,6 +99,9 @@ class AscendConfig:
         self.enable_utility_victim_selection = additional_config.get(
             "enable_utility_victim_selection", False
         )
+        self.utility_strategy = additional_config.get(
+            "utility_strategy", "bidkv"
+        )
         self.utility_kill_switch = additional_config.get(
             "utility_kill_switch", False
         )
@@ -130,6 +133,40 @@ class AscendConfig:
         self.utility_default_max_tokens = additional_config.get(
             "utility_default_max_tokens", 1024
         )
+
+        # Validate utility victim selector config values
+        if not isinstance(self.utility_completion_weight, (int, float)) or self.utility_completion_weight < 0:
+            raise ValueError(
+                f"utility_completion_weight must be >= 0, got {self.utility_completion_weight}"
+            )
+        if not isinstance(self.utility_preempt_weight, (int, float)) or self.utility_preempt_weight < 0:
+            raise ValueError(
+                f"utility_preempt_weight must be >= 0, got {self.utility_preempt_weight}"
+            )
+        if not isinstance(self.utility_kv_gate, (int, float)) or not (0 <= self.utility_kv_gate <= 1):
+            raise ValueError(
+                f"utility_kv_gate must be in [0, 1], got {self.utility_kv_gate}"
+            )
+        if not isinstance(self.utility_cooldown_s, (int, float)) or self.utility_cooldown_s < 0:
+            raise ValueError(
+                f"utility_cooldown_s must be >= 0, got {self.utility_cooldown_s}"
+            )
+        if not isinstance(self.utility_min_running, int) or self.utility_min_running < 1:
+            raise ValueError(
+                f"utility_min_running must be a positive integer, got {self.utility_min_running}"
+            )
+        if not isinstance(self.utility_snapshot_top_k, int) or self.utility_snapshot_top_k < 1:
+            raise ValueError(
+                f"utility_snapshot_top_k must be a positive integer, got {self.utility_snapshot_top_k}"
+            )
+        if not isinstance(self.utility_snapshot_history_size, int) or self.utility_snapshot_history_size < 1:
+            raise ValueError(
+                f"utility_snapshot_history_size must be a positive integer, got {self.utility_snapshot_history_size}"
+            )
+        if not isinstance(self.utility_default_max_tokens, int) or self.utility_default_max_tokens < 1:
+            raise ValueError(
+                f"utility_default_max_tokens must be a positive integer, got {self.utility_default_max_tokens}"
+            )
 
         # Dump / PrecisionDebugger configuration
         self.dump_config_path = self._resolve_dump_config_path(additional_config)

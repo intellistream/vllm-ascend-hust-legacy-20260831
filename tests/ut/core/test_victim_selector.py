@@ -10,6 +10,7 @@ from vllm.v1.core.sched.request_queue import SchedulingPolicy
 
 from vllm_ascend.core.victim_selector import (
     NoOpVictimSelector,
+    VictimSelector,
     get_victim_selector,
 )
 
@@ -63,10 +64,13 @@ class TestNoOpVictimSelector:
 class TestGetVictimSelector:
     """Verify the plugin discovery factory."""
 
-    def test_returns_noop_when_no_plugin(self):
+    def test_returns_noop_or_plugin(self):
+        # When a plugin (e.g. BidKV) is installed, get_victim_selector
+        # discovers and returns it.  Without a plugin installed it returns
+        # NoOpVictimSelector.  Both satisfy the VictimSelector protocol.
         config = SimpleNamespace(additional_config={})
         selector = get_victim_selector(config)
-        assert isinstance(selector, NoOpVictimSelector)
+        assert isinstance(selector, VictimSelector)
 
     def test_returns_noop_when_plugin_disabled(self):
         config = SimpleNamespace(

@@ -37,6 +37,7 @@ from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import (
+    SchedulingPolicy,
     create_request_queue,
 )
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -149,6 +150,21 @@ class RecomputeScheduler(Scheduler):
             # placeholders, graph matching may fail, forcing eager mode execution.
             if self.is_mtp_kv_consumer and (self.max_model_len >= (request.num_tokens + self.num_spec_tokens)):
                 request.spec_token_ids = [PLACEHOLDER_TOKEN_ID] * self.num_spec_tokens
+            # Set priority for SJF scheduling: shorter prompts get higher priority.
+            # Anti-starvation gate: only SJF when avg_prompt ≤ 500 (aligns with paper).
+            if self.policy == SchedulingPolicy.PRIORITY:
+                all_running_prompts = [
+                    r.num_prompt_tokens for r in self.running
+                    if hasattr(r, "num_prompt_tokens")
+                ]
+                if all_running_prompts:
+                    avg_prompt = sum(all_running_prompts) / len(all_running_prompts)
+                else:
+                    avg_prompt = request.num_prompt_tokens
+                if avg_prompt <= 300:
+                    request.priority = request.num_prompt_tokens  # SJF
+                else:
+                    request.priority = 0  # FCFS fallback to avoid starvation
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.connector is not None:
