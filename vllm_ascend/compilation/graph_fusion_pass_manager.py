@@ -61,7 +61,7 @@ class GraphFusionPassManager:
 
             self.passes.append(QKNormRopeFusionPass(config))
 
-        if self.ascend_compilation_config.get("fuse_allreduce_rms", True):
+        if self.ascend_compilation_config.get("fuse_allreduce_rms", False):
             from .passes.allreduce_rmsnorm_fusion_pass import MatmulAllReduceAddRMSNormPass
 
             self.passes.append(MatmulAllReduceAddRMSNormPass(config))
