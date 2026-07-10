@@ -230,6 +230,12 @@ else
     exit 0
 fi
 
+if [[ -n "${VLLM_ASCEND_ACLNN_CUSTOM_OPS:-}" ]]; then
+    IFS=';' read -r -a CUSTOM_OPS_ARRAY <<< "${VLLM_ASCEND_ACLNN_CUSTOM_OPS}"
+    CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
+    log "override CUSTOM_OPS from VLLM_ASCEND_ACLNN_CUSTOM_OPS=${VLLM_ASCEND_ACLNN_CUSTOM_OPS}"
+fi
+
 log_selected_ops
 
 

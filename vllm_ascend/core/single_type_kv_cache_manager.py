@@ -263,11 +263,25 @@ def get_manager_for_kv_cache_spec(
     this value matches the pool sizer and makes admission consistent with the
     block budget actually held.
     """
-    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
-
     from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 
-    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+    try:
+        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry  # type: ignore[import-not-found]
+    except ImportError:
+        from vllm.v1.core.single_type_kv_cache_manager import spec_manager_map
+
+        manager_class = spec_manager_map.get(type(kv_cache_spec))
+        if manager_class is None:
+            manager_class = next(
+                (
+                    candidate_manager
+                    for candidate_spec, candidate_manager in spec_manager_map.items()
+                    if isinstance(kv_cache_spec, candidate_spec)
+                ),
+                None,
+            )
+    else:
+        manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
     assert manager_class is not None, f"No KV cache manager registered for {type(kv_cache_spec).__name__}"
     if isinstance(kv_cache_spec, AscendMLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager

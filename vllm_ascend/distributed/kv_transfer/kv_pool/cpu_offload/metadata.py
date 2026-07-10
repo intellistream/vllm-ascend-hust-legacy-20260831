@@ -106,7 +106,7 @@ class MetadataServer:
         available_memory_gb = kv_transfer_config.get_from_extra_config(
             "cpu_swap_space_gb", MetadataServer.DEFAULT_CPU_SWAP_SPACE_GB
         )
-        self.available_memory = available_memory_gb * 1024 * 1024 * 1024
+        self.available_memory = int(float(available_memory_gb) * 1024 * 1024 * 1024)
         logger.info("cpu swap space: %s bytes", self.available_memory)
         self.ctx = zmq.Context()  # type: ignore
         self.socket = make_zmq_socket(
@@ -126,6 +126,7 @@ class MetadataServer:
 
     @staticmethod
     def _safe_create_shared_memory(name: str, size: int) -> SharedMemory:
+        size = int(size)
         try:
             existing_shm = SharedMemory(name=name, create=False)
             existing_shm.close()
@@ -166,7 +167,7 @@ class MetadataServer:
             available_memory //= len(kv_cache_specs)
             num_blocks = available_memory // layer.page_size_bytes
             layer_size = (2, num_blocks, layer.block_size, layer.num_kv_heads, layer.head_size)  # type: ignore
-        nbytes = math.prod(layer_size) * get_dtype_size(layer.dtype)
+        nbytes = int(math.prod(layer_size) * get_dtype_size(layer.dtype))
         for layer_name in kv_cache_specs:
             # only this format can share during ZeroMQ+pickle
             shared_memory_dict[layer_name] = MetadataServer._safe_create_shared_memory(

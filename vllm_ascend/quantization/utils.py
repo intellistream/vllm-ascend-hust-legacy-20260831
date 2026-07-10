@@ -109,7 +109,10 @@ def detect_quantization_method(model: str, revision: str | None = None) -> str |
         ``"compressed-tensors"`` for LLM-Compressor models,
         or ``None`` if no quantization signature is found.
     """
-    from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
+    try:
+        from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
+    except ImportError:
+        MODELSLIM_CONFIG_FILENAME = "quant_model_description.json"
 
     # Case 1: ModelSlim — look for quant_model_description.json
     modelslim_path = get_model_file(model, MODELSLIM_CONFIG_FILENAME, revision=revision)

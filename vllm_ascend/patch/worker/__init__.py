@@ -21,23 +21,29 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p, vllm_version_is
 
-# The v2 model runner is intentionally NOT made compatible with the v0.23.0
-# release. vLLM v0.23.0 and the verified main commit are diverged, and the v2
-# worker patches target main-only APIs; rather than maintain a separate v0.23.0
-# compatibility path we keep v2 main-only. With v0.23.0 installed this flag is
-# False, so none of the patch_v2.* / routed-experts-capture patches below are
-# imported and the v2 worker stays dormant (the release uses the v1 runner).
-if vllm_version_is("0.23.0"):
-    _V2_MODEL_RUNNER_SUPPORTED = False
-else:
-    _V2_MODEL_RUNNER_SUPPORTED = True
+def _v2_model_runner_supported() -> bool:
+    # The v2 patches target a moving vLLM main API. Gate them on the concrete
+    # symbols they need so v1 Qwen serving is not blocked by unrelated v2 drift.
+    if vllm_version_is("0.23.0"):
+        return False
+    try:
+        module = importlib.import_module("vllm.v1.worker.gpu.model_states.interface")
+    except ImportError:
+        return False
+    return hasattr(module, "ModelSpecificAttnMetadata")
 
 
-def _import_optional_patch(module_name: str) -> None:
+_V2_MODEL_RUNNER_SUPPORTED = _v2_model_runner_supported()
+
+
+def _import_optional_patch(module_name: str, ignored_missing: set[str] | None = None) -> None:
+    ignored = {module_name, "torchvision"}
+    if ignored_missing:
+        ignored.update(ignored_missing)
     try:
         importlib.import_module(module_name)
     except ModuleNotFoundError as exc:
-        if exc.name not in {module_name, "torchvision"}:
+        if exc.name not in ignored:
             raise
 
 if HAS_TRITON:
@@ -50,12 +56,18 @@ if HAS_TRITON:
 import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
-import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
+_import_optional_patch(
+    "vllm_ascend.patch.worker.patch_minimax_m2_linear_attn",
+    ignored_missing={"vllm.model_executor.layers.minimax_rms_norm"},
+)
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 
 if not is_310p():
-    _import_optional_patch("vllm_ascend.patch.worker.patch_qwen3_5")
+    _import_optional_patch(
+        "vllm_ascend.patch.worker.patch_qwen3_5",
+        ignored_missing={"vllm.model_executor.layers.mamba.gdn"},
+    )
     _import_optional_patch("vllm_ascend.patch.worker.patch_gdn_attn")
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa

@@ -10,10 +10,14 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, SlidingWindowMLASpec
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+try:
+    from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+except ImportError:
+    KVCacheSpecRegistry = None  # type: ignore[assignment]
 
 
 def _get_c8_k_cache_dtype() -> torch.dtype:
@@ -247,13 +251,20 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
 
 def register_ascend_kv_cache_specs() -> None:
-    KVCacheSpecRegistry.register(
-        kvcache_spec_cls=AscendMLAAttentionSpec,
-        manager_class=CompressAttentionManager,
-        uniform_type_base_spec=FullAttentionSpec,
-    )
-    KVCacheSpecRegistry.register(
-        kvcache_spec_cls=AscendSlidingWindowMLASpec,
-        manager_class=SlidingWindowManager,
-        uniform_type_base_spec=SlidingWindowMLASpec,
-    )
+    if KVCacheSpecRegistry is not None:
+        KVCacheSpecRegistry.register(
+            kvcache_spec_cls=AscendMLAAttentionSpec,
+            manager_class=CompressAttentionManager,
+            uniform_type_base_spec=FullAttentionSpec,
+        )
+        KVCacheSpecRegistry.register(
+            kvcache_spec_cls=AscendSlidingWindowMLASpec,
+            manager_class=SlidingWindowManager,
+            uniform_type_base_spec=SlidingWindowMLASpec,
+        )
+        return
+
+    from vllm.v1.core.single_type_kv_cache_manager import spec_manager_map
+
+    spec_manager_map[AscendMLAAttentionSpec] = CompressAttentionManager
+    spec_manager_map[AscendSlidingWindowMLASpec] = SlidingWindowManager

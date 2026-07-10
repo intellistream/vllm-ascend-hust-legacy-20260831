@@ -650,7 +650,10 @@ class cmake_build_ext(build_ext):
     def run(self):
         if envs.COMPILE_CUSTOM_KERNELS:
             # First, ensure ACLNN custom-ops is built and installed.
-            self.run_command("build_aclnn")
+            if os.environ.get("VLLM_ASCEND_SKIP_BUILD_ACLNN") == "1":
+                print("Skipping build_aclnn because VLLM_ASCEND_SKIP_BUILD_ACLNN=1")
+            else:
+                self.run_command("build_aclnn")
 
         # Then, run the standard build_ext command to compile the extensions
         super().run()

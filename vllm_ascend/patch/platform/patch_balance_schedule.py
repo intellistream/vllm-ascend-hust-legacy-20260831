@@ -1,4 +1,5 @@
 # mypy: ignore-errors
+import inspect
 import os
 import signal
 import time
@@ -92,7 +93,9 @@ class BalanceScheduler(Scheduler):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         if not self._balance_enabled:
-            return super().schedule(throttle_prefills)
+            if "throttle_prefills" in inspect.signature(super().schedule).parameters:
+                return super().schedule(throttle_prefills)
+            return super().schedule()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and

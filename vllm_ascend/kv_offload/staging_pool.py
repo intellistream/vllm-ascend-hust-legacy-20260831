@@ -38,6 +38,7 @@ class StagingPoolConfig:
 class StagingSlot:
     index: int
     parts: list[torch.Tensor]
+    registration_tensors: list[torch.Tensor]
     event: torch.npu.Event | None = None
     uses: int = 0
 
@@ -250,15 +251,12 @@ class WorkerLocalStagingPool:
         self.slots: list[StagingSlot] = []
         self._closed = False
 
-        for slot_idx in range(max(1, int(config.slots))):
-            parts = []
-            for shape in part_shapes:
-                if len(shape) < 1:
-                    raise ValueError(f"invalid KV part shape for staging: {shape}")
-                slab_blocks = max(1, int(config.slab_blocks))
-                staging_shape = (slab_blocks, *tuple(int(dim) for dim in shape[1:]))
-                parts.append(torch.empty(staging_shape, dtype=dtype, device="cpu"))
-            self.slots.append(StagingSlot(index=slot_idx, parts=parts))
+        self.slots = self._allocate_slots(
+            slot_count=max(1, int(config.slots)),
+            part_shapes=part_shapes,
+            slab_blocks=max(1, int(config.slab_blocks)),
+            dtype=dtype,
+        )
 
         self.packer = self._make_packer(config)
         self.register_stats = self._register_all()
@@ -368,9 +366,9 @@ class WorkerLocalStagingPool:
         misses = 0
         elapsed_us = 0
         for slot in self.slots:
-            for part in slot.parts:
-                part.zero_()
-                stats = op(part)
+            for tensor in slot.registration_tensors:
+                tensor.zero_()
+                stats = op(tensor)
                 register_bytes += int(stats.get("register_bytes", 0))
                 requested_bytes += int(stats.get("requested_bytes", 0))
                 hit = int(stats.get("mapping_hit", 0))
@@ -395,6 +393,54 @@ class WorkerLocalStagingPool:
         if config.pack_backend == "cpp_pool":
             return _CppStagingPacker(config.build_dir, config.pack_threads, persistent=True)
         raise ValueError(f"unsupported staging pack backend: {config.pack_backend}")
+
+    @staticmethod
+    def _allocate_slots(
+        *,
+        slot_count: int,
+        part_shapes: Sequence[Sequence[int]],
+        slab_blocks: int,
+        dtype: torch.dtype,
+    ) -> list[StagingSlot]:
+        normalized_shapes = [tuple(int(dim) for dim in shape) for shape in part_shapes]
+        for shape in normalized_shapes:
+            if len(shape) < 1:
+                raise ValueError(f"invalid KV part shape for staging: {shape}")
+
+        tails = [shape[1:] for shape in normalized_shapes]
+        if len(tails) > 1 and all(tail == tails[0] for tail in tails):
+            part_count = len(tails)
+            arena_shape = (slot_count * part_count * slab_blocks, *tails[0])
+            arena = torch.empty(arena_shape, dtype=dtype, device="cpu")
+            slots = []
+            for slot_idx in range(slot_count):
+                parts = []
+                for part_idx in range(part_count):
+                    start = (slot_idx * part_count + part_idx) * slab_blocks
+                    parts.append(arena[start : start + slab_blocks])
+                slots.append(
+                    StagingSlot(
+                        index=slot_idx,
+                        parts=parts,
+                        registration_tensors=[arena] if slot_idx == 0 else [],
+                    )
+                )
+            return slots
+
+        slots = []
+        for slot_idx in range(slot_count):
+            parts = []
+            for shape in normalized_shapes:
+                staging_shape = (slab_blocks, *shape[1:])
+                parts.append(torch.empty(staging_shape, dtype=dtype, device="cpu"))
+            slots.append(
+                StagingSlot(
+                    index=slot_idx,
+                    parts=parts,
+                    registration_tensors=parts,
+                )
+            )
+        return slots
 
 
 def _register_mapping_op() -> Any:

@@ -18,6 +18,7 @@
 #
 
 import gc
+import inspect
 import logging
 import math
 import sys
@@ -66,13 +67,16 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
-    HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+try:
+    from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+except ImportError:
+    HiddenStateCacheSpec = AttentionSpec
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -80,11 +84,19 @@ from vllm.v1.outputs import (
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
-    RoutedExpertsLists,
-    RoutedExpertsTensors,
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
+try:
+    from vllm.v1.outputs import RoutedExpertsLists, RoutedExpertsTensors
+except ImportError:
+    class RoutedExpertsLists(NamedTuple):
+        routing_data: np.ndarray
+        slot_mapping: np.ndarray
+
+    class RoutedExpertsTensors(NamedTuple):
+        routing_data: torch.Tensor
+        slot_mapping: torch.Tensor
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID, RejectionSampler
@@ -2568,18 +2580,20 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config is not None:
                 self.finalize_kv_connector()
 
-        model_runner_output = ModelRunnerOutput(
-            req_ids=req_ids_output_copy,
-            req_id_to_index=req_id_to_index_output_copy,
-            sampled_token_ids=valid_sampled_token_ids,
-            logprobs=logprobs_lists,
-            prompt_logprobs_dict=prompt_logprobs_dict,
-            kv_connector_output=kv_connector_output,
-            pooler_output=[],
-            ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
-            cudagraph_stats=cudagraph_stats,
-            routed_experts=None,
-        )
+        model_runner_output_kwargs = {
+            "req_ids": req_ids_output_copy,
+            "req_id_to_index": req_id_to_index_output_copy,
+            "sampled_token_ids": valid_sampled_token_ids,
+            "logprobs": logprobs_lists,
+            "prompt_logprobs_dict": prompt_logprobs_dict,
+            "kv_connector_output": kv_connector_output,
+            "pooler_output": [],
+            "ec_connector_output": ec_connector_output if self.supports_mm_inputs else None,
+            "cudagraph_stats": cudagraph_stats,
+        }
+        if "routed_experts" in getattr(ModelRunnerOutput, "__dataclass_fields__", {}):
+            model_runner_output_kwargs["routed_experts"] = None
+        model_runner_output = ModelRunnerOutput(**model_runner_output_kwargs)
         if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
             self._sync_device()
             model_runner_output.execution_time_ms = (time.perf_counter() - self._execution_start_time) * 1000.0
@@ -2611,10 +2625,11 @@ class NPUModelRunner(GPUModelRunner):
                 # synchronized by ``_to_list``'s event.synchronize(), so
                 # the pinned buffers are ready to be wrapped as numpy.
                 total = scheduler_output.total_num_scheduled_tokens
-                model_runner_output.routed_experts = RoutedExpertsLists(
-                    routing_data=self.routed_experts_cpu[:total].numpy(),
-                    slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
-                )
+                if hasattr(model_runner_output, "routed_experts"):
+                    model_runner_output.routed_experts = RoutedExpertsLists(
+                        routing_data=self.routed_experts_cpu[:total].numpy(),
+                        slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
+                    )
             return model_runner_output
 
         # Async path: produce a device-side snapshot that the async
@@ -2639,15 +2654,17 @@ class NPUModelRunner(GPUModelRunner):
                     :total
                 ].clone(),
             )
-        async_output = AsyncGPUModelRunnerOutput(
-            model_runner_output=model_runner_output,
-            sampled_token_ids=sampler_output.sampled_token_ids,
-            logprobs_tensors=sampler_output.logprobs_tensors,
-            invalid_req_indices=invalid_req_indices,
-            async_output_copy_stream=self.async_output_copy_stream,
-            vocab_size=self.input_batch.vocab_size,
-            routed_experts=routed_experts_snapshot,
-        )
+        async_output_kwargs = {
+            "model_runner_output": model_runner_output,
+            "sampled_token_ids": sampler_output.sampled_token_ids,
+            "logprobs_tensors": sampler_output.logprobs_tensors,
+            "invalid_req_indices": invalid_req_indices,
+            "async_output_copy_stream": self.async_output_copy_stream,
+            "vocab_size": self.input_batch.vocab_size,
+        }
+        if "routed_experts" in inspect.signature(AsyncGPUModelRunnerOutput.__init__).parameters:
+            async_output_kwargs["routed_experts"] = routed_experts_snapshot
+        async_output = AsyncGPUModelRunnerOutput(**async_output_kwargs)
         self.input_batch.set_async_sampled_token_ids(
             async_output.sampled_token_ids_cpu,
             async_output.async_copy_ready_event,

@@ -1,3 +1,11 @@
+add_op_to_compiled_list()
+
+if (BUILD_OPEN_PROJECT)
+    target_sources(op_host_aclnn PRIVATE
+        kv_cache_block_gather_def.cpp
+    )
+endif()
+
 add_ops_compile_options(
     OP_NAME KvCacheBlockGather
     OPTIONS --cce-auto-sync=off
@@ -6,26 +14,10 @@ add_ops_compile_options(
             --op_relocatable_kernel_binary=true
 )
 
-target_sources(op_host_aclnn PRIVATE
-    kv_cache_block_gather_def.cpp
-)
-
-target_sources(optiling PRIVATE
-    kv_cache_block_gather_tiling.cpp
-)
-
-if (NOT BUILD_OPEN_PROJECT)
-    target_sources(opmaster_ct PRIVATE
-        kv_cache_block_gather_tiling.cpp
+if (NOT BUILD_OPS_RTY_KERNEL)
+    add_modules_sources(OPTYPE kv_cache_block_gather ACLNNTYPE aclnn)
+    target_include_directories(${OPHOST_NAME}_tiling_obj PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel
     )
-endif ()
-
-target_sources(opsproto PRIVATE
-    kv_cache_block_gather_infershape.cpp
-    kv_cache_block_gather_graph_plugin.cpp
-)
-
-target_include_directories(optiling PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel
-)
+endif()

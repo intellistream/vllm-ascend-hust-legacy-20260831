@@ -263,6 +263,24 @@ class CPUOffloadingConnectorScheduler:
         num_cpu_computed_tokens, load_async = self.zmq_rpc_client.call("get_matched_num_and_touch", request)
         self.num_gpu_computed_tokens[request.request_id] = num_computed_tokens
         self.num_cpu_computed_tokens[request.request_id] = num_cpu_computed_tokens
+        returned_tokens = (
+            num_cpu_computed_tokens - num_computed_tokens
+            if num_cpu_computed_tokens - num_computed_tokens >= self.swap_in_threshold
+            else 0
+        )
+        if ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_REAL_PATH_TRACE:
+            record_host_gather_event(
+                "cpu_offload_connector_scheduler",
+                "scheduler_match",
+                req_id=request.request_id,
+                gpu_computed_tokens=int(num_computed_tokens),
+                cpu_computed_tokens=int(num_cpu_computed_tokens),
+                delta_tokens=int(num_cpu_computed_tokens - num_computed_tokens),
+                returned_tokens=int(returned_tokens),
+                swap_in_threshold=int(self.swap_in_threshold),
+                load_async=bool(load_async),
+                wall_ms=_elapsed_ms(started),
+            )
         if _profile_enabled():
             logger.info(
                 "[cpu-offload-profile] scheduler_match req=%s gpu_tokens=%s cpu_tokens=%s delta=%s wall_ms=%.3f",
@@ -272,8 +290,8 @@ class CPUOffloadingConnectorScheduler:
                 num_cpu_computed_tokens - num_computed_tokens,
                 _elapsed_ms(started),
             )
-        if num_cpu_computed_tokens - num_computed_tokens >= self.swap_in_threshold:
-            return num_cpu_computed_tokens - num_computed_tokens, load_async
+        if returned_tokens:
+            return returned_tokens, load_async
         else:
             return 0, load_async
 
@@ -336,6 +354,18 @@ class CPUOffloadingConnectorScheduler:
                 block_count,
                 _elapsed_ms(started),
             )
+        if ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_REAL_PATH_TRACE:
+            block_count = sum(len(req.cpu_block_ids) for req in metadata.requests.values())
+            record_host_gather_event(
+                "cpu_offload_connector_scheduler",
+                "scheduler_build_meta",
+                request_count=int(len(metadata.requests)),
+                finished_count=int(len(metadata.finished_req_ids)),
+                cpu_block_count=int(block_count),
+                scheduled_new_count=int(len(scheduler_output.scheduled_new_reqs)),
+                scheduled_cached_count=int(len(cached_reqs.req_ids)),
+                wall_ms=_elapsed_ms(started),
+            )
         return metadata
 
     def request_finished(self, ori_request: "Request"):
@@ -351,6 +381,14 @@ class CPUOffloadingConnectorScheduler:
                 "[cpu-offload-profile] scheduler_request_finished req=%s wall_ms=%.3f",
                 request.request_id,
                 _elapsed_ms(started),
+            )
+        if ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_REAL_PATH_TRACE:
+            record_host_gather_event(
+                "cpu_offload_connector_scheduler",
+                "scheduler_request_finished",
+                req_id=request.request_id,
+                num_tokens=int(request.num_tokens),
+                wall_ms=_elapsed_ms(started),
             )
 
 
@@ -400,12 +438,24 @@ class CPUOffloadingConnectorWorker:
         self._staging_src_ids_cpu: torch.Tensor | None = None
         self._staging_src_ids_npu: torch.Tensor | None = None
         self._staging_dst_ids_npu: torch.Tensor | None = None
+        self.current_layer = 0
         self._shutdown_done = False
         if self.use_host_gather or self.use_staging_pool:
-            host_gather_lib = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_LIB
-            if host_gather_lib:
-                torch.ops.load_library(host_gather_lib)
-            else:
+            if not hasattr(torch.ops._C_ascend, "kv_cache_block_gather"):
+                host_gather_lib = ascend_envs.VLLM_ASCEND_CPU_OFFLOAD_HOST_GATHER_LIB
+                if host_gather_lib:
+                    torch.ops.load_library(host_gather_lib)
+                else:
+                    try:
+                        import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+                    except Exception as exc:
+                        logger.warning(
+                            "CPU offload host gather/staging is enabled, but "
+                            "vllm_ascend_C could not be imported before checking "
+                            "kv_cache_block_gather: %s",
+                            exc,
+                        )
+            if not hasattr(torch.ops._C_ascend, "kv_cache_block_gather"):
                 try:
                     import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
                 except Exception as exc:
@@ -519,6 +569,17 @@ class CPUOffloadingConnectorWorker:
             if req_id in self.requests:
                 self.save_input_queue.put((req_id, self.requests[req_id]))
                 save_reqs += 1
+        if self.real_path_trace:
+            record_host_gather_event(
+                "cpu_offload_connector_worker",
+                "worker_bind",
+                request_count=int(len(connector_metadata.requests)),
+                finished_count=int(len(connector_metadata.finished_req_ids)),
+                load_blocks_added=int(added_load_blocks),
+                pending_load_blocks=int(len(self.load_block_mapping)),
+                save_reqs=int(save_reqs),
+                wall_ms=_elapsed_ms(started),
+            )
         if _profile_enabled():
             logger.info(
                 "[cpu-offload-profile] worker_bind requests=%d finished=%d load_blocks_added=%d pending_load_blocks=%d save_reqs=%d wall_ms=%.3f",
@@ -567,6 +628,11 @@ class CPUOffloadingConnectorWorker:
         if not self.load_block_mapping:
             return {
                 "block_pairs": 0,
+                "copy_run_count": 0,
+                "copy_run_ratio": None,
+                "copy_single_block_run_count": 0,
+                "copy_contiguous_run_count": 0,
+                "copy_max_run_len": 0,
                 "src_min": None,
                 "src_max": None,
                 "src_span_blocks": 0,
@@ -597,6 +663,11 @@ class CPUOffloadingConnectorWorker:
         src_unique = sorted(set(src_ids))
         dst_unique = sorted(set(dst_ids))
         block_pairs = len(self.load_block_mapping)
+        copy_spans = _coalesce_block_copy_spans(self.load_block_mapping)
+        copy_run_count = len(copy_spans)
+        copy_single_block_run_count = sum(1 for _, _, span_len in copy_spans if span_len == 1)
+        copy_contiguous_run_count = copy_run_count - copy_single_block_run_count
+        copy_max_run_len = max((span_len for _, _, span_len in copy_spans), default=0)
         src_min = min(src_ids)
         src_max = max(src_ids)
         dst_min = min(dst_ids)
@@ -610,6 +681,11 @@ class CPUOffloadingConnectorWorker:
         dst_dense = len(dst_unique) == dst_span_blocks and len(dst_unique) == block_pairs
         return {
             "block_pairs": int(block_pairs),
+            "copy_run_count": int(copy_run_count),
+            "copy_run_ratio": float(copy_run_count) / float(block_pairs) if block_pairs else None,
+            "copy_single_block_run_count": int(copy_single_block_run_count),
+            "copy_contiguous_run_count": int(copy_contiguous_run_count),
+            "copy_max_run_len": int(copy_max_run_len),
             "src_min": int(src_min),
             "src_max": int(src_max),
             "src_span_blocks": int(src_span_blocks),
@@ -1244,6 +1320,10 @@ class CPUOffloadingConnectorWorker:
         for id in done_sending:
             del self.requests[id]
         if self.tp_world_size == 1:
+            # In single-TP runs there is no rank-0 aggregation path below, so
+            # finalize the CPU cache metadata here.  Without this, saved CPU KV
+            # pages are written to shm but never become prefix-cache entries.
+            self._sending_finished(done_sending)
             return done_sending
         if self.tp_rank == 0:
             for req_id in done_sending:
@@ -1274,6 +1354,13 @@ class CPUOffloadingConnectorWorker:
             started = time.perf_counter()
             logger.debug("call cache_and_free_slots for req_id: %s", req_id)
             self.zmq_rpc_client.call("cache_and_free_slots", req_id)
+            if self.real_path_trace:
+                record_host_gather_event(
+                    "cpu_offload_connector_worker",
+                    "worker_cache_and_free",
+                    req_id=req_id,
+                    wall_ms=_elapsed_ms(started),
+                )
             if _profile_enabled():
                 logger.info(
                     "[cpu-offload-profile] worker_cache_and_free req=%s wall_ms=%.3f",
@@ -1409,6 +1496,31 @@ class CPUOffloadingConnectorWorker:
                     len(req.gpu_block_ids),
                     len(req.cpu_block_ids),
                 )
+        if self.real_path_trace:
+            record_host_gather_event(
+                "cpu_offload_connector_worker",
+                "worker_save",
+                req_id=req_id,
+                save_start_block=int(save_start_block),
+                save_end_block=int(save_end_block),
+                save_blocks=int(len(save_block_mapping)),
+                rank_save_blocks=int(len(rank_save_block_mapping)),
+                spans=int(len(block_spans)),
+                cpu_adjacent_pairs=int(cpu_adjacent),
+                gpu_adjacent_pairs=int(gpu_adjacent),
+                contiguous_blocks=int(contiguous_blocks),
+                reverse_blocks=int(reverse_blocks),
+                fallback_blocks=int(fallback_blocks),
+                copy_ops=int(copy_ops),
+                original_copy_ops=int(original_copy_ops),
+                copy_ops_saved=int(original_copy_ops - copy_ops),
+                cpu_tokens=int(req.num_cpu_computed_tokens),
+                computed_tokens=int(req.num_computed_tokens),
+                scheduled_tokens=int(req.num_scheduled_tokens),
+                gpu_blocks=int(len(req.gpu_block_ids)),
+                cpu_blocks=int(len(req.cpu_block_ids)),
+                wall_ms=_elapsed_ms(started),
+            )
         self.save_output_queue.put(req_id)
 
 

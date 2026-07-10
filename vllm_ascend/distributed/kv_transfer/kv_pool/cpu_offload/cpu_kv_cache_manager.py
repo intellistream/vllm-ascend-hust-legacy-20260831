@@ -1,3 +1,4 @@
+import inspect
 import time
 from collections import defaultdict
 
@@ -78,7 +79,6 @@ class CPUKVCacheManager:
             enable_caching=True,
             kv_cache_group_id=0,
         )
-        manager_kwargs["scheduler_block_size"] = kv_cache_spec.block_size
         self.single_type_manager = get_manager_for_kv_cache_spec(**manager_kwargs)
         # Record kv block hashes, avoid redundant computation.
         self.req_to_block_hashes: defaultdict[str, list[BlockHash]] = defaultdict(list)
@@ -103,14 +103,20 @@ class CPUKVCacheManager:
             block_hashes = request.block_hashes
             self.req_to_block_hashes[request_id] = block_hashes
         max_cache_hit_length = request.num_tokens - 1
-        eagle_kwarg = {"drop_eagle_block": self.use_eagle}
-        computed_blocks = self.single_type_manager.find_longest_cache_hit(
+        find_cache_hit = self.single_type_manager.find_longest_cache_hit
+        find_cache_hit_params = inspect.signature(find_cache_hit).parameters
+        eagle_kwarg_name = (
+            "drop_eagle_block"
+            if "drop_eagle_block" in find_cache_hit_params
+            else "use_eagle"
+        )
+        computed_blocks = find_cache_hit(
             block_hashes=block_hashes,
             max_length=max_cache_hit_length,
             kv_cache_group_ids=[0],
             block_pool=self.block_pool,
             kv_cache_spec=self.single_type_manager.kv_cache_spec,
-            **eagle_kwarg,
+            **{eagle_kwarg_name: self.use_eagle},
             alignment_tokens=self.block_size,
         )
         num_computed_tokens = len(computed_blocks[0]) * self.block_size

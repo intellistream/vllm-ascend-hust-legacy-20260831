@@ -711,9 +711,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendSiluAndMul,
         AscendSiluAndMulWithClamp,
     )
-    from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
     from vllm_ascend.ops.conv import AscendConv3dLayer
-    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -738,6 +736,25 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         AscendParallelLMHead,
         AscendVocabParallelEmbedding,
     )
+
+    try:
+        from vllm_ascend.ops.bailing_moe_linear_attn import AscendBailingMoELinearAttention
+    except ImportError as exc:
+        logger.warning(
+            "Skipping Ascend Bailing MoE linear attention custom op registration "
+            "because an optional upstream dependency is unavailable: %s",
+            exc,
+        )
+        AscendBailingMoELinearAttention = None
+    try:
+        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+    except ImportError as exc:
+        logger.warning(
+            "Skipping Ascend GatedDeltaNet custom op registration because an "
+            "optional upstream dependency is unavailable: %s",
+            exc,
+        )
+        AscendGatedDeltaNetAttention = None
 
     is_moe_model = bool(
         vllm_config is not None
@@ -771,9 +788,11 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "Conv3dLayer": AscendConv3dLayer,
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
-        "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
-        "BailingMoELinearAttention": AscendBailingMoELinearAttention,
     }
+    if AscendBailingMoELinearAttention is not None:
+        REGISTERED_ASCEND_OPS["BailingMoELinearAttention"] = AscendBailingMoELinearAttention
+    if AscendGatedDeltaNetAttention is not None:
+        REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
     if vllm_version_is("0.23.0"):
         from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
 
@@ -1767,7 +1786,10 @@ def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
 
 def is_hidden_state_cache_spec(spec) -> bool:
     """Whether ``spec`` marks an ``extract_hidden_states`` cache-only layer."""
-    from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+    try:
+        from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+    except ImportError:
+        return False
 
     return isinstance(spec, HiddenStateCacheSpec)
 
