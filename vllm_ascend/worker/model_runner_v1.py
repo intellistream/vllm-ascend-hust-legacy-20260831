@@ -253,6 +253,23 @@ def _segment_reuse_tensor_summary(tensor) -> dict[str, Any] | None:
         }
 
 
+def _segment_reuse_hidden_summary(hidden_states) -> dict[str, Any] | None:
+    if hidden_states is None:
+        return None
+    tensor_summary = _segment_reuse_tensor_summary(hidden_states)
+    if tensor_summary is not None and "summary_error" not in tensor_summary:
+        return tensor_summary
+    if isinstance(hidden_states, IntermediateTensors):
+        return {
+            "type": type(hidden_states).__name__,
+            "keys": sorted(str(key) for key in hidden_states.tensors.keys()),
+        }
+    return {
+        "type": type(hidden_states).__name__,
+        "tensor_summary": tensor_summary,
+    }
+
+
 def _segment_reuse_lm_head_weight(model) -> torch.Tensor | None:
     candidates = [
         model,
@@ -1546,6 +1563,132 @@ class NPUModelRunner(GPUModelRunner):
             )
             token_offset += num_tokens
 
+    def _segment_reuse_terminal_replay_trace_plans(
+        self,
+        *,
+        num_reqs: int,
+        num_scheduled_tokens: np.ndarray,
+    ) -> list[dict[str, Any]]:
+        query_start_loc_cpu = [
+            int(x) for x in self.query_start_loc.cpu[: num_reqs + 1].tolist()
+        ]
+        plans = []
+        for req_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            req_state = self.requests.get(req_id)
+            plan = None
+            boundary = None
+            if req_state is not None:
+                plan = req_state.runner_extensions.get("segment_reuse")
+                boundary = req_state.runner_extensions.get("segment_reuse_boundary")
+            if not (
+                isinstance(plan, dict)
+                and plan.get("scheduler_phase") == "terminal_replay"
+            ):
+                continue
+            if not isinstance(boundary, dict):
+                boundary = {}
+            replay = plan.get("terminal_replay")
+            plans.append(
+                {
+                    "req_id": str(req_id),
+                    "req_idx": int(req_idx),
+                    "scheduled_tokens": int(num_scheduled_tokens[req_idx]),
+                    "query_start": int(query_start_loc_cpu[req_idx]),
+                    "query_end": int(query_start_loc_cpu[req_idx + 1]),
+                    "plan_kind": plan.get("kind"),
+                    "scheduler_phase": plan.get("scheduler_phase"),
+                    "terminal_compute_strategy": plan.get(
+                        "terminal_compute_strategy"
+                    ),
+                    "terminal_logits_source": plan.get("terminal_logits_source"),
+                    "body_tail_start_token": int(
+                        plan.get("body_tail_start_token", 0) or 0
+                    ),
+                    "body_tail_tokens": int(plan.get("body_tail_tokens", 0) or 0),
+                    "body_reused_tokens": int(
+                        plan.get("body_reused_tokens", 0) or 0
+                    ),
+                    "boundary_envelope_tokens": int(
+                        boundary.get("envelope_token_count", 0) or 0
+                    ),
+                    "terminal_replay": replay if isinstance(replay, dict) else None,
+                }
+            )
+        return plans
+
+    def _trace_segment_reuse_model_forward_inputs(
+        self,
+        *,
+        num_reqs: int,
+        num_scheduled_tokens: np.ndarray,
+        num_tokens_padded: int,
+        total_num_scheduled_tokens: int,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        inputs_embeds: torch.Tensor | None,
+    ) -> None:
+        if not os.environ.get("VLLM_SEGMENT_REUSE_DIAGNOSTICS_FILE"):
+            return
+        if not self._segment_reuse_has_terminal_replay(
+            num_reqs, num_scheduled_tokens
+        ):
+            return
+        plans = self._segment_reuse_terminal_replay_trace_plans(
+            num_reqs=num_reqs,
+            num_scheduled_tokens=num_scheduled_tokens,
+        )
+        if not plans:
+            return
+        query_start_loc_cpu = [
+            int(x) for x in self.query_start_loc.cpu[: num_reqs + 1].tolist()
+        ]
+        _segment_reuse_trace_event(
+            "ascend_runner_terminal_replay_model_forward_inputs",
+            num_reqs=int(num_reqs),
+            num_tokens_padded=int(num_tokens_padded),
+            total_num_scheduled_tokens=int(total_num_scheduled_tokens),
+            query_start_loc=query_start_loc_cpu,
+            input_ids_head=_segment_reuse_tensor_head(
+                input_ids[:total_num_scheduled_tokens]
+            ),
+            input_ids_summary=_segment_reuse_tensor_summary(
+                input_ids[:total_num_scheduled_tokens]
+            ),
+            positions_head=_segment_reuse_tensor_head(
+                positions[:total_num_scheduled_tokens]
+            ),
+            positions_summary=_segment_reuse_tensor_summary(
+                positions[:total_num_scheduled_tokens]
+            ),
+            inputs_embeds_summary=_segment_reuse_tensor_summary(inputs_embeds),
+            plans=plans,
+        )
+
+    def _trace_segment_reuse_model_forward_outputs(
+        self,
+        *,
+        num_reqs: int,
+        num_scheduled_tokens: np.ndarray,
+        hidden_states,
+    ) -> None:
+        if not os.environ.get("VLLM_SEGMENT_REUSE_DIAGNOSTICS_FILE"):
+            return
+        if not self._segment_reuse_has_terminal_replay(
+            num_reqs, num_scheduled_tokens
+        ):
+            return
+        plans = self._segment_reuse_terminal_replay_trace_plans(
+            num_reqs=num_reqs,
+            num_scheduled_tokens=num_scheduled_tokens,
+        )
+        if not plans:
+            return
+        _segment_reuse_trace_event(
+            "ascend_runner_terminal_replay_model_forward_outputs",
+            hidden_states_summary=_segment_reuse_hidden_summary(hidden_states),
+            plans=plans,
+        )
+
     def _trace_segment_reuse_logits_indices(
         self,
         *,
@@ -2754,8 +2897,24 @@ class NPUModelRunner(GPUModelRunner):
         ):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            self._trace_segment_reuse_model_forward_inputs(
+                num_reqs=num_reqs,
+                num_scheduled_tokens=num_scheduled_tokens_np,
+                num_tokens_padded=num_tokens_padded,
+                total_num_scheduled_tokens=(
+                    scheduler_output.total_num_scheduled_tokens
+                ),
+                input_ids=input_ids,
+                positions=positions,
+                inputs_embeds=inputs_embeds,
+            )
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+            )
+            self._trace_segment_reuse_model_forward_outputs(
+                num_reqs=num_reqs,
+                num_scheduled_tokens=num_scheduled_tokens_np,
+                hidden_states=hidden_states,
             )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None

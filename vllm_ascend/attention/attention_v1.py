@@ -133,6 +133,15 @@ def _segment_reuse_tensor_abs_sum(tensor: torch.Tensor | None) -> float | None:
         return None
 
 
+def _segment_reuse_int_or_none(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
 def _segment_reuse_materialization_diagnostics(
     path: str,
     metadata,
@@ -142,20 +151,44 @@ def _segment_reuse_materialization_diagnostics(
     value: torch.Tensor,
     block_table: torch.Tensor | None,
     block_size: int,
+    layer_name: str | None = None,
+    layer_index=None,
+    graph_update_path: str | None = None,
+    query_clone_source: str = "pre_fia_current_query_clone",
 ) -> dict[str, object]:
     """Emit tensor-source diagnostics without owning proof semantics."""
 
+    query_abs_sum = _segment_reuse_tensor_abs_sum(query)
+    key_abs_sum = _segment_reuse_tensor_abs_sum(key)
+    value_abs_sum = _segment_reuse_tensor_abs_sum(value)
     return {
-        "query_source": f"{path}:pre_fia_current_query_clone",
+        "query_source": f"{path}:{query_clone_source}",
+        "key_source": f"{path}:fia_params_key_cache_view",
+        "value_source": f"{path}:fia_params_value_cache_view",
+        "layer_name": layer_name,
+        "layer_index": _segment_reuse_int_or_none(layer_index),
+        "graph_update_path": graph_update_path,
         "query_shape": _segment_reuse_tensor_shape(query),
         "key_shape": _segment_reuse_tensor_shape(key),
         "value_shape": _segment_reuse_tensor_shape(value),
         "block_table_shape": _segment_reuse_tensor_shape(block_table),
-        "query_abs_sum": _segment_reuse_tensor_abs_sum(query),
-        "key_abs_sum": _segment_reuse_tensor_abs_sum(key),
-        "value_abs_sum": _segment_reuse_tensor_abs_sum(value),
+        "query_abs_sum": query_abs_sum,
+        "key_abs_sum": key_abs_sum,
+        "value_abs_sum": value_abs_sum,
+        "query_is_all_zero": query_abs_sum == 0.0
+        if query_abs_sum is not None
+        else None,
+        "key_is_all_zero": key_abs_sum == 0.0
+        if key_abs_sum is not None
+        else None,
+        "value_is_all_zero": value_abs_sum == 0.0
+        if value_abs_sum is not None
+        else None,
         "block_size": int(block_size),
         "extra_ctx_capturing": bool(getattr(_EXTRA_CTX, "capturing", False)),
+        "extra_ctx_is_draft_model": bool(
+            getattr(_EXTRA_CTX, "is_draft_model", False)
+        ),
         "terminal_query_start": int(
             getattr(metadata, "segment_reuse_terminal_query_start", -1) or -1
         ),
@@ -180,6 +213,10 @@ def _segment_reuse_terminal_replay_output_proof(
     num_query_heads: int,
     num_kv_heads: int,
     head_size: int,
+    layer_name: str | None = None,
+    layer_index=None,
+    graph_update_path: str | None = None,
+    query_clone_source: str = "pre_fia_current_query_clone",
 ) -> None:
     terminal_query_tokens = int(
         getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0
@@ -203,6 +240,10 @@ def _segment_reuse_terminal_replay_output_proof(
         value=value,
         block_table=block_table,
         block_size=block_size,
+        layer_name=layer_name,
+        layer_index=layer_index,
+        graph_update_path=graph_update_path,
+        query_clone_source=query_clone_source,
     )
     try:
         query, key, value, logical_metadata = _segment_reuse_logical_terminal_replay_tensors(
@@ -319,6 +360,10 @@ def _segment_reuse_write_attention_bundle_part(
     num_query_heads: int,
     num_kv_heads: int,
     head_size: int,
+    layer_name: str | None = None,
+    layer_index=None,
+    graph_update_path: str | None = None,
+    query_clone_source: str = "pre_fia_current_query_clone",
 ) -> None:
     if write_runtime_terminal_replay_attention_bundle_part is None:
         return
@@ -343,6 +388,10 @@ def _segment_reuse_write_attention_bundle_part(
             value=value,
             block_table=block_table,
             block_size=block_size,
+            layer_name=layer_name,
+            layer_index=layer_index,
+            graph_update_path=graph_update_path,
+            query_clone_source=query_clone_source,
         )
     )
     try:
@@ -1814,6 +1863,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_query_heads=self.num_heads,
                     num_kv_heads=self.num_kv_heads,
                     head_size=self.head_size,
+                    layer_name=getattr(self, "_layer_name", None),
+                    layer_index=getattr(self, "layerIndex", None),
+                    graph_update_path="non_capture_forward_fia_causal",
+                    query_clone_source="pre_fia_current_query_clone",
                 )
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
@@ -1845,6 +1898,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         num_query_heads=self.num_heads,
                         num_kv_heads=self.num_kv_heads,
                         head_size=self.head_size,
+                        layer_name=getattr(self, "_layer_name", None),
+                        layer_index=getattr(self, "layerIndex", None),
+                        graph_update_path="non_capture_forward_fia_causal",
+                        query_clone_source="pre_fia_current_query_clone",
                     )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
