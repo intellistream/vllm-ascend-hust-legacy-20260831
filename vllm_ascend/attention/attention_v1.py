@@ -133,6 +133,15 @@ def _segment_reuse_tensor_abs_sum(tensor: torch.Tensor | None) -> float | None:
         return None
 
 
+def _segment_reuse_tensor_head(tensor: torch.Tensor | None, limit: int = 8) -> list | None:
+    if tensor is None:
+        return None
+    try:
+        return tensor.detach().reshape(-1)[:limit].cpu().tolist()
+    except Exception:
+        return None
+
+
 def _segment_reuse_int_or_none(value) -> int | None:
     if value is None:
         return None
@@ -140,6 +149,99 @@ def _segment_reuse_int_or_none(value) -> int | None:
         return int(value)
     except Exception:
         return None
+
+
+def _segment_reuse_trace_qkv_forwarding_diagnostics(
+    stage: str,
+    metadata,
+    *,
+    query: torch.Tensor | None = None,
+    key: torch.Tensor | None = None,
+    value: torch.Tensor | None = None,
+    key_cache: torch.Tensor | None = None,
+    value_cache: torch.Tensor | None = None,
+    slot_mapping: torch.Tensor | None = None,
+    block_table: torch.Tensor | None = None,
+    num_actual_tokens: int | None = None,
+    layer_name: str | None = None,
+    layer_index=None,
+    source: str | None = None,
+    graph_update_path: str | None = None,
+) -> None:
+    """Trace terminal-replay tensor forwarding without owning semantics."""
+
+    terminal_query_tokens = int(
+        getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0
+    )
+    if terminal_query_tokens <= 0:
+        return
+    query_abs_sum = _segment_reuse_tensor_abs_sum(query)
+    key_abs_sum = _segment_reuse_tensor_abs_sum(key)
+    value_abs_sum = _segment_reuse_tensor_abs_sum(value)
+    payload = {
+        "stage": stage,
+        "source": source,
+        "attn_state": str(getattr(metadata, "attn_state", None)),
+        "layer_name": layer_name,
+        "layer_index": _segment_reuse_int_or_none(layer_index),
+        "graph_update_path": graph_update_path,
+        "terminal_query_start": int(
+            getattr(metadata, "segment_reuse_terminal_query_start", -1) or -1
+        ),
+        "terminal_query_tokens": terminal_query_tokens,
+        "num_actual_tokens": _segment_reuse_int_or_none(num_actual_tokens),
+        "query_shape": _segment_reuse_tensor_shape(query),
+        "key_shape": _segment_reuse_tensor_shape(key),
+        "value_shape": _segment_reuse_tensor_shape(value),
+        "query_abs_sum": query_abs_sum,
+        "key_abs_sum": key_abs_sum,
+        "value_abs_sum": value_abs_sum,
+        "query_is_all_zero": query_abs_sum == 0.0
+        if query_abs_sum is not None
+        else None,
+        "key_is_all_zero": key_abs_sum == 0.0
+        if key_abs_sum is not None
+        else None,
+        "value_is_all_zero": value_abs_sum == 0.0
+        if value_abs_sum is not None
+        else None,
+        "key_cache_shape": _segment_reuse_tensor_shape(key_cache),
+        "value_cache_shape": _segment_reuse_tensor_shape(value_cache),
+        "slot_mapping_shape": _segment_reuse_tensor_shape(slot_mapping),
+        "slot_mapping_head": _segment_reuse_tensor_head(slot_mapping),
+        "block_table_shape": _segment_reuse_tensor_shape(block_table),
+        "extra_ctx_capturing": bool(getattr(_EXTRA_CTX, "capturing", False)),
+        "extra_ctx_is_draft_model": bool(
+            getattr(_EXTRA_CTX, "is_draft_model", False)
+        ),
+    }
+    if "projected" in stage:
+        payload.update(
+            {
+                "projected_query_abs_sum": query_abs_sum,
+                "projected_key_abs_sum": key_abs_sum,
+                "projected_value_abs_sum": value_abs_sum,
+            }
+        )
+    if "cache_write" in stage:
+        payload.update(
+            {
+                "cache_write_key_abs_sum": key_abs_sum,
+                "cache_write_value_abs_sum": value_abs_sum,
+            }
+        )
+    if "fia" in stage:
+        payload.update(
+            {
+                "fia_query_abs_sum": query_abs_sum,
+                "fia_key_abs_sum": key_abs_sum,
+                "fia_value_abs_sum": value_abs_sum,
+            }
+        )
+    _segment_reuse_trace_event(
+        "ascend_terminal_replay_qkv_forwarding_diagnostics",
+        **payload,
+    )
 
 
 def _segment_reuse_materialization_diagnostics(
@@ -1784,6 +1886,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
         ):
             key = key[:num_tokens]
             value = value[:num_tokens]
+        _segment_reuse_trace_qkv_forwarding_diagnostics(
+            "pre_fia_cache_view",
+            attn_metadata,
+            query=query,
+            key=key,
+            value=value,
+            key_cache=self.key_cache,
+            value_cache=self.value_cache,
+            block_table=block_table,
+            num_actual_tokens=getattr(attn_metadata, "num_actual_tokens", None),
+            layer_name=getattr(self, "_layer_name", None),
+            layer_index=getattr(self, "layerIndex", None),
+            source="forward_fused_infer_attention:_get_fia_params",
+            graph_update_path="non_capture_forward_fia_causal",
+        )
         # Get workspace from cache or calculate it if not present.
         if self.sinks is not None:
             actual_seq_qlen = attn_metadata.actual_seq_lengths_q
@@ -1991,14 +2108,43 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
+            key_to_cache = (
+                key[: attn_metadata.num_actual_tokens]
+                if not encoder_decoder
+                else key
+            )
+            value_to_cache = (
+                value[: attn_metadata.num_actual_tokens]
+                if not encoder_decoder
+                else value
+            )
+            slots_to_cache = (
+                slots[: attn_metadata.num_actual_tokens]
+                if not encoder_decoder
+                else slots.to(torch.int32)
+            )
+            _segment_reuse_trace_qkv_forwarding_diagnostics(
+                "reshape_and_cache_write_inputs",
+                attn_metadata,
+                query=query,
+                key=key_to_cache,
+                value=value_to_cache,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                slot_mapping=slots_to_cache,
+                num_actual_tokens=attn_metadata.num_actual_tokens,
+                layer_name=getattr(self, "_layer_name", None),
+                layer_index=getattr(self, "layerIndex", None),
+                source="reshape_and_cache:pre_device_operator",
+            )
             DeviceOperator.reshape_and_cache(
-                key=key[: attn_metadata.num_actual_tokens] if not encoder_decoder else key,
-                value=value[: attn_metadata.num_actual_tokens] if not encoder_decoder else value,
+                key=key_to_cache,
+                value=value_to_cache,
                 key_cache=self.key_cache,
                 value_cache=self.value_cache,
                 # quick fix to make sure slots is int32 for cross attention case.
                 # see: https://github.com/vllm-project/vllm/blob/ce88756b967c2c5006746a424c15dd59a284ed8c/vllm/model_executor/layers/attention/cross_attention.py#L117
-                slot_mapping=slots[: attn_metadata.num_actual_tokens] if not encoder_decoder else slots.to(torch.int32),
+                slot_mapping=slots_to_cache,
             )
             if self.is_kv_producer:
                 attn_metadata.reshape_cache_event.record()
@@ -2061,6 +2207,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_tokens = query.shape[0]
         if attn_metadata is None:
             return output.fill_(0)
+        _segment_reuse_trace_qkv_forwarding_diagnostics(
+            "forward_entry_projected_qkv",
+            attn_metadata,
+            query=query,
+            key=key,
+            value=value,
+            key_cache=self.key_cache,
+            value_cache=self.value_cache,
+            slot_mapping=getattr(attn_metadata, "slot_mapping", None),
+            num_actual_tokens=getattr(attn_metadata, "num_actual_tokens", None),
+            layer_name=getattr(layer, "layer_name", None),
+            layer_index=getattr(self, "layerIndex", None),
+            source="attention_forward:projected_qkv_inputs",
+        )
 
         # Initialize key_cache and value_cache from kv_cache if not already set.
         # This is needed for DecodeOnly mode where key/value are None but we still
@@ -2080,6 +2240,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output_padded = output
             query, key, value, output_padded = self.reshape_and_cache(
                 query, key, value, kv_cache, attn_metadata, output
+            )
+            _segment_reuse_trace_qkv_forwarding_diagnostics(
+                "post_reshape_and_cache_projected_qkv",
+                attn_metadata,
+                query=query,
+                key=key,
+                value=value,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                slot_mapping=getattr(attn_metadata, "slot_mapping", None),
+                num_actual_tokens=getattr(attn_metadata, "num_actual_tokens", None),
+                layer_name=getattr(layer, "layer_name", None),
+                layer_index=getattr(self, "layerIndex", None),
+                source="attention_forward:post_reshape_and_cache",
             )
         # pooling model branch
         if attn_metadata.model_runner_type == "pooling" and not attn_metadata.causal:
