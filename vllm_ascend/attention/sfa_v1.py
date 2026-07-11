@@ -21,7 +21,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.attention_mask import (
+    AttentionMaskBuilder,
+    select_segment_reuse_boundary,
+)
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import AscendPCPMetadata
 from vllm_ascend.attention.mla_v1 import MAX_O_PROJ_PREFETCH_SIZE, MLAPO_MAX_SUPPORTED_TOKENS
@@ -414,6 +417,73 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         else:
             group_len, group_key_idx, group_key_cache_idx = None, None, None
 
+        attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
+        segment_reuse_body_isolation = getattr(
+            common_attn_metadata,
+            "segment_reuse_body_isolation",
+            None,
+        )
+        if (
+            common_attn_metadata.attn_state
+            in {
+                AscendAttentionState.PrefillNoCache,
+                AscendAttentionState.ChunkedPrefill,
+            }
+            and isinstance(segment_reuse_body_isolation, dict)
+        ):
+            boundary_req_idx, boundary = select_segment_reuse_boundary(
+                segment_reuse_body_isolation
+            )
+            if boundary is None:
+                logger.info(
+                    "segment_reuse: Ascend SFA skipped body-isolation mask "
+                    "because no usable boundary metadata was present; keys=%s",
+                    sorted(segment_reuse_body_isolation.keys()),
+                )
+            else:
+                envelope_token_count = int(boundary.get("envelope_token_count", 0) or 0)
+                if envelope_token_count > 0:
+                    mask_seq_len = max(2048, int(seq_lens_cpu[0].item()))
+                    terminal_query_start = int(
+                        boundary.get("terminal_replay_query_start_token", -1) or -1
+                    )
+                    terminal_query_tokens = int(
+                        boundary.get("terminal_replay_query_tokens", 0) or 0
+                    )
+                    if terminal_query_start >= 0 and terminal_query_tokens > 0:
+                        attn_mask = self.attn_mask_builder.get_segment_reuse_terminal_replay_mask(
+                            max_seq_len=mask_seq_len,
+                            envelope_token_count=envelope_token_count,
+                            query_start_token=terminal_query_start,
+                            query_tokens=terminal_query_tokens,
+                            dtype=torch.int8,
+                        )
+                    else:
+                        attn_mask = self.attn_mask_builder.get_segment_reuse_splitfuse_body_isolation_mask(
+                            envelope_token_count=envelope_token_count,
+                            dtype=torch.int8,
+                        )
+                    logger.info(
+                        "segment_reuse: Ascend SFA using body-isolation mask "
+                        "req_idx=%s seq_len=%d envelope_tokens=%d "
+                        "terminal_query_start=%d terminal_query_tokens=%d",
+                        boundary_req_idx,
+                        mask_seq_len,
+                        envelope_token_count,
+                        terminal_query_start,
+                        terminal_query_tokens,
+                    )
+        elif segment_reuse_body_isolation:
+            logger.info(
+                "segment_reuse: Ascend SFA skipped body-isolation mask "
+                "attn_state=%s num_reqs=%s keys=%s",
+                common_attn_metadata.attn_state,
+                num_reqs,
+                sorted(segment_reuse_body_isolation.keys())
+                if isinstance(segment_reuse_body_isolation, dict)
+                else type(segment_reuse_body_isolation).__name__,
+            )
+
         return self.metadata_cls(  # type: ignore
             num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
@@ -422,7 +492,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
             head_dim=self.model_config.get_head_size(),
-            attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
+            attn_mask=attn_mask,
             attn_state=common_attn_metadata.attn_state,
             block_table=block_table,
             sin=sin[:num_input_tokens],

@@ -18,6 +18,54 @@ from vllm.distributed import get_pcp_group
 from vllm_ascend.platform import ModelConfig
 from vllm_ascend.utils import singleton
 
+try:
+    from triton.extension import segment_reuse_terminal_replay as _segment_reuse_terminal_replay
+    ASCEND_FIA_SPLITFUSE_BODY_WINDOW_PROOF = (
+        _segment_reuse_terminal_replay.ASCEND_FIA_SPLITFUSE_BODY_WINDOW_PROOF
+    )
+    SEGMENT_REUSE_TRITON_PRIMITIVE_AVAILABLE = True
+except Exception as exc:  # pragma: no cover - exercised only when packaging is incomplete.
+    _segment_reuse_terminal_replay = None
+    SEGMENT_REUSE_TRITON_PRIMITIVE_AVAILABLE = False
+    ASCEND_FIA_SPLITFUSE_BODY_WINDOW_PROOF = "segment_reuse_triton_terminal_replay_primitive_unavailable"
+    _SEGMENT_REUSE_TRITON_IMPORT_ERROR = exc
+
+
+def _segment_reuse_terminal_replay_primitive():
+    if _segment_reuse_terminal_replay is None:
+        raise RuntimeError(
+            "segment-reuse terminal replay requires "
+            "triton.extension.segment_reuse_terminal_replay"
+        ) from _SEGMENT_REUSE_TRITON_IMPORT_ERROR
+    return _segment_reuse_terminal_replay
+
+
+def select_segment_reuse_boundary(segment_reuse_body_isolation):
+    """Select the boundary metadata entry consumed by current Ascend masks.
+
+    The current mask plumbing carries one attention mask for the fused prefill
+    call, so segment-reuse terminal replay is only safe when the replay request
+    is the single structured-reuse entry in the batch. Prefer the terminal
+    replay entry when present instead of hard-coding request index 0; otherwise
+    fall back to the first structural boundary for seed body-isolation prefill.
+    """
+
+    if not isinstance(segment_reuse_body_isolation, dict):
+        return None, None
+
+    selected_idx = None
+    selected_boundary = None
+    for req_idx in sorted(segment_reuse_body_isolation):
+        boundary = segment_reuse_body_isolation.get(req_idx)
+        if not isinstance(boundary, dict):
+            continue
+        if int(boundary.get("terminal_replay_query_tokens", 0) or 0) > 0:
+            return req_idx, boundary
+        if selected_boundary is None:
+            selected_idx = req_idx
+            selected_boundary = boundary
+    return selected_idx, selected_boundary
+
 
 def _generate_attn_mask(max_seq_len, dtype):
     # Construct lower triangle matrix.
@@ -39,6 +87,9 @@ class AttentionMaskBuilder:
         self.device = device
         self.mla_mask = None
         self.chunked_prefill_attn_mask = None
+        self.segment_reuse_body_isolation_masks = {}
+        self.segment_reuse_splitfuse_body_isolation_masks = {}
+        self.segment_reuse_terminal_replay_masks = {}
         self.pcp_mla_mask = None
 
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype):
@@ -56,6 +107,82 @@ class AttentionMaskBuilder:
                 torch.triu(torch.ones(2048, 2048), diagonal=1).to(torch.int8).to(self.device)
             )
         return self.chunked_prefill_attn_mask
+
+    def get_segment_reuse_body_isolation_mask(
+        self,
+        max_seq_len: int,
+        envelope_token_count: int,
+        dtype: torch.dtype = torch.int8,
+    ) -> torch.Tensor:
+        key = (max_seq_len, envelope_token_count, dtype)
+        if key not in self.segment_reuse_body_isolation_masks:
+            self.segment_reuse_body_isolation_masks[key] = (
+                _segment_reuse_terminal_replay_primitive().generate_segment_reuse_body_isolation_mask(
+                    max_seq_len=max_seq_len,
+                    envelope_token_count=envelope_token_count,
+                    dtype=dtype,
+                ).to(self.device, non_blocking=True)
+            )
+        return self.segment_reuse_body_isolation_masks[key]
+
+    def get_segment_reuse_splitfuse_body_isolation_mask(
+        self,
+        envelope_token_count: int,
+        dtype: torch.dtype = torch.int8,
+        mask_len: int = 2048,
+    ) -> torch.Tensor:
+        key = (mask_len, envelope_token_count, dtype)
+        if key not in self.segment_reuse_splitfuse_body_isolation_masks:
+            self.segment_reuse_splitfuse_body_isolation_masks[key] = (
+                _segment_reuse_terminal_replay_primitive().generate_segment_reuse_splitfuse_body_isolation_mask(
+                    envelope_token_count=envelope_token_count,
+                    dtype=dtype,
+                    mask_len=mask_len,
+                ).to(self.device, non_blocking=True)
+            )
+        return self.segment_reuse_splitfuse_body_isolation_masks[key]
+
+    def get_segment_reuse_terminal_replay_mask(
+        self,
+        max_seq_len: int,
+        envelope_token_count: int,
+        query_start_token: int,
+        query_tokens: int,
+        dtype: torch.dtype = torch.int8,
+    ) -> torch.Tensor:
+        key = (
+            max_seq_len,
+            envelope_token_count,
+            query_start_token,
+            query_tokens,
+            dtype,
+        )
+        if key not in self.segment_reuse_terminal_replay_masks:
+            primitive = _segment_reuse_terminal_replay_primitive()
+            if max_seq_len > 2048 and hasattr(
+                primitive,
+                "generate_segment_reuse_splitfuse_terminal_replay_mask",
+            ):
+                mask = primitive.generate_segment_reuse_splitfuse_terminal_replay_mask(
+                    envelope_token_count=envelope_token_count,
+                    query_start_token=query_start_token,
+                    query_tokens=query_tokens,
+                    dtype=dtype,
+                    mask_len=2048,
+                )
+            else:
+                mask = primitive.generate_segment_reuse_terminal_replay_mask(
+                    max_seq_len=max_seq_len,
+                    envelope_token_count=envelope_token_count,
+                    query_start_token=query_start_token,
+                    query_tokens=query_tokens,
+                    dtype=dtype,
+                )
+            self.segment_reuse_terminal_replay_masks[key] = mask.to(
+                self.device,
+                non_blocking=True,
+            )
+        return self.segment_reuse_terminal_replay_masks[key]
 
     def get_mla_mask(self, dtype: torch.dtype) -> torch.Tensor:
         if self.mla_mask is None or self.mla_mask.dtype != dtype:

@@ -17,12 +17,15 @@
 
 from dataclasses import dataclass
 from enum import Enum
+import json
+import os
 
 import torch
 import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -40,7 +43,10 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.attention_mask import (
+    AttentionMaskBuilder,
+    select_segment_reuse_boundary,
+)
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
 from vllm_ascend.attention.kvcomp_attn.attention_utils import (
     get_kvcomp_decode_params,
@@ -67,9 +73,558 @@ from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
+try:
+    from triton.extension import segment_reuse_terminal_replay as segment_reuse_terminal_replay_contract
+except Exception:  # pragma: no cover - depends on package composition.
+    segment_reuse_terminal_replay_contract = None
+
+try:
+    from vllm_segment_reuse.live_runner_bundle import (
+        write_runtime_terminal_replay_attention_bundle_part,
+    )
+except Exception:  # pragma: no cover - parent package is optional here.
+    write_runtime_terminal_replay_attention_bundle_part = None
+
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
+logger = init_logger(__name__)
+
+
+def _segment_reuse_trace_event(event: str, **payload) -> None:
+    path = os.environ.get("VLLM_SEGMENT_REUSE_DIAGNOSTICS_FILE")
+    if not path:
+        return
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"event": event, **payload}, default=str) + "\n")
+    except Exception:
+        logger.debug("segment_reuse: failed to write Ascend attention diagnostic",
+                     exc_info=True)
+
+
+def _segment_reuse_trace_enabled() -> bool:
+    return os.getenv("VLLM_SEGMENT_REUSE_TRACE_REQUESTS", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _segment_reuse_terminal_replay_dense_sparse_mode(metadata) -> int:
+    force_dense = os.getenv(
+        "VLLM_SEGMENT_REUSE_FORCE_DENSE_TERMINAL_MASK", "0"
+    ).lower() in {"1", "true", "yes", "on"}
+    if (
+        force_dense
+        and getattr(metadata, "segment_reuse_body_isolation_applied", False)
+        and int(getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0) > 0
+    ):
+        return 0
+    return 3
+
+
+def _segment_reuse_graph_replay_attn_mask(metadata, captured_attn_mask, sparse_mode: int):
+    """Use the live isolation mask only after the triton contract gate passes."""
+
+    live_mask = getattr(metadata, "attn_mask", None)
+    if getattr(metadata, "segment_reuse_body_isolation_applied", False) and live_mask is not None:
+        terminal_query_tokens = int(getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0)
+        if terminal_query_tokens > 0:
+            semantic_proven, proof_reason = _segment_reuse_backend_mask_semantic_proof(
+                "graph_replay_contract_gate",
+                metadata,
+                sparse_mode,
+                attn_mask=live_mask,
+            )
+            if not semantic_proven:
+                _segment_reuse_mark_backend_mask_not_consumed(
+                    "graph_replay_contract_gate",
+                    metadata,
+                    proof_reason,
+                )
+                return captured_attn_mask
+        if _segment_reuse_trace_enabled():
+            logger.info(
+                "segment_reuse: Ascend graph replay using live isolation "
+                "attn_mask attn_state=%s envelope_tokens=%s "
+                "terminal_query_start=%s terminal_query_tokens=%s "
+                "captured_mask_id=%s live_mask_id=%s proof_source=triton_contract",
+                getattr(metadata, "attn_state", None),
+                getattr(metadata, "segment_reuse_body_isolation_envelope_tokens", None),
+                getattr(metadata, "segment_reuse_terminal_query_start", None),
+                getattr(metadata, "segment_reuse_terminal_query_tokens", None),
+                id(captured_attn_mask) if captured_attn_mask is not None else None,
+                id(live_mask),
+            )
+        return live_mask
+    return captured_attn_mask
+
+
+def _segment_reuse_backend_mask_semantic_proof(
+    path: str,
+    metadata,
+    sparse_mode,
+    *,
+    attn_mask,
+) -> tuple[bool, str]:
+    terminal_query_tokens = int(
+        getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0
+    )
+    if terminal_query_tokens > 0:
+        if segment_reuse_terminal_replay_contract is None:
+            return False, "triton_segment_reuse_primitive_unavailable"
+        contract_proven, contract_reason = segment_reuse_terminal_replay_contract.prove_segment_reuse_terminal_replay_mask_semantics(
+            attn_mask,
+            envelope_token_count=int(
+                getattr(
+                    metadata,
+                    "segment_reuse_body_isolation_envelope_tokens",
+                    0,
+                )
+                or 0
+            ),
+            terminal_query_start=int(
+                getattr(metadata, "segment_reuse_terminal_query_start", -1)
+                or -1
+            ),
+            terminal_query_tokens=terminal_query_tokens,
+            sparse_mode=int(sparse_mode),
+        )
+        if not contract_proven:
+            return False, contract_reason
+        return True, contract_reason
+    return False, "terminal_replay_not_required"
+
+
+def _segment_reuse_mark_backend_mask_consumed(
+    path: str,
+    metadata,
+    sparse_mode,
+    *,
+    attn_mask,
+) -> None:
+    if not getattr(metadata, "segment_reuse_body_isolation_applied", False):
+        return
+    if getattr(metadata, "attn_mask", None) is None or attn_mask is not metadata.attn_mask:
+        setattr(metadata, "segment_reuse_body_isolation_backend_proven", False)
+        _segment_reuse_trace_event(
+            "ascend_attention_backend_mask_consumption",
+            consumed=False,
+            argument_consumed=False,
+            semantic_proven=False,
+            path=path,
+            attn_state=str(getattr(metadata, "attn_state", None)),
+            sparse_mode=sparse_mode,
+            metadata_mask_id=id(getattr(metadata, "attn_mask", None)),
+            passed_mask_id=id(attn_mask) if attn_mask is not None else None,
+            envelope_tokens=int(
+                getattr(metadata, "segment_reuse_body_isolation_envelope_tokens", 0)
+                or 0
+            ),
+            terminal_query_start=int(
+                getattr(metadata, "segment_reuse_terminal_query_start", -1)
+                or -1
+            ),
+            terminal_query_tokens=int(
+                getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0
+            ),
+        )
+        if _segment_reuse_trace_enabled():
+            logger.warning(
+                "segment_reuse: Ascend backend did not prove "
+                "body-isolation mask consumption path=%s attn_state=%s "
+                "sparse_mode=%s metadata_mask_id=%s passed_mask_id=%s",
+                path,
+                getattr(metadata, "attn_state", None),
+                sparse_mode,
+                id(getattr(metadata, "attn_mask", None)),
+                id(attn_mask) if attn_mask is not None else None,
+        )
+        return
+    semantic_proven, proof_reason = _segment_reuse_backend_mask_semantic_proof(
+        path,
+        metadata,
+        sparse_mode,
+        attn_mask=attn_mask,
+    )
+    setattr(
+        metadata,
+        "segment_reuse_body_isolation_backend_proven",
+        semantic_proven,
+    )
+    _segment_reuse_trace_event(
+        "ascend_attention_backend_mask_consumption",
+        consumed=True,
+        argument_consumed=True,
+        semantic_proven=semantic_proven,
+        proof_reason=proof_reason,
+        path=path,
+        attn_state=str(getattr(metadata, "attn_state", None)),
+        sparse_mode=sparse_mode,
+        mask_id=id(getattr(metadata, "attn_mask", None)),
+        mask_shape=(
+            tuple(metadata.attn_mask.shape)
+            if getattr(metadata, "attn_mask", None) is not None
+            else None
+        ),
+        envelope_tokens=int(
+            getattr(metadata, "segment_reuse_body_isolation_envelope_tokens", 0)
+            or 0
+        ),
+        terminal_query_start=int(
+            getattr(metadata, "segment_reuse_terminal_query_start", -1) or -1
+        ),
+        terminal_query_tokens=int(
+            getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0
+        ),
+    )
+    if not _segment_reuse_trace_enabled():
+        return
+    if not semantic_proven:
+        logger.warning(
+            "segment_reuse: Ascend backend received body-isolation mask but "
+            "semantic proof is absent path=%s reason=%s attn_state=%s "
+            "sparse_mode=%s envelope_tokens=%s terminal_query_start=%s "
+            "terminal_query_tokens=%s mask_id=%s mask_shape=%s",
+            path,
+            proof_reason,
+            getattr(metadata, "attn_state", None),
+            sparse_mode,
+            getattr(metadata, "segment_reuse_body_isolation_envelope_tokens", None),
+            getattr(metadata, "segment_reuse_terminal_query_start", None),
+            getattr(metadata, "segment_reuse_terminal_query_tokens", None),
+            id(getattr(metadata, "attn_mask", None)),
+            tuple(metadata.attn_mask.shape)
+            if getattr(metadata, "attn_mask", None) is not None
+            else None,
+        )
+        return
+    logger.info(
+        "segment_reuse: Ascend backend proved body-isolation mask semantics "
+        "path=%s reason=%s attn_state=%s sparse_mode=%s envelope_tokens=%s "
+        "terminal_query_start=%s terminal_query_tokens=%s mask_id=%s mask_shape=%s",
+        path,
+        proof_reason,
+        getattr(metadata, "attn_state", None),
+        sparse_mode,
+        getattr(metadata, "segment_reuse_body_isolation_envelope_tokens", None),
+        getattr(metadata, "segment_reuse_terminal_query_start", None),
+        getattr(metadata, "segment_reuse_terminal_query_tokens", None),
+        id(getattr(metadata, "attn_mask", None)),
+        tuple(metadata.attn_mask.shape)
+        if getattr(metadata, "attn_mask", None) is not None
+        else None,
+    )
+
+
+def _segment_reuse_mark_backend_mask_not_consumed(
+    path: str,
+    metadata,
+    reason: str,
+) -> None:
+    if not getattr(metadata, "segment_reuse_body_isolation_applied", False):
+        return
+    setattr(metadata, "segment_reuse_body_isolation_backend_proven", False)
+    _segment_reuse_trace_event(
+        "ascend_attention_backend_mask_consumption",
+        consumed=False,
+        argument_consumed=False,
+        semantic_proven=False,
+        path=path,
+        reason=reason,
+        attn_state=str(getattr(metadata, "attn_state", None)),
+        mask_id=id(getattr(metadata, "attn_mask", None)),
+        mask_shape=(
+            tuple(metadata.attn_mask.shape)
+            if getattr(metadata, "attn_mask", None) is not None
+            else None
+        ),
+        envelope_tokens=int(
+            getattr(metadata, "segment_reuse_body_isolation_envelope_tokens", 0)
+            or 0
+        ),
+        terminal_query_start=int(
+            getattr(metadata, "segment_reuse_terminal_query_start", -1) or -1
+        ),
+        terminal_query_tokens=int(
+            getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0
+        ),
+    )
+    if _segment_reuse_trace_enabled():
+        logger.warning(
+            "segment_reuse: Ascend backend did not consume body-isolation "
+            "mask path=%s reason=%s attn_state=%s mask_id=%s mask_shape=%s",
+            path,
+            reason,
+            getattr(metadata, "attn_state", None),
+            id(getattr(metadata, "attn_mask", None)),
+            tuple(metadata.attn_mask.shape)
+            if getattr(metadata, "attn_mask", None) is not None
+            else None,
+        )
+
+
+def _segment_reuse_terminal_replay_output_proof(
+    path: str,
+    metadata,
+    *,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    backend_output: torch.Tensor,
+    block_table: torch.Tensor | None,
+    block_size: int,
+    sparse_mode: int,
+    scale: float,
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+) -> None:
+    if not getattr(metadata, "segment_reuse_body_isolation_applied", False):
+        return
+    terminal_query_tokens = int(
+        getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0
+    )
+    if terminal_query_tokens <= 0:
+        return
+    if segment_reuse_terminal_replay_contract is None:
+        _segment_reuse_trace_event(
+            "ascend_terminal_replay_output_differential_proof",
+            path=path,
+            semantic_proven=False,
+            semantic_reason="triton_segment_reuse_primitive_unavailable",
+            sparse_mode=sparse_mode,
+        )
+        return
+    try:
+        query, key, value, logical_metadata = _segment_reuse_logical_terminal_replay_tensors(
+            metadata,
+            query=query,
+            key=key,
+            value=value,
+            block_table=block_table,
+            block_size=block_size,
+            num_query_heads=num_query_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+        )
+    except Exception as exc:
+        _segment_reuse_trace_event(
+            "ascend_terminal_replay_output_differential_proof",
+            path=path,
+            sparse_mode=sparse_mode,
+            attn_state=str(getattr(metadata, "attn_state", None)),
+            path_executed=False,
+            semantic_proven=False,
+            semantic_reason="terminal_replay_logical_kv_materialization_failed",
+            proof_reason="terminal_replay_logical_kv_materialization_failed",
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return
+    proof = segment_reuse_terminal_replay_contract.prove_segment_reuse_terminal_replay_output_semantics(
+        query,
+        key,
+        value,
+        backend_output,
+        envelope_token_count=int(
+            getattr(metadata, "segment_reuse_body_isolation_envelope_tokens", 0)
+            or 0
+        ),
+        terminal_query_start=int(
+            getattr(metadata, "segment_reuse_terminal_query_start", -1) or -1
+        ),
+        terminal_query_tokens=terminal_query_tokens,
+        context_tokens=int(getattr(metadata, "max_seq_len", 0) or key.shape[0]),
+        scale=float(scale),
+        num_query_heads=int(num_query_heads),
+        num_kv_heads=int(num_kv_heads),
+        head_size=int(head_size),
+    )
+    _segment_reuse_trace_event(
+        "ascend_terminal_replay_output_differential_proof",
+        path=path,
+        sparse_mode=sparse_mode,
+        attn_state=str(getattr(metadata, "attn_state", None)),
+        **logical_metadata,
+        **proof,
+    )
+
+
+def _segment_reuse_tnd_view(
+    tensor: torch.Tensor,
+    *,
+    heads: int,
+    head_size: int,
+    name: str,
+) -> torch.Tensor:
+    if tensor.dim() == 3 and tuple(tensor.shape[-2:]) == (heads, head_size):
+        return tensor
+    if tensor.dim() == 2 and int(tensor.shape[-1]) == heads * head_size:
+        return tensor.view(tensor.shape[0], heads, head_size)
+    raise ValueError(f"{name} cannot be viewed as [tokens, heads, head_size]")
+
+
+def _segment_reuse_logical_kv_from_block_table(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    *,
+    block_table: torch.Tensor | None,
+    req_idx: int,
+    context_tokens: int,
+    block_size: int,
+    num_kv_heads: int,
+    head_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if block_table is None:
+        raise ValueError("terminal replay block_table missing")
+    if req_idx < 0 or req_idx >= int(block_table.shape[0]):
+        raise ValueError("terminal replay boundary req_idx outside block_table")
+    if context_tokens <= 0:
+        raise ValueError("terminal replay context_tokens invalid")
+    blocks_needed = (int(context_tokens) + int(block_size) - 1) // int(block_size)
+    block_ids = block_table[req_idx, :blocks_needed].to(
+        device=key.device,
+        dtype=torch.long,
+    )
+    key_blocks = torch.index_select(key, 0, block_ids)
+    value_blocks = torch.index_select(value, 0, block_ids)
+    key_tnd = key_blocks.reshape(-1, num_kv_heads, head_size)[:context_tokens]
+    value_tnd = value_blocks.reshape(-1, num_kv_heads, head_size)[:context_tokens]
+    return key_tnd, value_tnd
+
+
+def _segment_reuse_logical_terminal_replay_tensors(
+    metadata,
+    *,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    block_table: torch.Tensor | None,
+    block_size: int,
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, object]]:
+    terminal_query_tokens = int(
+        getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0
+    )
+    context_tokens = int(getattr(metadata, "max_seq_len", 0) or 0)
+    if context_tokens <= 0:
+        context_tokens = (
+            int(getattr(metadata, "segment_reuse_terminal_query_start", 0) or 0)
+            + terminal_query_tokens
+        )
+    req_idx_value = getattr(metadata, "segment_reuse_boundary_req_idx", -1)
+    req_idx = -1 if req_idx_value is None else int(req_idx_value)
+    query_tnd = _segment_reuse_tnd_view(
+        query,
+        heads=int(num_query_heads),
+        head_size=int(head_size),
+        name="query",
+    )[:terminal_query_tokens].clone()
+    key_tnd, value_tnd = _segment_reuse_logical_kv_from_block_table(
+        key,
+        value,
+        block_table=block_table,
+        req_idx=req_idx,
+        context_tokens=context_tokens,
+        block_size=int(block_size),
+        num_kv_heads=int(num_kv_heads),
+        head_size=int(head_size),
+    )
+    return (
+        query_tnd,
+        key_tnd,
+        value_tnd,
+        {
+            "logical_kv_source": "ascend-paged-cache-block-table",
+            "boundary_req_idx": req_idx,
+            "block_size": int(block_size),
+            "context_tokens": int(context_tokens),
+            "query_heads": int(num_query_heads),
+            "kv_heads": int(num_kv_heads),
+            "head_size": int(head_size),
+        },
+    )
+
+
+def _segment_reuse_write_attention_bundle_part(
+    path: str,
+    metadata,
+    *,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    block_table: torch.Tensor | None,
+    block_size: int,
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+) -> None:
+    if write_runtime_terminal_replay_attention_bundle_part is None:
+        return
+    if not getattr(metadata, "segment_reuse_body_isolation_applied", False):
+        return
+    terminal_query_tokens = int(
+        getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0
+    )
+    if terminal_query_tokens <= 0:
+        return
+    request_id = getattr(metadata, "segment_reuse_request_id", None)
+    if request_id is None:
+        request_id = "unknown-terminal-replay-request"
+    extra_metadata = {
+        "path": path,
+        "attn_state": str(getattr(metadata, "attn_state", None)),
+    }
+    try:
+        query, key, value, logical_metadata = _segment_reuse_logical_terminal_replay_tensors(
+            metadata,
+            query=query,
+            key=key,
+            value=value,
+            block_table=block_table,
+            block_size=block_size,
+            num_query_heads=num_query_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+        )
+        extra_metadata.update(logical_metadata)
+    except Exception as exc:
+        _segment_reuse_trace_event(
+            "runtime_terminal_replay_tensor_bundle_missing",
+            request_id=str(request_id),
+            semantic_proven=False,
+            semantic_reason="runtime_attention_bundle_logical_kv_materialization_failed",
+            error_type=type(exc).__name__,
+            error=str(exc),
+            extra_metadata=extra_metadata,
+        )
+        return
+    event = write_runtime_terminal_replay_attention_bundle_part(
+        request_id=str(request_id),
+        query=query,
+        key=key,
+        value=value,
+        envelope_tokens=int(
+            getattr(metadata, "segment_reuse_body_isolation_envelope_tokens", 0)
+            or 0
+        ),
+        query_start=int(
+            getattr(metadata, "segment_reuse_terminal_query_start", -1) or -1
+        ),
+        query_tokens=terminal_query_tokens,
+        context_tokens=int(getattr(metadata, "max_seq_len", 0) or key.shape[0]),
+        diagnostics_file=os.environ.get("VLLM_SEGMENT_REUSE_DIAGNOSTICS_FILE"),
+        extra_metadata=extra_metadata,
+    )
+    _segment_reuse_trace_event(str(event.pop("event")), **event)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -211,6 +766,15 @@ class AscendMetadata:
 
     kvcomp_metadata: KVCompMetaData | None = None
 
+    segment_reuse_body_isolation_seen: bool = False
+    segment_reuse_body_isolation_applied: bool = False
+    segment_reuse_body_isolation_backend_proven: bool = False
+    segment_reuse_request_id: str | None = None
+    segment_reuse_boundary_req_idx: int = -1
+    segment_reuse_body_isolation_envelope_tokens: int = 0
+    segment_reuse_terminal_query_start: int = -1
+    segment_reuse_terminal_query_tokens: int = 0
+
 
 class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
     """
@@ -308,6 +872,156 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         # Get attn_mask from singleton AttentionMaskBuilder
         attn_mask = self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config)
+        segment_reuse_body_isolation = getattr(
+            common_attn_metadata,
+            "segment_reuse_body_isolation",
+            None,
+        )
+        segment_reuse_body_isolation_seen = bool(segment_reuse_body_isolation)
+        segment_reuse_body_isolation_applied = False
+        segment_reuse_request_id = None
+        segment_reuse_boundary_req_idx = -1
+        segment_reuse_body_isolation_envelope_tokens = 0
+        segment_reuse_terminal_query_start = -1
+        segment_reuse_terminal_query_tokens = 0
+        if _segment_reuse_trace_enabled():
+            metadata_dict = getattr(common_attn_metadata, "__dict__", {})
+            logger.info(
+                "segment_reuse: Ascend CUSTOM build entry "
+                "metadata_cls=%s metadata_id=%s attn_state=%s num_reqs=%s "
+                "attr_type=%s attr_keys=%s dict_has_attr=%s dict_type=%s "
+                "seq_lens=%s num_actual_tokens=%s",
+                type(common_attn_metadata).__name__,
+                id(common_attn_metadata),
+                attn_state,
+                num_reqs,
+                type(segment_reuse_body_isolation).__name__,
+                sorted(segment_reuse_body_isolation.keys())
+                if isinstance(segment_reuse_body_isolation, dict)
+                else None,
+                "segment_reuse_body_isolation" in metadata_dict,
+                type(metadata_dict.get("segment_reuse_body_isolation")).__name__
+                if "segment_reuse_body_isolation" in metadata_dict
+                else None,
+                seq_lens.tolist() if hasattr(seq_lens, "tolist") else seq_lens,
+                num_actual_tokens,
+            )
+        if (
+            attn_state in {
+                AscendAttentionState.PrefillNoCache,
+                AscendAttentionState.ChunkedPrefill,
+            }
+            and isinstance(segment_reuse_body_isolation, dict)
+        ):
+            boundary_req_idx, boundary = select_segment_reuse_boundary(
+                segment_reuse_body_isolation
+            )
+            if boundary is None:
+                if _segment_reuse_trace_enabled():
+                    logger.info(
+                        "segment_reuse: Ascend CUSTOM skipped body-isolation mask "
+                        "because no usable boundary metadata was present; keys=%s",
+                        sorted(segment_reuse_body_isolation.keys()),
+                    )
+            else:
+                segment_reuse_boundary_req_idx = int(boundary_req_idx)
+                envelope_token_count = int(boundary.get("envelope_token_count", 0) or 0)
+                segment_reuse_request_id = (
+                    str(boundary.get("request_id"))
+                    if boundary.get("request_id") is not None
+                    else None
+                )
+                segment_reuse_body_isolation_envelope_tokens = envelope_token_count
+                if _segment_reuse_trace_enabled():
+                    logger.info(
+                        "segment_reuse: Ascend CUSTOM considering body-isolation mask "
+                        "attn_state=%s req_idx=%s boundary_keys=%s boundary=%s",
+                        attn_state,
+                        boundary_req_idx,
+                        sorted(boundary.keys()) if isinstance(boundary, dict) else None,
+                        boundary,
+                    )
+                if envelope_token_count > 0:
+                    mask_seq_len = max(
+                        2048,
+                        int(seq_lens[segment_reuse_boundary_req_idx].item()),
+                    )
+                    terminal_query_start = int(
+                        boundary.get("terminal_replay_query_start_token", -1) or -1
+                    )
+                    terminal_query_tokens = int(
+                        boundary.get("terminal_replay_query_tokens", 0) or 0
+                    )
+                    segment_reuse_terminal_query_start = terminal_query_start
+                    segment_reuse_terminal_query_tokens = terminal_query_tokens
+                    if terminal_query_start >= 0 and terminal_query_tokens > 0:
+                        attn_mask = self.attn_mask_builder.get_segment_reuse_terminal_replay_mask(
+                            max_seq_len=mask_seq_len,
+                            envelope_token_count=envelope_token_count,
+                            query_start_token=terminal_query_start,
+                            query_tokens=terminal_query_tokens,
+                            dtype=torch.int8,
+                        )
+                        segment_reuse_body_isolation_applied = True
+                        if _segment_reuse_trace_enabled():
+                            logger.info(
+                                "segment_reuse: Ascend CUSTOM using terminal replay "
+                                "body-window mask seq_len=%d envelope_tokens=%d "
+                                "terminal_query_start=%d terminal_query_tokens=%d",
+                                mask_seq_len,
+                                envelope_token_count,
+                                terminal_query_start,
+                                terminal_query_tokens,
+                            )
+                    else:
+                        if _segment_reuse_trace_enabled():
+                            logger.info(
+                                "segment_reuse: Ascend CUSTOM carrying seed "
+                                "body-isolation provenance without installing an "
+                                "attention mask envelope_tokens=%d "
+                                "terminal_query_start=%d terminal_query_tokens=%d",
+                                envelope_token_count,
+                                terminal_query_start,
+                                terminal_query_tokens,
+                            )
+                else:
+                    if _segment_reuse_trace_enabled():
+                        logger.info(
+                            "segment_reuse: Ascend CUSTOM skipped body-isolation mask "
+                            "because envelope_token_count=%d",
+                            envelope_token_count,
+                        )
+        elif segment_reuse_body_isolation:
+            if _segment_reuse_trace_enabled():
+                logger.info(
+                    "segment_reuse: Ascend CUSTOM skipped body-isolation mask "
+                    "attn_state=%s num_reqs=%s keys=%s",
+                    attn_state,
+                    num_reqs,
+                    sorted(segment_reuse_body_isolation.keys())
+                    if isinstance(segment_reuse_body_isolation, dict)
+                    else type(segment_reuse_body_isolation).__name__,
+                )
+        if segment_reuse_body_isolation_seen:
+            _segment_reuse_trace_event(
+                "ascend_attention_segment_reuse_mask_state",
+                attn_state=str(attn_state),
+                num_reqs=int(num_reqs),
+                num_prefills=int(num_prefills),
+                num_decodes=int(num_decodes),
+                max_query_len=int(common_attn_metadata.max_query_len),
+                max_seq_len=int(getattr(common_attn_metadata, "max_seq_len", 0) or 0),
+                mask_applied=bool(segment_reuse_body_isolation_applied),
+                request_id=segment_reuse_request_id,
+                envelope_tokens=int(segment_reuse_body_isolation_envelope_tokens),
+                terminal_query_start=int(segment_reuse_terminal_query_start),
+                terminal_query_tokens=int(segment_reuse_terminal_query_tokens),
+                boundary_keys=(
+                    sorted(segment_reuse_body_isolation.keys())
+                    if isinstance(segment_reuse_body_isolation, dict)
+                    else None
+                ),
+            )
 
         # TODO: Yet another unnecessary H2D while we already have a query_start_loc on device
         query_start_loc = query_start_loc_cpu.pin_memory().to(self.device, non_blocking=True)
@@ -366,6 +1080,13 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             causal=common_attn_metadata.causal,
             model_runner_type=self.model_config.runner_type,
             kvcomp_metadata=common_attn_metadata.kvcomp_metadata,
+            segment_reuse_body_isolation_seen=segment_reuse_body_isolation_seen,
+            segment_reuse_body_isolation_applied=segment_reuse_body_isolation_applied,
+            segment_reuse_request_id=segment_reuse_request_id,
+            segment_reuse_boundary_req_idx=segment_reuse_boundary_req_idx,
+            segment_reuse_body_isolation_envelope_tokens=segment_reuse_body_isolation_envelope_tokens,
+            segment_reuse_terminal_query_start=segment_reuse_terminal_query_start,
+            segment_reuse_terminal_query_tokens=segment_reuse_terminal_query_tokens,
         )
         return attn_metadata
 
@@ -585,14 +1306,32 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step, key = draft_attn_key_steps[attn_count]
-                        seq_lens = attn_metadata[draft_step][key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
+                        metadata = attn_metadata[draft_step][key]
+                        seq_lens = metadata.seq_lens_list
+                        actual_seq_lengths_q = metadata.actual_seq_lengths_q
+                        attn_mask = _segment_reuse_graph_replay_attn_mask(
+                            metadata,
+                            attn_mask,
+                            4 if sliding_window is not None else 3,
+                        )
                         attn_count = attn_count + 1
                     else:
                         metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
-                        seq_lens = attn_metadata[metadata_key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
+                        metadata = attn_metadata[metadata_key]
+                        seq_lens = metadata.seq_lens_list
+                        actual_seq_lengths_q = metadata.actual_seq_lengths_q
+                        attn_mask = _segment_reuse_graph_replay_attn_mask(
+                            metadata,
+                            attn_mask,
+                            4 if sliding_window is not None else 3,
+                        )
 
+                    _segment_reuse_mark_backend_mask_consumed(
+                        "graph_replay_fia_v2_sinks",
+                        metadata,
+                        4 if sliding_window is not None else 3,
+                        attn_mask=attn_mask,
+                    )
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu.npu_fused_infer_attention_score_v2.out(
                         query=query,
@@ -740,13 +1479,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_lens = metadata.seq_lens_list
                         actual_seq_lengths_q = metadata.actual_seq_lengths_q
                         block_tables = metadata.block_tables
+                        attn_mask = _segment_reuse_graph_replay_attn_mask(
+                            metadata,
+                            attn_mask,
+                            sparse_mode,
+                        )
                         attn_count = attn_count + 1
                         if not metadata.causal:
                             sparse_mode = 0
                     else:
                         metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
-                        seq_lens = attn_metadata[metadata_key].seq_lens_list
-                        actual_seq_lengths_q = attn_metadata[metadata_key].actual_seq_lengths_q
+                        metadata = attn_metadata[metadata_key]
+                        seq_lens = metadata.seq_lens_list
+                        actual_seq_lengths_q = metadata.actual_seq_lengths_q
+                        attn_mask = _segment_reuse_graph_replay_attn_mask(
+                            metadata,
+                            attn_mask,
+                            sparse_mode,
+                        )
                         # NOTE:
                         # For models with sliding-window attention on the FIA full-graph replay path,
                         # rebinding `block_tables` to the latest metadata tensor causes corrupted /
@@ -758,6 +1508,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         if not hasattr(vllm_config.model_config.hf_text_config, "sliding_window"):
                             block_tables = attn_metadata[metadata_key].block_tables
 
+                    _segment_reuse_mark_backend_mask_consumed(
+                        "graph_replay_fia",
+                        metadata,
+                        sparse_mode,
+                        attn_mask=attn_mask,
+                    )
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     input_layout = "TND"
                     extra_args = {}
@@ -951,6 +1707,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         graph_params.attn_params[num_tokens].append(attn_params)
 
         torch.npu.graph_task_group_begin(stream)
+        _segment_reuse_mark_backend_mask_consumed(
+            "graph_capture_fia",
+            attn_metadata,
+            sparse_mode,
+            attn_mask=attn_mask,
+        )
         torch_npu.npu_fused_infer_attention_score.out(
             query=query,
             key=key,
@@ -1080,6 +1842,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
         )
         torch.npu.graph_task_group_begin(stream)
+        _segment_reuse_mark_backend_mask_consumed(
+            "graph_capture_fia_v2_sinks",
+            attn_metadata,
+            4 if self.sliding_window is not None else 3,
+            attn_mask=attn_metadata.attn_mask,
+        )
         torch_npu.npu_fused_infer_attention_score_v2.out(
             query=query,
             key=key,
@@ -1275,6 +2043,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode = 4
             else:
                 sparse_mode = 3
+            _segment_reuse_mark_backend_mask_consumed(
+                "forward_fia_v2_sinks",
+                attn_metadata,
+                sparse_mode,
+                attn_mask=attn_metadata.attn_mask,
+            )
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query,
                 key,
@@ -1295,6 +2069,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
         else:
             if not attn_metadata.causal:
+                _segment_reuse_mark_backend_mask_not_consumed(
+                    "forward_fia_noncausal",
+                    attn_metadata,
+                    "noncausal FIA call does not pass atten_mask",
+                )
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
@@ -1310,6 +2089,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=0,
                 )
             elif self.sliding_window is not None:
+                _segment_reuse_mark_backend_mask_consumed(
+                    "forward_fia_sliding_window",
+                    attn_metadata,
+                    4,
+                    attn_mask=attn_metadata.attn_mask,
+                )
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
@@ -1328,6 +2113,33 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     sparse_mode=4,
                 )
             else:
+                sparse_mode = _segment_reuse_terminal_replay_dense_sparse_mode(
+                    attn_metadata
+                )
+                _segment_reuse_mark_backend_mask_consumed(
+                    "forward_fia_causal",
+                    attn_metadata,
+                    sparse_mode,
+                    attn_mask=attn_metadata.attn_mask,
+                )
+                segment_reuse_query_for_proof = (
+                    query.detach().clone()
+                    if getattr(attn_metadata, "segment_reuse_body_isolation_applied", False)
+                    and int(getattr(attn_metadata, "segment_reuse_terminal_query_tokens", 0) or 0) > 0
+                    else query
+                )
+                _segment_reuse_write_attention_bundle_part(
+                    "forward_fia_causal",
+                    attn_metadata,
+                    query=segment_reuse_query_for_proof,
+                    key=key,
+                    value=value,
+                    block_table=block_table,
+                    block_size=block_size,
+                    num_query_heads=self.num_heads,
+                    num_kv_heads=self.num_kv_heads,
+                    head_size=self.head_size,
+                )
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     query=query,
                     key=key,
@@ -1341,8 +2153,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_key_value_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale=self.scale,
-                    sparse_mode=3,
+                    sparse_mode=sparse_mode,
                 )
+                if os.environ.get("VLLM_SEGMENT_REUSE_INLINE_OUTPUT_PROOF") == "1":
+                    _segment_reuse_terminal_replay_output_proof(
+                        "forward_fia_causal",
+                        attn_metadata,
+                        query=segment_reuse_query_for_proof,
+                        key=key,
+                        value=value,
+                        backend_output=attn_output,
+                        block_table=block_table,
+                        block_size=block_size,
+                        sparse_mode=sparse_mode,
+                        scale=self.scale,
+                        num_query_heads=self.num_heads,
+                        num_kv_heads=self.num_kv_heads,
+                        head_size=self.head_size,
+                    )
 
             attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output[:num_tokens]

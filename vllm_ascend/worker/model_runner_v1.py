@@ -18,8 +18,10 @@
 #
 
 import gc
+import json
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -166,6 +168,13 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
+try:
+    from vllm_segment_reuse.live_runner_bundle import (
+        write_runtime_terminal_replay_logits_bundle_part,
+    )
+except Exception:  # pragma: no cover - parent package is optional here.
+    write_runtime_terminal_replay_logits_bundle_part = None
+
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
     get_mc2_tokens_capacity,
@@ -198,6 +207,69 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+
+
+def _segment_reuse_trace_event(event: str, **payload: Any) -> None:
+    path = os.environ.get("VLLM_SEGMENT_REUSE_DIAGNOSTICS_FILE")
+    if not path:
+        return
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"event": event, **payload}, default=str) + "\n")
+    except Exception:
+        logger.debug("segment_reuse: failed to write Ascend runner diagnostic",
+                     exc_info=True)
+
+
+def _segment_reuse_tensor_head(tensor, limit: int = 16) -> list[int]:
+    if tensor is None:
+        return []
+    try:
+        return [int(x) for x in tensor[:limit].detach().cpu().tolist()]
+    except Exception:
+        logger.debug("segment_reuse: failed to snapshot diagnostic tensor",
+                     exc_info=True)
+        return []
+
+
+def _segment_reuse_tensor_summary(tensor) -> dict[str, Any] | None:
+    if tensor is None:
+        return None
+    try:
+        detached = tensor.detach()
+        return {
+            "shape": list(detached.shape),
+            "dtype": str(detached.dtype).replace("torch.", ""),
+            "device": str(detached.device),
+            "abs_sum": float(detached.float().abs().sum().item()),
+        }
+    except Exception as exc:
+        return {
+            "summary_error": type(exc).__name__,
+            "summary_error_message": str(exc),
+        }
+
+
+def _segment_reuse_lm_head_weight(model) -> torch.Tensor | None:
+    candidates = [
+        model,
+        getattr(model, "model", None),
+        getattr(getattr(model, "model", None), "model", None),
+        getattr(model, "language_model", None),
+        getattr(getattr(model, "model", None), "language_model", None),
+    ]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        for attr in ("lm_head", "embed_out", "output_layer"):
+            layer = getattr(candidate, attr, None)
+            weight = getattr(layer, "weight", None)
+            if isinstance(weight, torch.Tensor):
+                return weight
+    return None
 
 
 @dataclass
@@ -965,6 +1037,13 @@ class NPUModelRunner(GPUModelRunner):
             token_indices_tensor,
             out=self.input_ids.cpu[:total_num_scheduled_tokens],
         )
+        if os.environ.get("VLLM_SEGMENT_REUSE_TRACE_REQUESTS"):
+            self._trace_segment_reuse_scheduled_inputs(
+                num_reqs=num_reqs,
+                num_scheduled_tokens=num_scheduled_tokens,
+                positions_np=positions_np,
+                total_num_scheduled_tokens=total_num_scheduled_tokens,
+            )
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
             torch.index_select(
@@ -1379,6 +1458,11 @@ class NPUModelRunner(GPUModelRunner):
             self.num_decode_draft_tokens.copy_to_gpu()
         # save logits_indices for pcp spec decode usage
         self.logits_indices = logits_indices
+        self._trace_segment_reuse_logits_indices(
+            num_reqs=num_reqs,
+            num_scheduled_tokens=num_scheduled_tokens,
+            logits_indices=logits_indices,
+        )
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -1406,6 +1490,201 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata,
             total_num_scheduled_tokens,
         )
+
+    def _trace_segment_reuse_scheduled_inputs(
+        self,
+        *,
+        num_reqs: int,
+        num_scheduled_tokens: np.ndarray,
+        positions_np: np.ndarray,
+        total_num_scheduled_tokens: int,
+    ) -> None:
+        token_offset = 0
+        input_ids_cpu = self.input_ids.cpu[:total_num_scheduled_tokens].tolist()
+        for req_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            num_tokens = int(num_scheduled_tokens[req_idx])
+            req_state = self.requests.get(req_id)
+            if req_state is None or num_tokens <= 0:
+                token_offset += num_tokens
+                continue
+            plan = req_state.runner_extensions.get("segment_reuse")
+            if not (
+                isinstance(plan, dict)
+                and plan.get("scheduler_phase") == "terminal_replay"
+            ):
+                token_offset += num_tokens
+                continue
+
+            req_positions = [
+                int(x)
+                for x in positions_np[token_offset : token_offset + num_tokens].tolist()
+            ]
+            req_input_ids = [
+                int(x)
+                for x in input_ids_cpu[token_offset : token_offset + num_tokens]
+            ]
+            block_tail = []
+            for group_blocks in req_state.block_ids:
+                block_tail.append([int(x) for x in group_blocks[-8:]])
+
+            logger.info(
+                "segment_reuse: terminal replay inputs req=%s req_idx=%d "
+                "num_computed_cpu=%d num_prompt_tokens=%d num_scheduled=%d "
+                "positions=%s input_ids=%s block_tail=%s plan_tail_start=%s "
+                "plan_tail_tokens=%s plan_reused_body_tokens=%s",
+                req_id,
+                req_idx,
+                int(self.input_batch.num_computed_tokens_cpu[req_idx]),
+                int(self.input_batch.num_prompt_tokens[req_idx]),
+                num_tokens,
+                req_positions,
+                req_input_ids,
+                block_tail,
+                plan.get("body_tail_start_token"),
+                plan.get("body_tail_tokens"),
+                plan.get("body_reused_tokens"),
+            )
+            token_offset += num_tokens
+
+    def _trace_segment_reuse_logits_indices(
+        self,
+        *,
+        num_reqs: int,
+        num_scheduled_tokens: np.ndarray,
+        logits_indices: torch.Tensor,
+    ) -> None:
+        if not os.environ.get("VLLM_SEGMENT_REUSE_DIAGNOSTICS_FILE"):
+            return
+        if not self._segment_reuse_has_terminal_replay(
+            num_reqs, num_scheduled_tokens
+        ):
+            return
+        query_start_loc_cpu = [
+            int(x) for x in self.query_start_loc.cpu[: num_reqs + 1].tolist()
+        ]
+        logits_indices_cpu = _segment_reuse_tensor_head(logits_indices, num_reqs)
+        plans = []
+        for req_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            req_state = self.requests.get(req_id)
+            plan = None
+            if req_state is not None:
+                plan = req_state.runner_extensions.get("segment_reuse")
+            if not (
+                isinstance(plan, dict)
+                and plan.get("scheduler_phase") == "terminal_replay"
+            ):
+                continue
+            expected_last_row = query_start_loc_cpu[req_idx + 1] - 1
+            actual_row = (
+                logits_indices_cpu[req_idx]
+                if req_idx < len(logits_indices_cpu)
+                else None
+            )
+            plans.append(
+                {
+                    "req_id": req_id,
+                    "req_idx": int(req_idx),
+                    "scheduled_tokens": int(num_scheduled_tokens[req_idx]),
+                    "query_start": int(query_start_loc_cpu[req_idx]),
+                    "query_end": int(query_start_loc_cpu[req_idx + 1]),
+                    "expected_last_row": int(expected_last_row),
+                    "actual_logits_row": actual_row,
+                    "matches_expected_last_row": actual_row == expected_last_row,
+                    "body_tail_start_token": int(
+                        plan.get("body_tail_start_token", 0) or 0
+                    ),
+                    "body_tail_tokens": int(plan.get("body_tail_tokens", 0) or 0),
+                    "body_reused_tokens": int(
+                        plan.get("body_reused_tokens", 0) or 0
+                    ),
+                }
+            )
+        if plans:
+            _segment_reuse_trace_event(
+                "ascend_runner_terminal_replay_logits_indices",
+                num_reqs=int(num_reqs),
+                query_start_loc=query_start_loc_cpu,
+                logits_indices=logits_indices_cpu,
+                plans=plans,
+            )
+            _segment_reuse_trace_event(
+                "runner_terminal_logits_ready",
+                source="ascend_model_runner_logits_indices",
+                num_reqs=int(num_reqs),
+                query_start_loc=query_start_loc_cpu,
+                logits_indices=logits_indices_cpu,
+                plans=plans,
+            )
+
+    def _trace_segment_reuse_runtime_tensor_bundle(
+        self,
+        *,
+        num_reqs: int,
+        num_scheduled_tokens: np.ndarray,
+        logits: torch.Tensor | None,
+        sample_hidden_states: torch.Tensor | None,
+    ) -> None:
+        if not os.environ.get("VLLM_SEGMENT_REUSE_DIAGNOSTICS_FILE"):
+            return
+        if not self._segment_reuse_has_terminal_replay(
+            num_reqs, num_scheduled_tokens
+        ):
+            return
+        if write_runtime_terminal_replay_logits_bundle_part is None:
+            _segment_reuse_trace_event(
+                "runtime_terminal_replay_tensor_bundle_missing",
+                semantic_proven=False,
+                semantic_reason="runtime_logits_bundle_writer_unavailable",
+            )
+            return
+
+        logits_row = 0
+        lm_head_weight = _segment_reuse_lm_head_weight(self.model)
+        for req_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            req_state = self.requests.get(req_id)
+            plan = None
+            boundary = None
+            if req_state is not None:
+                plan = req_state.runner_extensions.get("segment_reuse")
+                boundary = req_state.runner_extensions.get("segment_reuse_boundary")
+            if not (
+                isinstance(plan, dict)
+                and plan.get("scheduler_phase") == "terminal_replay"
+            ):
+                continue
+
+            replay = plan.get("terminal_replay")
+            if not isinstance(boundary, dict):
+                boundary = {}
+            runtime_logits = None
+            if logits is not None and logits_row < int(logits.shape[0]):
+                runtime_logits = logits[logits_row : logits_row + 1]
+            runtime_hidden = None
+            if (
+                sample_hidden_states is not None
+                and logits_row < int(sample_hidden_states.shape[0])
+            ):
+                runtime_hidden = sample_hidden_states[logits_row : logits_row + 1]
+            event = write_runtime_terminal_replay_logits_bundle_part(
+                request_id=str(req_id),
+                lm_head_weight=lm_head_weight,
+                runtime_logits=runtime_logits,
+                sample_hidden_states=runtime_hidden,
+                diagnostics_file=os.environ.get("VLLM_SEGMENT_REUSE_DIAGNOSTICS_FILE"),
+                extra_metadata={
+                    "req_idx": int(req_idx),
+                    "plan_kind": plan.get("kind"),
+                    "scheduler_phase": plan.get("scheduler_phase"),
+                    "terminal_compute_strategy": plan.get("terminal_compute_strategy"),
+                    "terminal_logits_source": plan.get("terminal_logits_source"),
+                    "terminal_replay": replay if isinstance(replay, dict) else None,
+                    "sample_hidden_states": _segment_reuse_tensor_summary(
+                        sample_hidden_states
+                    ),
+                },
+            )
+            _segment_reuse_trace_event(str(event.pop("event")), **event)
+            logits_row += 1
 
     def _apply_segment_reuse_scratch_slot_overrides(
         self,
@@ -1463,12 +1742,18 @@ class NPUModelRunner(GPUModelRunner):
                 if hasattr(block_table.slot_mapping, "cpu"):
                     block_table.slot_mapping.cpu[token_offset] = scratch_slot
 
-            logger.info(
-                "segment_reuse: request %s writing terminal token %d into "
-                "Ascend scratch KV slot(s)",
-                req_id,
-                token_position,
-            )
+            if os.getenv("VLLM_SEGMENT_REUSE_TRACE_REQUESTS", "0").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                logger.info(
+                    "segment_reuse: request %s writing terminal token %d into "
+                    "Ascend scratch KV slot(s)",
+                    req_id,
+                    token_position,
+                )
             token_offset += num_tokens
 
     def _rebuild_input_ids_with_corrected_positions(
@@ -1611,9 +1896,31 @@ class NPUModelRunner(GPUModelRunner):
 
         return mm_embeds, is_mm_embed
 
+    def _segment_reuse_has_terminal_replay(
+        self,
+        num_reqs,
+        num_scheduled_tokens,
+    ):
+        del num_scheduled_tokens
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            req_state = self.requests.get(req_id)
+            if req_state is None:
+                continue
+            plan = req_state.runner_extensions.get("segment_reuse")
+            if isinstance(plan, dict) and plan.get("scheduler_phase") == "terminal_replay":
+                return True
+        return False
+
     def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
         if np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0):
             attn_state = AscendAttentionState.PrefillNoCache
+        elif self._segment_reuse_has_terminal_replay(num_reqs, num_scheduled_tokens):
+            # Segment-reuse terminal replay may cover a whole tail block, but
+            # it must preserve the body-isolation attention contract. DecodeOnly
+            # and PrefillCacheHit do not consume the segment_reuse_body_isolation
+            # mask, so route this replay through the chunked-prefill metadata
+            # builder.
+            attn_state = AscendAttentionState.ChunkedPrefill
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
@@ -1640,6 +1947,25 @@ class NPUModelRunner(GPUModelRunner):
         else:
             self.attn_state = attn_state  # type: ignore
 
+        if self._segment_reuse_has_terminal_replay(num_reqs, num_scheduled_tokens):
+            _segment_reuse_trace_event(
+                "ascend_runner_terminal_replay_attn_state",
+                attn_state=str(attn_state),
+                num_reqs=int(num_reqs),
+                num_scheduled_tokens=[
+                    int(x) for x in num_scheduled_tokens[:num_reqs].tolist()
+                ],
+                num_valid_tokens=[
+                    int(x) for x in num_valid_tokens[:num_reqs].tolist()
+                ],
+                num_computed_tokens=[
+                    int(x)
+                    for x in self.input_batch.num_computed_tokens_cpu[
+                        :num_reqs
+                    ].tolist()
+                ],
+                req_ids=list(self.input_batch.req_ids[:num_reqs]),
+            )
         return attn_state
 
     def _sanitize_placeholder_input_ids_for_forward(
@@ -2488,7 +2814,6 @@ class NPUModelRunner(GPUModelRunner):
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
 
-            # Apply structured output bitmasks if present
             self.execute_model_state = ExecuteModelState(
                 scheduler_output,
                 logits,
@@ -2502,6 +2827,12 @@ class NPUModelRunner(GPUModelRunner):
                 ec_connector_output,
                 cudagraph_stats,
                 batch_desc,
+            )
+            self._trace_segment_reuse_runtime_tensor_bundle(
+                num_reqs=num_reqs,
+                num_scheduled_tokens=num_scheduled_tokens_np,
+                logits=logits,
+                sample_hidden_states=sample_hidden_states,
             )
             self.kv_connector_output = kv_connector_output
 
@@ -3268,6 +3599,55 @@ class NPUModelRunner(GPUModelRunner):
             num_computed_tokens_cpu = None
             seq_lens_cpu_metadata = self.optimistic_seq_lens_cpu[:num_reqs_padded]
 
+        segment_reuse_body_isolation = None
+        if self.attn_state in (
+            AscendAttentionState.PrefillNoCache,
+            AscendAttentionState.ChunkedPrefill,
+        ):
+            for req_idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                req_state = self.requests.get(req_id)
+                if req_state is None:
+                    continue
+                boundary = req_state.runner_extensions.get("segment_reuse_boundary")
+                if not isinstance(boundary, dict):
+                    continue
+                plan = req_state.runner_extensions.get("segment_reuse")
+                if segment_reuse_body_isolation is None:
+                    segment_reuse_body_isolation = {}
+                isolation = {
+                    "version": int(boundary.get("version", 1) or 1),
+                    "request_id": str(boundary.get("request_id") or req_id),
+                    "boundary_class": str(boundary.get("boundary_class") or ""),
+                    "attention_contract": str(boundary.get("attention_contract") or ""),
+                    "body_start_token": int(boundary.get("body_start_token", 0) or 0),
+                    "envelope_token_count": int(
+                        boundary.get("envelope_token_count", 0) or 0
+                    ),
+                    "body_token_count": int(boundary.get("body_token_count", 0) or 0),
+                }
+                if (
+                    isinstance(plan, dict)
+                    and plan.get("scheduler_phase") == "terminal_replay"
+                ):
+                    isolation["terminal_replay_query_start_token"] = int(
+                        plan.get("body_tail_start_token", 0) or 0
+                    )
+                    isolation["terminal_replay_query_tokens"] = int(
+                        plan.get("body_tail_tokens", 0) or 0
+                    )
+                segment_reuse_body_isolation[req_idx] = isolation
+        if segment_reuse_body_isolation and os.getenv(
+            "VLLM_SEGMENT_REUSE_TRACE_REQUESTS", "0"
+        ).lower() in {"1", "true", "yes", "on"}:
+            logger.info(
+                "segment_reuse: Ascend runner carrying body-isolation metadata "
+                "attn_state=%s num_reqs=%s padded_reqs=%s keys=%s",
+                self.attn_state,
+                num_reqs,
+                num_reqs_padded,
+                sorted(segment_reuse_body_isolation.keys()),
+            )
+
         cm_base = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -3295,6 +3675,7 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
+            segment_reuse_body_isolation=segment_reuse_body_isolation,
         )
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
@@ -3312,6 +3693,23 @@ class NPUModelRunner(GPUModelRunner):
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
             builder = attn_group.get_metadata_builder(ubid or 0)
+            if getattr(
+                common_attn_metadata,
+                "segment_reuse_body_isolation",
+                None,
+            ) and os.getenv("VLLM_SEGMENT_REUSE_TRACE_REQUESTS", "0").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                logger.info(
+                    "segment_reuse: Ascend building attention metadata "
+                    "builder=%s attn_state=%s num_reqs=%s",
+                    type(builder).__name__,
+                    common_attn_metadata.attn_state,
+                    common_attn_metadata.num_reqs,
+                )
             cascade_attn_prefix_len = (
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid] if cascade_attn_prefix_lens else 0
             )
@@ -3353,6 +3751,36 @@ class NPUModelRunner(GPUModelRunner):
                     and isinstance(builder, GDNAttentionMetadataBuilder) and attn_metadata_i.num_prefills == 0:
                     if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
                         attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
+            if getattr(
+                common_attn_metadata,
+                "segment_reuse_body_isolation",
+                None,
+            ) and os.getenv("VLLM_SEGMENT_REUSE_TRACE_REQUESTS", "0").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                logger.info(
+                    "segment_reuse: Ascend attention metadata ack "
+                    "builder=%s attn_state=%s seen=%s applied=%s "
+                    "envelope_tokens=%s terminal_query_start=%s "
+                    "terminal_query_tokens=%s mask_shape=%s",
+                    type(builder).__name__,
+                    common_attn_metadata.attn_state,
+                    getattr(attn_metadata_i, "segment_reuse_body_isolation_seen", None),
+                    getattr(attn_metadata_i, "segment_reuse_body_isolation_applied", None),
+                    getattr(
+                        attn_metadata_i,
+                        "segment_reuse_body_isolation_envelope_tokens",
+                        None,
+                    ),
+                    getattr(attn_metadata_i, "segment_reuse_terminal_query_start", None),
+                    getattr(attn_metadata_i, "segment_reuse_terminal_query_tokens", None),
+                    tuple(attn_metadata_i.attn_mask.shape)
+                    if getattr(attn_metadata_i, "attn_mask", None) is not None
+                    else None,
+                )
             if isinstance(builder, AscendDSAMetadataBuilder):
                 prefill_ratio_to_sas_metadata = builder.prefill_ratio_to_sas_metadata  # type: ignore[assignment]
                 decode_ratio_to_sas_metadata = builder.decode_ratio_to_sas_metadata  # type: ignore[assignment]

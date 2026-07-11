@@ -10,6 +10,7 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -617,6 +618,23 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 common_attn_metadata,
                 num_reqs_actual,
             )
+            segment_reuse_body_isolation = getattr(
+                common_attn_metadata,
+                "segment_reuse_body_isolation",
+                None,
+            )
+            if segment_reuse_body_isolation:
+                logger.info(
+                    "segment_reuse: Ascend DSA saw body-isolation metadata "
+                    "but sparse DSA metadata path does not enforce dense "
+                    "body-isolation masks yet; attn_state=%s num_reqs=%s "
+                    "keys=%s",
+                    common_attn_metadata.attn_state,
+                    num_reqs,
+                    sorted(segment_reuse_body_isolation.keys())
+                    if isinstance(segment_reuse_body_isolation, dict)
+                    else type(segment_reuse_body_isolation).__name__,
+                )
 
         decode_metadata = None
 
