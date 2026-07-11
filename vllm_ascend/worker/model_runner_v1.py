@@ -1689,6 +1689,103 @@ class NPUModelRunner(GPUModelRunner):
             plans=plans,
         )
 
+    def _segment_reuse_qkv_split_summaries(self, module, qkv) -> dict[str, Any]:
+        if not isinstance(qkv, torch.Tensor):
+            return {
+                "split_reason": "qkv_output_not_tensor",
+                "qkv_type": type(qkv).__name__,
+            }
+        sizes = getattr(module, "output_sizes", None)
+        if not isinstance(sizes, (list, tuple)) or len(sizes) != 3:
+            head_size = getattr(module, "head_size", None)
+            v_head_size = getattr(module, "v_head_size", head_size)
+            num_heads = getattr(module, "num_heads", None)
+            num_kv_heads = getattr(module, "num_kv_heads", None)
+            if None in (head_size, v_head_size, num_heads, num_kv_heads):
+                return {
+                    "split_reason": "qkv_split_sizes_unavailable",
+                    "qkv_summary": _segment_reuse_tensor_summary(qkv),
+                }
+            sizes = [
+                int(num_heads) * int(head_size),
+                int(num_kv_heads) * int(head_size),
+                int(num_kv_heads) * int(v_head_size),
+            ]
+        sizes = [int(size) for size in sizes]
+        if sum(sizes) != int(qkv.shape[-1]):
+            return {
+                "split_reason": "qkv_split_size_mismatch",
+                "split_sizes": sizes,
+                "qkv_last_dim": int(qkv.shape[-1]),
+                "qkv_summary": _segment_reuse_tensor_summary(qkv),
+            }
+        q, k, v = qkv.split(sizes, dim=-1)
+        return {
+            "split_reason": "ok",
+            "split_sizes": sizes,
+            "qkv_summary": _segment_reuse_tensor_summary(qkv),
+            "projected_query_summary": _segment_reuse_tensor_summary(q),
+            "projected_key_summary": _segment_reuse_tensor_summary(k),
+            "projected_value_summary": _segment_reuse_tensor_summary(v),
+        }
+
+    @contextmanager
+    def _trace_segment_reuse_qkv_projection_handoff(
+        self,
+        *,
+        num_reqs: int,
+        num_scheduled_tokens: np.ndarray,
+    ):
+        if not os.environ.get("VLLM_SEGMENT_REUSE_DIAGNOSTICS_FILE"):
+            yield
+            return
+        if not self._segment_reuse_has_terminal_replay(
+            num_reqs, num_scheduled_tokens
+        ):
+            yield
+            return
+        plans = self._segment_reuse_terminal_replay_trace_plans(
+            num_reqs=num_reqs,
+            num_scheduled_tokens=num_scheduled_tokens,
+        )
+        if not plans:
+            yield
+            return
+
+        handles = []
+        try:
+            model = self.get_model()
+            for module_name, module in model.named_modules():
+                if not module_name.endswith("qkv_proj"):
+                    continue
+
+                def _hook(mod, inputs, output, *, name=module_name):
+                    hidden = inputs[0] if inputs else None
+                    qkv = output[0] if isinstance(output, (tuple, list)) else output
+                    payload = self._segment_reuse_qkv_split_summaries(mod, qkv)
+                    _segment_reuse_trace_event(
+                        "ascend_runner_terminal_replay_qkv_projection",
+                        module_name=name,
+                        module_type=type(mod).__name__,
+                        module_prefix=getattr(mod, "prefix", None),
+                        hidden_states_summary=_segment_reuse_tensor_summary(hidden),
+                        output_type=type(output).__name__,
+                        plans=plans,
+                        **payload,
+                    )
+
+                handles.append(module.register_forward_hook(_hook))
+            yield
+        finally:
+            for handle in handles:
+                try:
+                    handle.remove()
+                except Exception:
+                    logger.debug(
+                        "segment_reuse: failed to remove qkv projection hook",
+                        exc_info=True,
+                    )
+
     def _trace_segment_reuse_logits_indices(
         self,
         *,
@@ -2908,9 +3005,13 @@ class NPUModelRunner(GPUModelRunner):
                 positions=positions,
                 inputs_embeds=inputs_embeds,
             )
-            hidden_states = self._model_forward(
-                num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
-            )
+            with self._trace_segment_reuse_qkv_projection_handoff(
+                num_reqs=num_reqs,
+                num_scheduled_tokens=num_scheduled_tokens_np,
+            ):
+                hidden_states = self._model_forward(
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+                )
             self._trace_segment_reuse_model_forward_outputs(
                 num_reqs=num_reqs,
                 num_scheduled_tokens=num_scheduled_tokens_np,
