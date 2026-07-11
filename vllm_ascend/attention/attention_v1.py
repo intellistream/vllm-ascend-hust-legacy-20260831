@@ -131,8 +131,6 @@ def _segment_reuse_terminal_replay_output_proof(
     num_kv_heads: int,
     head_size: int,
 ) -> None:
-    if not getattr(metadata, "segment_reuse_body_isolation_applied", False):
-        return
     terminal_query_tokens = int(
         getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0
     )
@@ -202,49 +200,6 @@ def _segment_reuse_terminal_replay_output_proof(
     )
 
 
-def _segment_reuse_tnd_view(
-    tensor: torch.Tensor,
-    *,
-    heads: int,
-    head_size: int,
-    name: str,
-) -> torch.Tensor:
-    if tensor.dim() == 3 and tuple(tensor.shape[-2:]) == (heads, head_size):
-        return tensor
-    if tensor.dim() == 2 and int(tensor.shape[-1]) == heads * head_size:
-        return tensor.view(tensor.shape[0], heads, head_size)
-    raise ValueError(f"{name} cannot be viewed as [tokens, heads, head_size]")
-
-
-def _segment_reuse_logical_kv_from_block_table(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    *,
-    block_table: torch.Tensor | None,
-    req_idx: int,
-    context_tokens: int,
-    block_size: int,
-    num_kv_heads: int,
-    head_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if block_table is None:
-        raise ValueError("terminal replay block_table missing")
-    if req_idx < 0 or req_idx >= int(block_table.shape[0]):
-        raise ValueError("terminal replay boundary req_idx outside block_table")
-    if context_tokens <= 0:
-        raise ValueError("terminal replay context_tokens invalid")
-    blocks_needed = (int(context_tokens) + int(block_size) - 1) // int(block_size)
-    block_ids = block_table[req_idx, :blocks_needed].to(
-        device=key.device,
-        dtype=torch.long,
-    )
-    key_blocks = torch.index_select(key, 0, block_ids)
-    value_blocks = torch.index_select(value, 0, block_ids)
-    key_tnd = key_blocks.reshape(-1, num_kv_heads, head_size)[:context_tokens]
-    value_tnd = value_blocks.reshape(-1, num_kv_heads, head_size)[:context_tokens]
-    return key_tnd, value_tnd
-
-
 def _segment_reuse_logical_terminal_replay_tensors(
     metadata,
     *,
@@ -268,35 +223,26 @@ def _segment_reuse_logical_terminal_replay_tensors(
         )
     req_idx_value = getattr(metadata, "segment_reuse_boundary_req_idx", -1)
     req_idx = -1 if req_idx_value is None else int(req_idx_value)
-    query_tnd = _segment_reuse_tnd_view(
+    if (
+        segment_reuse_terminal_replay_contract is None
+        or not hasattr(
+            segment_reuse_terminal_replay_contract,
+            "materialize_segment_reuse_terminal_replay_tensors",
+        )
+    ):
+        raise ValueError("triton terminal replay tensor materializer unavailable")
+    return segment_reuse_terminal_replay_contract.materialize_segment_reuse_terminal_replay_tensors(
         query,
-        heads=int(num_query_heads),
-        head_size=int(head_size),
-        name="query",
-    )[:terminal_query_tokens].clone()
-    key_tnd, value_tnd = _segment_reuse_logical_kv_from_block_table(
         key,
         value,
         block_table=block_table,
         req_idx=req_idx,
         context_tokens=context_tokens,
         block_size=int(block_size),
+        terminal_query_tokens=terminal_query_tokens,
+        num_query_heads=int(num_query_heads),
         num_kv_heads=int(num_kv_heads),
         head_size=int(head_size),
-    )
-    return (
-        query_tnd,
-        key_tnd,
-        value_tnd,
-        {
-            "logical_kv_source": "ascend-paged-cache-block-table",
-            "boundary_req_idx": req_idx,
-            "block_size": int(block_size),
-            "context_tokens": int(context_tokens),
-            "query_heads": int(num_query_heads),
-            "kv_heads": int(num_kv_heads),
-            "head_size": int(head_size),
-        },
     )
 
 
@@ -314,8 +260,6 @@ def _segment_reuse_write_attention_bundle_part(
     head_size: int,
 ) -> None:
     if write_runtime_terminal_replay_attention_bundle_part is None:
-        return
-    if not getattr(metadata, "segment_reuse_body_isolation_applied", False):
         return
     terminal_query_tokens = int(
         getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0
@@ -1783,8 +1727,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode = 3
                 segment_reuse_query_for_proof = (
                     query.detach().clone()
-                    if getattr(attn_metadata, "segment_reuse_body_isolation_applied", False)
-                    and int(getattr(attn_metadata, "segment_reuse_terminal_query_tokens", 0) or 0) > 0
+                    if int(getattr(attn_metadata, "segment_reuse_terminal_query_tokens", 0) or 0) > 0
                     else query
                 )
                 _segment_reuse_write_attention_bundle_part(
