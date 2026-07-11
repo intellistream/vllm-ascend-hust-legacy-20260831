@@ -115,6 +115,56 @@ def _segment_reuse_trace_enabled() -> bool:
     }
 
 
+def _segment_reuse_tensor_shape(tensor: torch.Tensor | None) -> list[int] | None:
+    if tensor is None:
+        return None
+    try:
+        return [int(dim) for dim in tensor.shape]
+    except Exception:
+        return None
+
+
+def _segment_reuse_tensor_abs_sum(tensor: torch.Tensor | None) -> float | None:
+    if tensor is None:
+        return None
+    try:
+        return float(tensor.detach().float().abs().sum().item())
+    except Exception:
+        return None
+
+
+def _segment_reuse_materialization_diagnostics(
+    path: str,
+    metadata,
+    *,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    block_table: torch.Tensor | None,
+    block_size: int,
+) -> dict[str, object]:
+    """Emit tensor-source diagnostics without owning proof semantics."""
+
+    return {
+        "query_source": f"{path}:pre_fia_current_query_clone",
+        "query_shape": _segment_reuse_tensor_shape(query),
+        "key_shape": _segment_reuse_tensor_shape(key),
+        "value_shape": _segment_reuse_tensor_shape(value),
+        "block_table_shape": _segment_reuse_tensor_shape(block_table),
+        "query_abs_sum": _segment_reuse_tensor_abs_sum(query),
+        "key_abs_sum": _segment_reuse_tensor_abs_sum(key),
+        "value_abs_sum": _segment_reuse_tensor_abs_sum(value),
+        "block_size": int(block_size),
+        "extra_ctx_capturing": bool(getattr(_EXTRA_CTX, "capturing", False)),
+        "terminal_query_start": int(
+            getattr(metadata, "segment_reuse_terminal_query_start", -1) or -1
+        ),
+        "terminal_query_tokens": int(
+            getattr(metadata, "segment_reuse_terminal_query_tokens", 0) or 0
+        ),
+    }
+
+
 def _segment_reuse_terminal_replay_output_proof(
     path: str,
     metadata,
@@ -145,6 +195,15 @@ def _segment_reuse_terminal_replay_output_proof(
             sparse_mode=sparse_mode,
         )
         return
+    diagnostic_metadata = _segment_reuse_materialization_diagnostics(
+        path,
+        metadata,
+        query=query,
+        key=key,
+        value=value,
+        block_table=block_table,
+        block_size=block_size,
+    )
     try:
         query, key, value, logical_metadata = _segment_reuse_logical_terminal_replay_tensors(
             metadata,
@@ -168,7 +227,9 @@ def _segment_reuse_terminal_replay_output_proof(
             semantic_reason="terminal_replay_logical_kv_materialization_failed",
             proof_reason="terminal_replay_logical_kv_materialization_failed",
             error_type=type(exc).__name__,
+            error_reason=getattr(exc, "reason", None),
             error=str(exc),
+            **diagnostic_metadata,
         )
         return
     proof = segment_reuse_terminal_replay_contract.prove_segment_reuse_terminal_replay_output_semantics(
@@ -273,6 +334,17 @@ def _segment_reuse_write_attention_bundle_part(
         "path": path,
         "attn_state": str(getattr(metadata, "attn_state", None)),
     }
+    extra_metadata.update(
+        _segment_reuse_materialization_diagnostics(
+            path,
+            metadata,
+            query=query,
+            key=key,
+            value=value,
+            block_table=block_table,
+            block_size=block_size,
+        )
+    )
     try:
         query, key, value, logical_metadata = _segment_reuse_logical_terminal_replay_tensors(
             metadata,
@@ -293,6 +365,7 @@ def _segment_reuse_write_attention_bundle_part(
             semantic_proven=False,
             semantic_reason="runtime_attention_bundle_logical_kv_materialization_failed",
             error_type=type(exc).__name__,
+            error_reason=getattr(exc, "reason", None),
             error=str(exc),
             extra_metadata=extra_metadata,
         )
