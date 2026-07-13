@@ -35,6 +35,15 @@ from vllm.logger import logger
 from vllm_ascend.ascend_config import AscendCompilationConfig, get_ascend_config
 from vllm_ascend.utils import COMPILATION_PASS_KEY
 
+try:
+    from vllm.compilation.mlp_materialization_probe import (
+        emit as emit_mlp_materialization_probe,
+    )
+except ImportError:
+
+    def emit_mlp_materialization_probe(event: str, **payload: Any) -> None:
+        return None
+
 
 def compile_fx(graph: GraphModule, example_inputs: list, inner_compile: Callable, decompositions: dict) -> Callable:
     recursive_compile_fx = functools.partial(compile_fx, inner_compile=inner_compile, decompositions=decompositions)
@@ -280,6 +289,46 @@ class AscendCompiler(CompilerInterface):
             ]
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
+        # The regular fusion path invokes the pass manager from
+        # ``fusion_pass_compile``.  npugraph_ex bypasses that helper, so run the
+        # manager here only for that backend to avoid applying graph rewrites
+        # twice in the regular path.
+        if (
+            ascend_compilation_config.enable_npugraph_ex
+            and COMPILATION_PASS_KEY in compiler_config
+        ):
+            pass_manager = compiler_config[COMPILATION_PASS_KEY]
+            before_nodes = sum(1 for _ in graph.graph.nodes)
+            emit_mlp_materialization_probe(
+                "ascend_compiler_run_graph_fusion_manager",
+                enable_npugraph_ex=ascend_compilation_config.enable_npugraph_ex,
+                compile_range={
+                    "start": getattr(compile_range, "start", None),
+                    "end": getattr(compile_range, "end", None),
+                },
+                key=key,
+                graph_type=graph.__class__.__name__,
+                node_count_before=before_nodes,
+                pass_manager=pass_manager.__class__.__name__,
+                pass_manager_id=id(pass_manager),
+            )
+            graph = pass_manager(graph)
+            emit_mlp_materialization_probe(
+                "ascend_compiler_graph_fusion_manager_done",
+                enable_npugraph_ex=ascend_compilation_config.enable_npugraph_ex,
+                key=key,
+                node_count_before=before_nodes,
+                node_count_after=sum(1 for _ in graph.graph.nodes),
+                pass_manager=pass_manager.__class__.__name__,
+                pass_manager_id=id(pass_manager),
+            )
+        elif ascend_compilation_config.enable_npugraph_ex:
+            emit_mlp_materialization_probe(
+                "ascend_compiler_missing_graph_fusion_manager",
+                enable_npugraph_ex=ascend_compilation_config.enable_npugraph_ex,
+                compiler_config_keys=list(compiler_config.keys()),
+                key=key,
+            )
         if ascend_compilation_config.enable_npugraph_ex:
             cache_dir = None if getattr(self, "disable_cache", False) else getattr(self, "cache_dir", None)
             logger.info_once(
