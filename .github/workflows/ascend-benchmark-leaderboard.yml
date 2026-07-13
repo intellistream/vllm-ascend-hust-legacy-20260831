@@ -724,14 +724,36 @@ jobs:
           VLLM_HUST_REPO: ${{ github.workspace }}/vllm-hust
           VLLM_HUST_BENCHMARK_REPO: ${{ github.workspace }}/vllm-hust-benchmark
           VLLM_HUST_DEV_HUB_REPO: ${{ github.workspace }}/vllm-hust-dev-hub
+          HUST_MANAGER_INSTALL_PYTHON_STACK: "0"
+          DEV_HUB_QUICKSTART_CONDA: "0"
+          DEV_HUB_QUICKSTART_INSTALL_MODE: ${{ vars.VLLM_ASCEND_HUST_DEV_HUB_QUICKSTART_INSTALL_MODE || 'refresh' }}
+          DEV_HUB_QUICKSTART_INSTALL_SCOPE: ${{ vars.VLLM_ASCEND_HUST_DEV_HUB_QUICKSTART_INSTALL_SCOPE || ((github.event_name == 'pull_request' || github.event_name == 'issue_comment') && 'core' || 'full') }}
           HOME: ${{ env.CI_HOME }}
           XDG_CACHE_HOME: ${{ env.CI_HOME }}/.cache
           XDG_CONFIG_HOME: ${{ env.CI_HOME }}/.config
         run: |
           set -euo pipefail
+          run_timed() {
+            local label="$1"
+            shift
+            local start_ts
+            local end_ts
+            local status
+            start_ts=$(date +%s)
+            echo "::group::${label}"
+            set +e
+            "$@"
+            status=$?
+            set -e
+            end_ts=$(date +%s)
+            echo "${label} duration: $((end_ts - start_ts))s"
+            echo "::endgroup::"
+            return "$status"
+          }
+
           mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
           chmod 700 "$HOME"
-          bash .github/workflows/scripts/install_ascend_benchmark_with_dev_hub.sh
+          run_timed "dev-hub quickstart repo setup" bash .github/workflows/scripts/install_ascend_benchmark_with_dev_hub.sh
           source scripts/hust_ascend_manager_helper.sh
           PYTHON_BIN="$(hust_resolve_python_bin)"
           export VLLM_HUST_PYTHON_BIN="$PYTHON_BIN"
@@ -747,14 +769,14 @@ jobs:
           torchvision==0.25.0
           torchaudio==2.10.0
           EOF
-          hust_run_pip install -c "$torch_constraints" \
+          run_timed "install pinned Ascend torch stack" hust_run_pip install -c "$torch_constraints" \
             "torch==2.10.0" \
             "torch-npu==2.10.0" \
             "torchvision==0.25.0" \
             "torchaudio==2.10.0" \
             "setuptools>=77,<81"
-          hust_run_pip install "numpy<2.0.0" scipy attrs decorator psutil
-          hust_run_pip install -c "$torch_constraints" -r "$VLLM_HUST_REPO/requirements/common.txt"
+          run_timed "install benchmark runtime Python deps" hust_run_pip install "numpy<2.0.0" scipy attrs decorator psutil
+          run_timed "install vllm-hust common requirements" hust_run_pip install -c "$torch_constraints" -r "$VLLM_HUST_REPO/requirements/common.txt"
           PYTHON_BIN="$(hust_resolve_python_bin)"
           export VLLM_HUST_PYTHON_BIN="$PYTHON_BIN"
           echo "VLLM_HUST_PYTHON_BIN=$VLLM_HUST_PYTHON_BIN" >> "$GITHUB_ENV"
@@ -774,8 +796,8 @@ jobs:
           print(f"torch={torch.__version__}")
           print(f"torch_npu={torch_npu.__version__}")
           PY
-          hust_run_pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]" jsonschema
-          hust_run_pip install "huggingface_hub>=0.20"
+          run_timed "install benchmark package" hust_run_pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]" jsonschema
+          run_timed "install huggingface hub client" hust_run_pip install "huggingface_hub>=0.20"
 
       - name: Verify installation
         env:

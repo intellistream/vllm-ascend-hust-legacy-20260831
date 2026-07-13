@@ -6,7 +6,136 @@ VLLM_ASCEND_HUST_REPO=${VLLM_ASCEND_HUST_REPO:-$WORKSPACE_ROOT}
 VLLM_HUST_DEV_HUB_REPO=${VLLM_HUST_DEV_HUB_REPO:-$WORKSPACE_ROOT/vllm-hust-dev-hub}
 VLLM_HUST_CONDA_ENV=${VLLM_HUST_CONDA_ENV:-vllm-hust-dev}
 PYTHON_VERSION=${PYTHON_VERSION:-3.11}
-DEV_HUB_QUICKSTART_CONDA=${DEV_HUB_QUICKSTART_CONDA:-1}
+DEV_HUB_QUICKSTART_CONDA=${DEV_HUB_QUICKSTART_CONDA:-0}
+# Keep quickstart focused on repo setup; the CI workflow installs the
+# exact torch/torch-npu stack afterwards under pinned constraints.
+: "${HUST_MANAGER_INSTALL_PYTHON_STACK:=0}"
+DEV_HUB_QUICKSTART_INSTALL_MODE=${DEV_HUB_QUICKSTART_INSTALL_MODE:-refresh}
+DEV_HUB_QUICKSTART_INSTALL_SCOPE=${DEV_HUB_QUICKSTART_INSTALL_SCOPE:-full}
+export HUST_MANAGER_INSTALL_PYTHON_STACK
+
+case "$DEV_HUB_QUICKSTART_INSTALL_MODE" in
+  install|refresh) ;;
+  *)
+    echo "Invalid DEV_HUB_QUICKSTART_INSTALL_MODE: $DEV_HUB_QUICKSTART_INSTALL_MODE" >&2
+    exit 2
+    ;;
+esac
+
+case "$DEV_HUB_QUICKSTART_INSTALL_SCOPE" in
+  core|full) ;;
+  *)
+    echo "Invalid DEV_HUB_QUICKSTART_INSTALL_SCOPE: $DEV_HUB_QUICKSTART_INSTALL_SCOPE" >&2
+    exit 2
+    ;;
+esac
+
+case "$DEV_HUB_QUICKSTART_CONDA" in
+  0|1) ;;
+  *)
+    echo "Invalid DEV_HUB_QUICKSTART_CONDA: $DEV_HUB_QUICKSTART_CONDA" >&2
+    exit 2
+    ;;
+esac
+
+ensure_conda_env_for_install_only() {
+  local conda_bin
+  local conda_root
+  local resolved_prefix
+
+  ensure_conda_for_install_only
+  conda_bin="${CONDA_EXE:-}"
+  if [[ -z "$conda_bin" ]]; then
+    conda_bin="$(command -v conda 2>/dev/null || true)"
+  fi
+  if [[ -z "$conda_bin" ]]; then
+    echo "Could not resolve conda binary for quickstart install-only flow." >&2
+    return 2
+  fi
+
+  resolved_prefix="$( (unset PYTHONPATH; "$conda_bin" env list) 2>/dev/null | awk -v env_name="${VLLM_HUST_CONDA_ENV}" '$1 == env_name {print $NF; exit}')"
+  if [[ -n "$resolved_prefix" && -x "${resolved_prefix}/bin/python" ]]; then
+    echo "Using existing conda env for quickstart install-only flow: $resolved_prefix"
+    return 0
+  fi
+
+  echo "Creating minimal conda env '$VLLM_HUST_CONDA_ENV' for quickstart install-only flow."
+  echo "This benchmark CI intentionally skips quickstart --conda to avoid Ascend Python stack reconciliation."
+  if ! (unset PYTHONPATH; "$conda_bin" create -y -n "$VLLM_HUST_CONDA_ENV" \
+    --override-channels \
+    -c "https://repo.huaweicloud.com/ascend/repos/conda/" \
+    -c "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/" \
+    "python=$PYTHON_VERSION" pip); then
+    (unset PYTHONPATH; "$conda_bin" create -y -n "$VLLM_HUST_CONDA_ENV" \
+      --override-channels \
+      -c "https://repo.huaweicloud.com/ascend/repos/conda/" \
+      -c "conda-forge" \
+      "python=$PYTHON_VERSION" pip)
+  fi
+
+  (unset PYTHONPATH; "$conda_bin" run -n "$VLLM_HUST_CONDA_ENV" python -m pip install --upgrade pip "setuptools>=77,<81" wheel)
+
+  resolved_prefix="$( (unset PYTHONPATH; "$conda_bin" env list) 2>/dev/null | awk -v env_name="${VLLM_HUST_CONDA_ENV}" '$1 == env_name {print $NF; exit}')"
+  if [[ -z "$resolved_prefix" || ! -x "${resolved_prefix}/bin/python" ]]; then
+    echo "Failed to create conda env '$VLLM_HUST_CONDA_ENV' for quickstart install-only flow." >&2
+    return 2
+  fi
+
+  conda_root="$(cd "$(dirname "$conda_bin")/.." && pwd -P)"
+  echo "Using newly created conda env for quickstart install-only flow: $resolved_prefix"
+  echo "Conda root for install-only flow: $conda_root"
+}
+
+find_conda_for_install_only() {
+  local candidate
+  local candidates=(
+    "${CONDA_EXE:-}"
+    "$(command -v conda 2>/dev/null || true)"
+    "${CI_HOME:-}/miniconda3/bin/conda"
+    "${CI_HOME:-}/anaconda3/bin/conda"
+    "${CI_HOME:-}/mambaforge/bin/conda"
+    "${CI_HOME:-}/miniforge3/bin/conda"
+    "${HOME:-}/miniconda3/bin/conda"
+    "${HOME:-}/anaconda3/bin/conda"
+    "${HOME:-}/mambaforge/bin/conda"
+    "${HOME:-}/miniforge3/bin/conda"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "$candidate" && -x "$candidate" ]] && (unset PYTHONPATH; "$candidate" info --base >/dev/null 2>&1); then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+ensure_conda_for_install_only() {
+  local conda_bin
+  local conda_prefix
+
+  if conda_bin="$(find_conda_for_install_only)"; then
+    export CONDA_EXE="$conda_bin"
+    export PATH="$(dirname "$conda_bin"):$PATH"
+    echo "Using conda for quickstart install-only flow: $conda_bin"
+    return 0
+  fi
+
+  conda_prefix="${CI_HOME:-${HOME:-/tmp}}/miniconda3"
+  echo "Installing Miniconda for quickstart install-only flow: $conda_prefix"
+  HOME="${CI_HOME:-${HOME:-/tmp}}" bash "$VLLM_HUST_DEV_HUB_REPO/scripts/install-miniconda.sh" --prefix "$conda_prefix" --yes
+
+  conda_bin="$conda_prefix/bin/conda"
+  if [[ ! -x "$conda_bin" ]] || ! (unset PYTHONPATH; "$conda_bin" info --base >/dev/null 2>&1); then
+    echo "Miniconda installation did not produce a usable conda binary: $conda_bin" >&2
+    return 2
+  fi
+
+  export CONDA_EXE="$conda_bin"
+  export PATH="$(dirname "$conda_bin"):$PATH"
+  echo "Using newly installed conda for quickstart install-only flow: $conda_bin"
+}
 
 detect_cann_major_version() {
   local candidate
@@ -95,11 +224,15 @@ export HUST_DEV_HUB_SKIP_ASCEND_SYSTEM_APPLY=1
 ensure_ascend_repo_workspace_entry
 
 echo "Using dev-hub quickstart: $VLLM_HUST_DEV_HUB_REPO/scripts/quickstart.sh"
+echo "HUST_MANAGER_INSTALL_PYTHON_STACK=$HUST_MANAGER_INSTALL_PYTHON_STACK"
+echo "DEV_HUB_QUICKSTART_CONDA=$DEV_HUB_QUICKSTART_CONDA"
+echo "DEV_HUB_QUICKSTART_INSTALL_MODE=$DEV_HUB_QUICKSTART_INSTALL_MODE"
+echo "DEV_HUB_QUICKSTART_INSTALL_SCOPE=$DEV_HUB_QUICKSTART_INSTALL_SCOPE"
 
 quickstart_args=(
   --install
-  --install-mode refresh
-  --install-scope full
+  --install-mode "$DEV_HUB_QUICKSTART_INSTALL_MODE"
+  --install-scope "$DEV_HUB_QUICKSTART_INSTALL_SCOPE"
   --env-name "$VLLM_HUST_CONDA_ENV"
   -y
 )
@@ -110,6 +243,8 @@ if [[ "$DEV_HUB_QUICKSTART_CONDA" == "1" ]]; then
     "${quickstart_args[@]}"
     --python "$PYTHON_VERSION"
   )
+else
+  ensure_conda_env_for_install_only
 fi
 
 requested_compile_custom_kernels="${COMPILE_CUSTOM_KERNELS:-auto}"

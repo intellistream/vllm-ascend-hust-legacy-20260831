@@ -548,17 +548,33 @@ same_spec_server_log_indicates_resource_busy() {
   [[ -f "$same_spec_server_log" ]] && grep -qE 'Resource_Busy\(EL0005\)|aclInit, error code is 507899|The resources are busy' "$same_spec_server_log"
 }
 
+same_spec_server_log_indicates_node_env_failure() {
+  local same_spec_server_log=$RESULT_ROOT/server.stdout.log
+  [[ -f "$same_spec_server_log" ]] && grep -qE "DrvMngGetConsoleLogLevel failed|dcmi model initialized failed|ret is -8020|drvRet=87|drvRetCode=87|ErrCode=507899|error code is 507899|rtGetDeviceCount|Can't get ascend_hal device count|driver error:internal error|Resource_Busy\(EL0005\)|The resources are busy|ERR99999 UNKNOWN applicaiton exception|ERR99999 UNKNOWN application exception" "$same_spec_server_log"
+}
+
 print_same_spec_server_log_tail() {
   local same_spec_server_log=$RESULT_ROOT/server.stdout.log
+  local line_count
 
   if [[ ! -f "$same_spec_server_log" ]]; then
     echo "same-spec server log not found: $same_spec_server_log" >&2
     return 0
   fi
 
-  echo "---- same-spec server log tail: $same_spec_server_log ----" >&2
-  tail -n 120 "$same_spec_server_log" >&2 || true
-  echo "---- end same-spec server log tail ----" >&2
+  line_count=$(wc -l < "$same_spec_server_log" | tr -d '[:space:]')
+  echo "---- same-spec server log diagnostics: $same_spec_server_log (${line_count} lines) ----" >&2
+  if (( line_count <= 260 )); then
+    cat "$same_spec_server_log" >&2 || true
+  else
+    echo "---- same-spec server log head ----" >&2
+    head -n 80 "$same_spec_server_log" >&2 || true
+    echo "---- same-spec server log error context ----" >&2
+    grep -nE 'Traceback|RuntimeError|Exception|ERROR|Error|ERR[0-9]+|UNKNOWN application|UNKNOWN applicaiton|Engine core initialization failed|Resource_Busy|aclInit|rtGetDeviceCount|torch_npu|driver error' "$same_spec_server_log" | tail -n 120 >&2 || true
+    echo "---- same-spec server log tail ----" >&2
+    tail -n 180 "$same_spec_server_log" >&2 || true
+  fi
+  echo "---- end same-spec server log diagnostics ----" >&2
 }
 
 server_log_indicates_resource_busy() {
@@ -1016,10 +1032,18 @@ PY
 
   if [[ ! -f "$same_spec_raw_result" ]]; then
     echo "same-spec benchmark did not produce raw result: $same_spec_raw_result" >&2
+    print_same_spec_server_log_tail
+    if same_spec_server_log_indicates_node_env_failure; then
+      return "$NODE_ENV_FAILURE_EXIT_CODE"
+    fi
     return 2
   fi
   if [[ ! -f "$same_spec_submission_dir/leaderboard_manifest.json" || ! -f "$same_spec_submission_dir/run_leaderboard.json" ]]; then
     echo "same-spec benchmark did not produce submission artifacts under: $same_spec_submission_dir" >&2
+    print_same_spec_server_log_tail
+    if same_spec_server_log_indicates_node_env_failure; then
+      return "$NODE_ENV_FAILURE_EXIT_CODE"
+    fi
     return 2
   fi
   local validation_status=0

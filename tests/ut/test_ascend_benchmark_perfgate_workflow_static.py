@@ -105,6 +105,12 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "HUST_ASCEND_MANAGER_REF" in workflow
     assert "ref: ${{ env.HUST_ASCEND_MANAGER_REF }}" in workflow
     assert "install_ascend_benchmark_with_dev_hub.sh" in workflow
+    assert 'HUST_MANAGER_INSTALL_PYTHON_STACK: "0"' in workflow
+    assert 'DEV_HUB_QUICKSTART_CONDA: "0"' in workflow
+    assert "DEV_HUB_QUICKSTART_INSTALL_MODE:" in workflow
+    assert "DEV_HUB_QUICKSTART_INSTALL_SCOPE:" in workflow
+    assert "dev-hub quickstart repo setup" in workflow
+    assert "install pinned Ascend torch stack" in workflow
     assert 'hust_run_pip install "torch==2.9.0"' not in workflow
     assert "scripts/install_local_ascend_plugin.sh" not in workflow
     assert "resolve_cann_major_version()" not in workflow
@@ -163,6 +169,8 @@ def test_benchmark_runner_resolves_same_spec_without_random_online_default() -> 
     assert "BENCH_DATASET_PATH is required for sharegpt-online" in sharegpt_block
     assert 'CLIENT_READY_CHECK_TIMEOUT_SECONDS="$SAME_SPEC_CLIENT_READY_TIMEOUT_SECONDS"' in runner_script
     assert "print_same_spec_server_log_tail" in runner_script
+    assert "same_spec_server_log_indicates_node_env_failure" in runner_script
+    assert "same-spec server log diagnostics" in runner_script
     assert "prepare_same_spec_pr_preview_compat_file()" in runner_script
     assert 'server_parameters["no_enable_chunked_prefill"] = True' in runner_script
     assert 'server_parameters["no_enable_prefix_caching"] = True' in runner_script
@@ -178,6 +186,15 @@ def test_benchmark_runner_resolves_same_spec_without_random_online_default() -> 
         : validation_failure_block.index("  fi")
     ]
     assert "print_same_spec_server_log_tail" in validation_failure_block
+
+    missing_result_block = runner_script[
+        runner_script.index('if [[ ! -f "$same_spec_raw_result" ]]; then') :
+    ]
+    missing_result_block = missing_result_block[
+        : missing_result_block.index("  fi")
+    ]
+    assert "print_same_spec_server_log_tail" in missing_result_block
+    assert 'return "$NODE_ENV_FAILURE_EXIT_CODE"' in missing_result_block
 
 
 def test_pull_request_defaults_match_perfgate_spec_size() -> None:
@@ -273,6 +290,12 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
 
     assert "install_ascend_benchmark_with_dev_hub.sh" in prepare_step
     assert "hust_ascend_manager_run setup --non-interactive" not in prepare_step
+    assert 'DEV_HUB_QUICKSTART_CONDA: "0"' in prepare_step
+    install_dev_hub_script = INSTALL_DEV_HUB_SCRIPT.read_text(encoding="utf-8")
+    assert "avoid Ascend Python stack reconciliation" in install_dev_hub_script
+    assert "ensure_conda_for_install_only" in install_dev_hub_script
+    assert "install-miniconda.sh" in install_dev_hub_script
+    assert '"$conda_bin" create -y -n "$VLLM_HUST_CONDA_ENV"' in install_dev_hub_script
     assert "ascend-torch-constraints.txt" in prepare_step
     assert "torch==2.10.0" in prepare_step
     assert "torch-npu==2.10.0" in prepare_step
