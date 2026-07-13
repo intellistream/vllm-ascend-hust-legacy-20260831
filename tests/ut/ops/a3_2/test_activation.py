@@ -13,6 +13,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -94,8 +95,10 @@ def test_AscendSiluAndMul_forward_oot_prefetch(
     mock_swiglu,
     mock_get_weight_prefetch_method,
     dummy_tensor,
+    monkeypatch,
     default_vllm_config,
 ):
+    monkeypatch.delenv("VLLM_ASCEND_MLP_MATERIALIZATION_REWRITE", raising=False)
     weight_prefetch_method = MagicMock()
     weight_prefetch_method.MLP_DOWN = "mlp_down"
     mock_get_weight_prefetch_method.return_value = weight_prefetch_method
@@ -109,6 +112,93 @@ def test_AscendSiluAndMul_forward_oot_prefetch(
     weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess.assert_called_once_with(out)
     mock_swiglu.assert_called_once_with(dummy_tensor)
     assert torch.allclose(out, dummy_tensor + 1)
+
+
+@patch("vllm_ascend.ops.activation.get_weight_prefetch_method")
+@patch("torch_npu.npu_swiglu")
+def test_AscendSiluAndMul_forward_oot_gate_half_inplace_rewrite(
+    mock_swiglu,
+    mock_get_weight_prefetch_method,
+    dummy_tensor,
+    monkeypatch,
+    default_vllm_config,
+):
+    monkeypatch.setenv("VLLM_ASCEND_MLP_MATERIALIZATION_REWRITE", "gate_half_inplace")
+    weight_prefetch_method = MagicMock()
+    weight_prefetch_method.MLP_DOWN = "mlp_down"
+    mock_get_weight_prefetch_method.return_value = weight_prefetch_method
+
+    x = dummy_tensor.clone()
+    ref = torch.nn.functional.silu(dummy_tensor[..., :4]) * dummy_tensor[..., 4:]
+    layer = AscendSiluAndMul()
+    out = layer.forward_oot(x)
+
+    mock_swiglu.assert_not_called()
+    assert torch.allclose(out, ref)
+    assert out.data_ptr() == x[..., :4].data_ptr()
+    weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess.assert_called_once_with(
+        weight_prefetch_method.MLP_DOWN, x
+    )
+    weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess.assert_called_once_with(out)
+
+
+@patch("vllm_ascend.ops.activation.get_weight_prefetch_method")
+@patch("torch_npu.npu_swiglu")
+def test_AscendSiluAndMul_forward_oot_probe_records_rewrite(
+    mock_swiglu,
+    mock_get_weight_prefetch_method,
+    dummy_tensor,
+    tmp_path,
+    monkeypatch,
+    default_vllm_config,
+):
+    probe_file = tmp_path / "probe.jsonl"
+    monkeypatch.setenv("VLLM_ASCEND_MLP_MATERIALIZATION_REWRITE", "gate_half_inplace")
+    monkeypatch.setenv("VLLM_ASCEND_MLP_MATERIALIZATION_PROBE_FILE", str(probe_file))
+    monkeypatch.setenv("VLLM_ASCEND_MLP_MATERIALIZATION_PROBE_LIMIT", "4")
+    weight_prefetch_method = MagicMock()
+    weight_prefetch_method.MLP_DOWN = "mlp_down"
+    mock_get_weight_prefetch_method.return_value = weight_prefetch_method
+
+    x = dummy_tensor.clone()
+    layer = AscendSiluAndMul()
+    out = layer.forward_oot(x)
+
+    mock_swiglu.assert_not_called()
+    events = [json.loads(line) for line in probe_file.read_text().splitlines()]
+    assert len(events) == 1
+    event = events[0]
+    assert event["event"] == "ascend_silu_and_mul_forward_oot"
+    assert event["rewrite_enabled"] is True
+    assert event["shape"] == list(x.shape)
+    assert event["dtype"] == str(x.dtype)
+    assert event["output_aliases_gate_half"] is True
+    assert event["output_data_ptr"] == out.data_ptr()
+
+
+@patch("vllm_ascend.ops.activation.get_weight_prefetch_method")
+@patch("torch_npu.npu_swiglu")
+def test_AscendSiluAndMul_forward_oot_probe_skips_during_compile(
+    mock_swiglu,
+    mock_get_weight_prefetch_method,
+    dummy_tensor,
+    tmp_path,
+    monkeypatch,
+    default_vllm_config,
+):
+    probe_file = tmp_path / "probe.jsonl"
+    monkeypatch.setenv("VLLM_ASCEND_MLP_MATERIALIZATION_REWRITE", "gate_half_inplace")
+    monkeypatch.setenv("VLLM_ASCEND_MLP_MATERIALIZATION_PROBE_FILE", str(probe_file))
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    weight_prefetch_method = MagicMock()
+    weight_prefetch_method.MLP_DOWN = "mlp_down"
+    mock_get_weight_prefetch_method.return_value = weight_prefetch_method
+
+    layer = AscendSiluAndMul()
+    layer.forward_oot(dummy_tensor.clone())
+
+    mock_swiglu.assert_not_called()
+    assert not probe_file.exists()
 
 
 @pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")

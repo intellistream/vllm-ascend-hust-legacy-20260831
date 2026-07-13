@@ -148,6 +148,20 @@ env_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_ASCEND_DISABLE_TOP_K_TOP_P_CUSTOM_OP", "0"))
     ),
 
+    # Default-off MLP activation materialization experiment. The only supported
+    # rewrite is "gate_half_inplace"; an empty value preserves npu_swiglu.
+    "VLLM_ASCEND_MLP_MATERIALIZATION_REWRITE": lambda: os.getenv(
+        "VLLM_ASCEND_MLP_MATERIALIZATION_REWRITE", ""
+    ),
+    # Optional JSONL destination for bounded, non-secret activation probe data.
+    "VLLM_ASCEND_MLP_MATERIALIZATION_PROBE_FILE": lambda: os.getenv(
+        "VLLM_ASCEND_MLP_MATERIALIZATION_PROBE_FILE", ""
+    ),
+    # Maximum number of activation probe events emitted by one worker process.
+    "VLLM_ASCEND_MLP_MATERIALIZATION_PROBE_LIMIT": lambda: int(
+        os.getenv("VLLM_ASCEND_MLP_MATERIALIZATION_PROBE_LIMIT", "32")
+    ),
+
     # -- Sim-LLM: KV reuse optimization ---------------------------------------
     # Whether to enable Sim-LLM KV reuse optimization. When set to 1, the Sim-LLM
     # patch wraps NPUModelRunner.execute_model() at worker init time.
