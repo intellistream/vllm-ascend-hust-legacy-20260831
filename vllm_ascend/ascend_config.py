@@ -367,6 +367,9 @@ class AscendConfig:
         rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
         self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
 
+        split_batch_config = additional_config.get("split_batch_config", {})
+        self.split_batch_config = SplitBatchConfig(split_batch_config)
+
     def get_utility_selector_config_dict(self) -> dict[str, Any]:
         return {
             "enable_utility_victim_selection": self.enable_utility_victim_selection,
@@ -963,3 +966,158 @@ def get_ascend_config():
     if _ASCEND_CONFIG is None or not _is_ascend_config_initialized(_ASCEND_CONFIG):
         raise RuntimeError("Ascend config is not initialized. Please call init_ascend_config first.")
     return _ASCEND_CONFIG
+
+
+class SplitBatchConfig:
+    """Configuration for DUAL_INPLACE split-batch mode.
+
+    Parsed from ``additional_config.split_batch_config``.
+    """
+
+    def __init__(self, split_batch_config: dict | None = None):
+        if split_batch_config is None:
+            split_batch_config = {}
+        self.enabled: bool = bool(split_batch_config.get("enabled", False))
+        self.enable_parallel_streams: bool = bool(
+            split_batch_config.get("enable_parallel_streams", False)
+        )
+        self.mode: str = str(split_batch_config.get("mode", "parallel_buffer"))
+        self.num_splits: int = int(split_batch_config.get("num_splits", 2))
+        self.min_batch_size_for_split: int = int(
+            split_batch_config.get("min_batch_size_for_split", 4)
+        )
+
+        raw_parallel_sizes = split_batch_config.get("parallel_capture_sizes", None)
+        if raw_parallel_sizes is not None:
+            self.parallel_capture_sizes: list[int] = sorted(int(s) for s in raw_parallel_sizes)
+        else:
+            self.parallel_capture_sizes = None
+
+        self.enable_inplace_lazy_capture: bool = bool(
+            split_batch_config.get("enable_inplace_lazy_capture", True)
+        )
+
+        self.inplace_parallel_replay_policy: str = str(
+            split_batch_config.get("inplace_parallel_replay_policy", "full_graph_parallel")
+        )
+        self.piecewise_scheduler_sync_policy: str = str(
+            split_batch_config.get("piecewise_scheduler_sync_policy", "event_chain")
+        )
+        self.piecewise_attention_enqueue_policy: str = str(
+            split_batch_config.get("piecewise_attention_enqueue_policy", "persistent_thread")
+        )
+        self.inplace_validate_metadata_ptrs: bool = bool(
+            split_batch_config.get("inplace_validate_metadata_ptrs", False)
+        )
+        self.inplace_force_pa_for_offset: bool = bool(
+            split_batch_config.get("inplace_force_pa_for_offset", False)
+        )
+        self.enable_inplace_spec_decode: bool = bool(
+            split_batch_config.get("enable_inplace_spec_decode", False)
+        )
+        self.enable_inplace_mrope: bool = bool(
+            split_batch_config.get("enable_inplace_mrope", False)
+        )
+        self.inplace_split_planner_policy: str = str(
+            split_batch_config.get("inplace_split_planner_policy",
+                                   split_batch_config.get("inplace_split_first_tokens_policy", "largest_lower"))
+        )
+        self.inplace_offset_match_policy: str = str(
+            split_batch_config.get("inplace_offset_match_policy", "exact")
+        )
+
+        raw_offset_capture_sizes = split_batch_config.get("inplace_offset_capture_sizes", None)
+        if raw_offset_capture_sizes is not None:
+            self.inplace_offset_capture_sizes: list[int] | None = sorted(
+                int(s) for s in raw_offset_capture_sizes
+            )
+        else:
+            self.inplace_offset_capture_sizes = None
+
+        self.inplace_offset_min_graph_tokens: int = int(
+            split_batch_config.get("inplace_offset_min_graph_tokens", 1)
+        )
+
+        raw_max_pad_tokens = split_batch_config.get("inplace_offset_max_padding_tokens", None)
+        self.inplace_offset_max_padding_tokens: int | None = (
+            int(raw_max_pad_tokens) if raw_max_pad_tokens is not None else None
+        )
+
+        raw_max_pad_ratio = split_batch_config.get("inplace_offset_max_padding_ratio", None)
+        self.inplace_offset_max_padding_ratio: float | None = (
+            float(raw_max_pad_ratio) if raw_max_pad_ratio is not None else None
+        )
+
+        raw_max_graph_by_start = split_batch_config.get(
+            "inplace_offset_max_graph_tokens_by_start", None
+        )
+        if raw_max_graph_by_start is not None:
+            self.inplace_offset_max_graph_tokens_by_start: dict[int, int] | None = {
+                int(k): int(v) for k, v in raw_max_graph_by_start.items()
+            }
+        else:
+            self.inplace_offset_max_graph_tokens_by_start = None
+
+        raw_allowed_by_start = split_batch_config.get(
+            "inplace_offset_allowed_graph_tokens_by_start", None
+        )
+        if raw_allowed_by_start is not None:
+            self.inplace_offset_allowed_graph_tokens_by_start: dict[int, list[int]] | None = {
+                int(k): [int(v) for v in vs] for k, vs in raw_allowed_by_start.items()
+            }
+        else:
+            self.inplace_offset_allowed_graph_tokens_by_start = None
+
+        raw_max_remainder = split_batch_config.get("inplace_max_remainder_tokens", None)
+        self.inplace_max_remainder_tokens: int | None = (
+            int(raw_max_remainder) if raw_max_remainder is not None else None
+        )
+
+        self._validate()
+
+    def _validate(self):
+        valid_modes = ("parallel_buffer", "inplace_serial", "inplace_parallel")
+        if self.mode not in valid_modes:
+            raise ValueError(
+                f"split_batch_config.mode must be one of {valid_modes}, got '{self.mode}'"
+            )
+        if self.mode in ("inplace_serial", "inplace_parallel") and self.num_splits != 2:
+            raise ValueError(
+                f"split_batch_config.num_splits must be 2 for inplace modes, got {self.num_splits}"
+            )
+        valid_offset_policies = ("exact", "bucket")
+        if self.inplace_offset_match_policy not in valid_offset_policies:
+            raise ValueError(
+                f"split_batch_config.inplace_offset_match_policy must be one of "
+                f"{valid_offset_policies}, got '{self.inplace_offset_match_policy}'"
+            )
+        valid_replay_policies = ("full_graph_parallel", "piecewise_attention_parallel")
+        if self.inplace_parallel_replay_policy not in valid_replay_policies:
+            raise ValueError(
+                f"split_batch_config.inplace_parallel_replay_policy must be one of "
+                f"{valid_replay_policies}, got '{self.inplace_parallel_replay_policy}'"
+            )
+        valid_sync_policies = ("host_sync", "event_chain")
+        if self.piecewise_scheduler_sync_policy not in valid_sync_policies:
+            raise ValueError(
+                f"split_batch_config.piecewise_scheduler_sync_policy must be one of "
+                f"{valid_sync_policies}, got '{self.piecewise_scheduler_sync_policy}'"
+            )
+        valid_attention_policies = ("per_piece_thread", "persistent_thread")
+        if self.piecewise_attention_enqueue_policy not in valid_attention_policies:
+            raise ValueError(
+                f"split_batch_config.piecewise_attention_enqueue_policy must be one of "
+                f"{valid_attention_policies}, got '{self.piecewise_attention_enqueue_policy}'"
+            )
+        if (self.inplace_parallel_replay_policy == "piecewise_attention_parallel"
+                and self.mode == "inplace_parallel"):
+            logger.info(
+                "piecewise_attention_parallel enabled; ensure cudagraph_mode "
+                "is set to PIECEWISE at runtime")
+        valid_planner_policies = ("largest_lower", "balanced")
+        if self.inplace_split_planner_policy not in valid_planner_policies:
+            raise ValueError(
+                f"split_batch_config.inplace_split_planner_policy must be one of "
+                f"{valid_planner_policies}, got '{self.inplace_split_planner_policy}'"
+            )
+

@@ -21,6 +21,7 @@ import os
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
     MRotaryEmbedding,
@@ -53,19 +54,20 @@ _sin_mla: torch.Tensor = None
 _cos_cache: torch.Tensor = None
 _sin_cache: torch.Tensor = None
 _cos_sin_cache: torch.Tensor = None
-_cos: torch.Tensor = None
-_sin: torch.Tensor = None
-_cos_slice: torch.Tensor = None
-_sin_slice: torch.Tensor = None
+_NUM_COS_SIN_SLOTS = 2
+_cos_slots: list[torch.Tensor | None] = [None] * _NUM_COS_SIN_SLOTS
+_sin_slots: list[torch.Tensor | None] = [None] * _NUM_COS_SIN_SLOTS
+_cos_slice_slots: list[torch.Tensor | None] = [None] * _NUM_COS_SIN_SLOTS
+_sin_slice_slots: list[torch.Tensor | None] = [None] * _NUM_COS_SIN_SLOTS
 
 
 def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, device):
     global _cos_mla
     global _sin_mla
-    global _cos
-    global _sin
+    global _cos_slots
+    global _sin_slots
 
-    if _cos_mla is not None or _sin_mla is not None or _cos is not None or _sin is not None:
+    if _cos_mla is not None or _sin_mla is not None or _cos_slots[0] is not None or _sin_slots[0] is not None:
         return
 
     model_config = vllm_config.model_config
@@ -77,24 +79,23 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
         _sin_mla = torch.zeros(max_num_batched_tokens, 1, 1, rope_dim, dtype=dtype, device=device)
     elif not is_vl_model(vllm_config) and has_rope(vllm_config):
         rope_dim = model_config.get_head_size()
-        # For models using partial rope like Qwen3-Next.
         if hasattr(model_config.hf_text_config, "partial_rotary_factor"):
             rope_dim = int(rope_dim * model_config.hf_text_config.partial_rotary_factor)
         elif hasattr(model_config.hf_text_config, "rotary_dim"):
             rope_dim = int(model_config.hf_text_config.rotary_dim)
-        _cos = torch.ones(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
-        _sin = torch.zeros(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
+        for i in range(_NUM_COS_SIN_SLOTS):
+            _cos_slots[i] = torch.ones(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
+            _sin_slots[i] = torch.zeros(1, max_num_batched_tokens, 1, rope_dim, dtype=dtype, device=device)
 
 
-def get_cos_and_sin_mla(positions, use_cache=False):
-    global _cos_cache
-    global _sin_cache
+def get_cos_and_sin_mla(positions=None, use_cache=False):
+    global _cos_mla, _sin_mla, _cos_cache, _sin_cache
+    if positions is None:
+        return _cos_mla, _sin_mla
     cos = _cos_cache[positions].unsqueeze(1).unsqueeze(2)
     sin = _sin_cache[positions].unsqueeze(1).unsqueeze(2)
     if not use_cache:
         return cos, sin
-    global _cos_mla
-    global _sin_mla
     num_tokens = positions.size(0)
     _cos_mla[:num_tokens, ...] = cos
     _sin_mla[:num_tokens, ...] = sin
@@ -126,28 +127,26 @@ def _record_cos_and_sin_cache_interleaved(cos_sin_cache):
     _sin_cache = sin_cache.squeeze(1)
 
 
-def update_cos_sin(positions):
-    global _cos
-    global _sin
-    global _cos_slice
-    global _sin_slice
+def update_cos_sin(positions, slot_id=0):
+    global _cos_slice_slots
+    global _sin_slice_slots
 
-    if _cos_sin_cache is None or _cos is None or _sin is None:
+    if _cos_sin_cache is None or _cos_slots[slot_id] is None or _sin_slots[slot_id] is None:
         return
 
     num_tokens = positions.size(0)
-    _cos[:, :num_tokens] = (
+    _cos_slots[slot_id][:, :num_tokens] = (
         _cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[0]
     )
-    _sin[:, :num_tokens] = (
+    _sin_slots[slot_id][:, :num_tokens] = (
         _cos_sin_cache.index_select(0, positions).view(num_tokens, 2, -1).repeat(1, 1, 2).chunk(2, dim=-2)[1]
     )
-    _cos_slice = _cos[:, :num_tokens]
-    _sin_slice = _sin[:, :num_tokens]
+    _cos_slice_slots[slot_id] = _cos_slots[slot_id][:, :num_tokens]
+    _sin_slice_slots[slot_id] = _sin_slots[slot_id][:, :num_tokens]
 
 
-def get_cos_and_sin_slice():
-    return _cos_slice, _sin_slice
+def get_cos_and_sin_slice(slot_id=0):
+    return _cos_slice_slots[slot_id], _sin_slice_slots[slot_id]
 
 
 def rope_forward_oot(
@@ -174,7 +173,21 @@ def rope_forward_oot(
             is_neox_style=is_neox_style,
         )
     else:
-        if rotary_dim < head_size:
+        forward_context = get_forward_context()
+        slot_id = forward_context.cos_sin_slot_id
+        cos, sin = get_cos_and_sin_slice(slot_id=slot_id)
+        if (is_neox_style and head_size == 128
+                and cos_sin_cache.shape[-1] == 128
+                and cos is not None and sin is not None):
+            query = query.contiguous().view(1, query.shape[0], -1, head_size)
+            key = key.contiguous().view(1, key.shape[0], -1, head_size)
+            if getattr(forward_context, "dbo_enabled", False):
+                query, key = torch_npu.npu_apply_rotary_pos_emb(
+                    query, key, forward_context.cos, forward_context.sin)
+            else:
+                query, key = torch_npu.npu_apply_rotary_pos_emb(
+                    query, key, cos, sin)
+        elif rotary_dim < head_size:
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, head_size)
             key = key.view(num_tokens, -1, head_size)
