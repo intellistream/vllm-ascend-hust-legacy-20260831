@@ -200,6 +200,24 @@ if [[ -n "${VLLM_ASCEND_HUST_REPO:-}" && -d "${VLLM_ASCEND_HUST_REPO}" ]]; then
   echo "[INFO] PYTHONPATH prioritized for vllm-ascend-hust: ${expected_repo}"
 fi
 
+if python_bin="$(cann_tbe_python_bin 2>/dev/null)"; then
+  python_lib_dir="$(cd "$(dirname "${python_bin}")/.." && pwd)/lib"
+  if [[ -d "${python_lib_dir}" ]]; then
+    case ":${LD_LIBRARY_PATH:-}:" in
+      *":${python_lib_dir}:"*)
+        ;;
+      *)
+        if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+          export LD_LIBRARY_PATH="${python_lib_dir}:${LD_LIBRARY_PATH}"
+        else
+          export LD_LIBRARY_PATH="${python_lib_dir}"
+        fi
+        echo "[INFO] LD_LIBRARY_PATH prioritized for conda runtime libs: ${python_lib_dir}"
+        ;;
+    esac
+  fi
+fi
+
 echo "[OK] Single Ascend runtime is configured"
 echo "  ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-<unset>}"
 echo "  CANN_VERSION=${HUST_ASCEND_RUNTIME_VERSION:-<unknown>}"

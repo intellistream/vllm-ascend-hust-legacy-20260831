@@ -254,6 +254,8 @@ def test_single_ascend_env_falls_back_when_manager_env_fails() -> None:
     assert "/usr/local/Ascend/cann-*/set_env.sh" in single_env
     assert '[[ -n "${ASCEND_HOME_PATH:-}" && -n "${ASCEND_OPP_PATH:-}" ]] && python_can_import_tbe' in single_env
     assert 'ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-<unset>}' in single_env
+    assert "LD_LIBRARY_PATH prioritized for conda runtime libs" in single_env
+    assert 'python_lib_dir="$(cd "$(dirname "${python_bin}")/.." && pwd)/lib"' in single_env
 
 
 def test_local_plugin_editable_install_bootstraps_build_metadata_deps() -> None:
