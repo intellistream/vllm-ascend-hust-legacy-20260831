@@ -105,6 +105,7 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "HUST_ASCEND_MANAGER_REF" in workflow
     assert "ref: ${{ env.HUST_ASCEND_MANAGER_REF }}" in workflow
     assert "install_ascend_benchmark_with_dev_hub.sh" in workflow
+    assert 'HUST_MANAGER_INSTALL_PYTHON_STACK: "0"' in workflow
     assert 'hust_run_pip install "torch==2.9.0"' not in workflow
     assert "scripts/install_local_ascend_plugin.sh" not in workflow
     assert "resolve_cann_major_version()" not in workflow
@@ -370,6 +371,7 @@ def test_dev_hub_install_wrapper_centralizes_custom_kernel_policy() -> None:
     assert 'if [[ "$cann_major" == "9" ]]; then' in install_script
     assert "dev-hub-default" in install_script
     assert "COMPILE_CUSTOM_KERNELS=auto resolved to dev-hub default policy for CANN 9" in install_script
+    assert ': "${HUST_MANAGER_INSTALL_PYTHON_STACK:=0}"' in install_script
     assert "--ascend-lightweight" in install_script
     assert "--ascend-custom-kernels" in install_script
     assert "HUST_DEV_HUB_ASCEND_COMPILE_CUSTOM_KERNELS" in install_script

@@ -7,6 +7,10 @@ VLLM_HUST_DEV_HUB_REPO=${VLLM_HUST_DEV_HUB_REPO:-$WORKSPACE_ROOT/vllm-hust-dev-h
 VLLM_HUST_CONDA_ENV=${VLLM_HUST_CONDA_ENV:-vllm-hust-dev}
 PYTHON_VERSION=${PYTHON_VERSION:-3.11}
 DEV_HUB_QUICKSTART_CONDA=${DEV_HUB_QUICKSTART_CONDA:-1}
+# Keep quickstart focused on repo setup; the CI workflow installs the
+# exact torch/torch-npu stack afterwards under pinned constraints.
+: "${HUST_MANAGER_INSTALL_PYTHON_STACK:=0}"
+export HUST_MANAGER_INSTALL_PYTHON_STACK
 
 detect_cann_major_version() {
   local candidate
@@ -95,6 +99,7 @@ export HUST_DEV_HUB_SKIP_ASCEND_SYSTEM_APPLY=1
 ensure_ascend_repo_workspace_entry
 
 echo "Using dev-hub quickstart: $VLLM_HUST_DEV_HUB_REPO/scripts/quickstart.sh"
+echo "HUST_MANAGER_INSTALL_PYTHON_STACK=$HUST_MANAGER_INSTALL_PYTHON_STACK"
 
 quickstart_args=(
   --install

@@ -724,6 +724,7 @@ jobs:
           VLLM_HUST_REPO: ${{ github.workspace }}/vllm-hust
           VLLM_HUST_BENCHMARK_REPO: ${{ github.workspace }}/vllm-hust-benchmark
           VLLM_HUST_DEV_HUB_REPO: ${{ github.workspace }}/vllm-hust-dev-hub
+          HUST_MANAGER_INSTALL_PYTHON_STACK: "0"
           HOME: ${{ env.CI_HOME }}
           XDG_CACHE_HOME: ${{ env.CI_HOME }}/.cache
           XDG_CONFIG_HOME: ${{ env.CI_HOME }}/.config
