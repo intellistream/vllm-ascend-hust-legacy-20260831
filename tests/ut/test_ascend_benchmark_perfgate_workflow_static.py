@@ -283,6 +283,38 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
     assert "VLLM_HUST_PYTHON_BIN" in prepare_step
 
 
+def test_benchmark_prepare_prioritizes_python_env_lib_for_torch_npu() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    helper = MANAGER_HELPER.read_text(encoding="utf-8")
+    prepare_step = workflow[workflow.index("Prepare Ascend runtime and install repos") :]
+    prepare_step = prepare_step[: prepare_step.index("- name: Verify installation")]
+
+    assert "hust_prepend_python_env_lib_path()" in helper
+    assert 'python_prefix="$(cd "$(dirname "${python_bin}")/.." && pwd)"' in helper
+    assert 'export LD_LIBRARY_PATH="${python_lib}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"' in helper
+    assert 'export HUST_PYTHON_ENV_LIB_PATH="${python_lib}"' in helper
+    assert 'if hust_prepend_python_env_lib_path "$PYTHON_BIN"; then' in prepare_step
+    assert 'echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"' in prepare_step
+    assert "Prioritized Python environment library path" in prepare_step
+    assert prepare_step.index('source scripts/use_single_ascend_env.sh') < prepare_step.index(
+        'if hust_prepend_python_env_lib_path "$PYTHON_BIN"; then'
+    )
+
+
+def test_multi_scenario_runner_prints_failure_diagnostics() -> None:
+    runner_script = (SCRIPT_DIR / "run_ascend_benchmark_scenario_list.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "scenario.log" in runner_script
+    assert ') 2>&1 | tee "$scenario_log"' in runner_script
+    assert "scenario_exit_code=${PIPESTATUS[0]}" in runner_script
+    assert "print_multi_scenario_summary" in runner_script
+    assert "Failed Ascend benchmark scenario diagnostics" in runner_script
+    assert 'print_file_tail "scenario output"' in runner_script
+    assert 'print_file_tail "vLLM server log"' in runner_script
+
+
 def test_benchmark_runner_auto_disables_sudo_when_unavailable() -> None:
     runner_script = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
 

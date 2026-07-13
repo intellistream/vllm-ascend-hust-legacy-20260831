@@ -737,6 +737,10 @@ jobs:
           export VLLM_HUST_PYTHON_BIN="$PYTHON_BIN"
           echo "VLLM_HUST_PYTHON_BIN=$VLLM_HUST_PYTHON_BIN" >> "$GITHUB_ENV"
           source scripts/use_single_ascend_env.sh
+          if hust_prepend_python_env_lib_path "$PYTHON_BIN"; then
+            echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+            echo "Prioritized Python environment library path: $HUST_PYTHON_ENV_LIB_PATH"
+          fi
 
           export PYTHONPATH="$VLLM_HUST_REPO:$VLLM_HUST_BENCHMARK_REPO/src${PYTHONPATH:+:$PYTHONPATH}"
           echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
@@ -785,6 +789,7 @@ jobs:
           source scripts/use_single_ascend_env.sh
           export PYTHONPATH="$VLLM_HUST_REPO:$VLLM_HUST_BENCHMARK_REPO/src${PYTHONPATH:+:$PYTHONPATH}"
           PYTHON_BIN="$(hust_resolve_python_bin)"
+          hust_prepend_python_env_lib_path "$PYTHON_BIN" || true
           "$PYTHON_BIN" --version
           "$PYTHON_BIN" - <<'PY'
           import numpy
@@ -828,10 +833,18 @@ jobs:
           mkdir -p "$(dirname "$benchmark_lock_file")"
           if command -v flock >/dev/null 2>&1; then
             echo "Acquiring Ascend benchmark host lock: $benchmark_lock_file"
-            flock "$benchmark_lock_file" bash -c 'source scripts/use_single_ascend_env.sh && bash .github/workflows/scripts/run_ascend_benchmark_scenario_list.sh'
+            flock "$benchmark_lock_file" bash -c '
+              set -euo pipefail
+              source scripts/use_single_ascend_env.sh
+              PYTHON_BIN="$(hust_resolve_python_bin)"
+              hust_prepend_python_env_lib_path "$PYTHON_BIN" || true
+              bash .github/workflows/scripts/run_ascend_benchmark_scenario_list.sh
+            '
           else
             echo "flock is unavailable; running benchmark without host-level serialization"
             source scripts/use_single_ascend_env.sh
+            PYTHON_BIN="$(hust_resolve_python_bin)"
+            hust_prepend_python_env_lib_path "$PYTHON_BIN" || true
             bash .github/workflows/scripts/run_ascend_benchmark_scenario_list.sh
           fi
           benchmark_exit_code=$?

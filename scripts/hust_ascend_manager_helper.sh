@@ -115,6 +115,31 @@ hust_resolve_python_bin() {
   _resolve_hust_ascend_manager_python "$@"
 }
 
+hust_prepend_python_env_lib_path() {
+  local python_bin="${1:-}"
+  local python_prefix
+  local python_lib
+
+  if [[ -z "${python_bin}" ]]; then
+    python_bin="$(hust_resolve_python_bin 2>/dev/null)" || return 1
+  fi
+  if [[ ! -x "${python_bin}" ]]; then
+    return 1
+  fi
+
+  python_prefix="$(cd "$(dirname "${python_bin}")/.." && pwd)" || return 1
+  python_lib="${python_prefix}/lib"
+  if [[ ! -d "${python_lib}" ]]; then
+    return 1
+  fi
+
+  case ":${LD_LIBRARY_PATH:-}:" in
+    *":${python_lib}:"*) ;;
+    *) export LD_LIBRARY_PATH="${python_lib}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" ;;
+  esac
+  export HUST_PYTHON_ENV_LIB_PATH="${python_lib}"
+}
+
 hust_ensure_python_pip() {
   local python_bin="$1"
   local get_pip_script
