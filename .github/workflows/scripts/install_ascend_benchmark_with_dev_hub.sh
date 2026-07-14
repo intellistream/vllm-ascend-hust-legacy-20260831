@@ -119,12 +119,25 @@ ensure_conda_env_for_install_only() {
 }
 
 ensure_conda_ld_library_path_priority() {
+  local entry
+  local rebuilt_ld_library_path=""
+  local -a ld_library_path_entries
+
   if [[ -n "${CONDA_PREFIX:-}" && -d "${CONDA_PREFIX}/lib" ]]; then
-    case ":${LD_LIBRARY_PATH:-}:" in
-      *":${CONDA_PREFIX}/lib:"*) return 0 ;;
-    esac
-    if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
-      export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}"
+    IFS=':' read -r -a ld_library_path_entries <<< "${LD_LIBRARY_PATH:-}"
+    for entry in "${ld_library_path_entries[@]}"; do
+      if [[ -z "${entry}" || "${entry}" == "${CONDA_PREFIX}/lib" ]]; then
+        continue
+      fi
+      if [[ -n "${rebuilt_ld_library_path}" ]]; then
+        rebuilt_ld_library_path+=":${entry}"
+      else
+        rebuilt_ld_library_path="${entry}"
+      fi
+    done
+
+    if [[ -n "${rebuilt_ld_library_path}" ]]; then
+      export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${rebuilt_ld_library_path}"
     else
       export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib"
     fi
@@ -188,7 +201,7 @@ fi
 ensure_conda_ld_library_path_priority
 
 export PYTHONPATH="$VLLM_HUST_REPO:$VLLM_HUST_BENCHMARK_REPO/src${PYTHONPATH:+:$PYTHONPATH}"
-echo "Using install-only workspace bootstrap:"
+echo "Using install-only repo bootstrap (no quickstart; editable --no-deps installs):"
 echo "  VLLM_HUST_PYTHON_BIN=$VLLM_HUST_PYTHON_BIN"
 echo "  PYTHONPATH=$PYTHONPATH"
 

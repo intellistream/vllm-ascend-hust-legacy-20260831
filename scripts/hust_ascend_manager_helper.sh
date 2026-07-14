@@ -239,6 +239,9 @@ hust_apply_default_hf_mirror() {
 hust_prioritize_conda_runtime_libs() {
   local conda_prefix="${1:-${CONDA_PREFIX:-${VLLM_HUST_CONDA_PREFIX:-}}}"
   local conda_lib_dir
+  local entry
+  local rebuilt_ld_library_path=""
+  local -a ld_library_path_entries
 
   if [[ -z "${conda_prefix}" && -n "${PYTHON_BIN:-}" ]]; then
     conda_prefix="$(cd "$(dirname "${PYTHON_BIN}")/.." && pwd -P 2>/dev/null || true)"
@@ -256,12 +259,20 @@ hust_prioritize_conda_runtime_libs() {
     return 0
   fi
 
-  case ":${LD_LIBRARY_PATH:-}:" in
-    *":${conda_lib_dir}:"*) return 0 ;;
-  esac
+  IFS=':' read -r -a ld_library_path_entries <<< "${LD_LIBRARY_PATH:-}"
+  for entry in "${ld_library_path_entries[@]}"; do
+    if [[ -z "${entry}" || "${entry}" == "${conda_lib_dir}" ]]; then
+      continue
+    fi
+    if [[ -n "${rebuilt_ld_library_path}" ]]; then
+      rebuilt_ld_library_path+=":${entry}"
+    else
+      rebuilt_ld_library_path="${entry}"
+    fi
+  done
 
-  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
-    export LD_LIBRARY_PATH="${conda_lib_dir}:${LD_LIBRARY_PATH}"
+  if [[ -n "${rebuilt_ld_library_path}" ]]; then
+    export LD_LIBRARY_PATH="${conda_lib_dir}:${rebuilt_ld_library_path}"
   else
     export LD_LIBRARY_PATH="${conda_lib_dir}"
   fi

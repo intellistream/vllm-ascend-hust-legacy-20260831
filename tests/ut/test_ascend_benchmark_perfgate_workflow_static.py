@@ -316,7 +316,10 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
     assert "install vllm-hust repo" in install_dev_hub_script
     assert "install vllm-hust-benchmark repo" in install_dev_hub_script
     assert "install local Ascend plugin" in install_dev_hub_script
+    assert "Using install-only repo bootstrap (no quickstart; editable --no-deps installs)" in install_dev_hub_script
     assert "LD_LIBRARY_PATH prioritized for conda runtime libs" in install_dev_hub_script
+    assert '"${entry}" == "${CONDA_PREFIX}/lib"' in install_dev_hub_script
+    assert 'export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${rebuilt_ld_library_path}"' in install_dev_hub_script
     assert "setuptools-scm>=8" in install_dev_hub_script
     assert "install-miniconda.sh" in install_dev_hub_script
     assert 'export CONDA_PREFIX="$resolved_prefix"' in install_dev_hub_script
@@ -443,7 +446,10 @@ def test_dev_hub_install_wrapper_uses_direct_repo_installs() -> None:
     assert "install benchmark runtime Python deps" in install_script
     assert "install vllm-hust-benchmark repo" in install_script
     assert "install local Ascend plugin" in install_script
+    assert "Using install-only repo bootstrap (no quickstart; editable --no-deps installs)" in install_script
     assert "LD_LIBRARY_PATH prioritized for conda runtime libs" in install_script
+    assert '"${entry}" == "${CONDA_PREFIX}/lib"' in install_script
+    assert 'export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${rebuilt_ld_library_path}"' in install_script
     assert "setuptools-scm>=8" in install_script
     assert 'export CONDA_PREFIX="$resolved_prefix"' in install_script
     assert 'export VLLM_HUST_CONDA_PREFIX="$resolved_prefix"' in install_script
@@ -456,6 +462,8 @@ def test_dev_hub_install_wrapper_uses_direct_repo_installs() -> None:
     assert "quickstart.sh" not in install_script
     assert "HUST_DEV_HUB_SKIP_ASCEND_SYSTEM_APPLY" not in install_script
     assert 'prioritize_conda_runtime_libs "$PYTHON_BIN"' in workflow
+    assert '"$entry" == "$conda_prefix/lib"' in workflow
+    assert 'export LD_LIBRARY_PATH="$conda_prefix/lib:$rebuilt_ld_library_path"' in workflow
 
 
 def test_benchmark_workflow_masks_cross_service_credentials() -> None:

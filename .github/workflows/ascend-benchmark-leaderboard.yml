@@ -743,15 +743,30 @@ jobs:
           prioritize_conda_runtime_libs() {
             local python_bin="$1"
             local conda_prefix
+            local entry
+            local rebuilt_ld_library_path=""
+            local -a ld_library_path_entries
             conda_prefix="$(cd "$(dirname "$python_bin")/.." && pwd -P)"
             if [[ -d "$conda_prefix/lib" ]]; then
               export CONDA_PREFIX="$conda_prefix"
               export VLLM_HUST_CONDA_PREFIX="$conda_prefix"
               export PATH="$conda_prefix/bin:$PATH"
-              case ":${LD_LIBRARY_PATH:-}:" in
-                *":$conda_prefix/lib:"*) ;;
-                *) export LD_LIBRARY_PATH="$conda_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
-              esac
+              IFS=':' read -r -a ld_library_path_entries <<< "${LD_LIBRARY_PATH:-}"
+              for entry in "${ld_library_path_entries[@]}"; do
+                if [[ -z "$entry" || "$entry" == "$conda_prefix/lib" ]]; then
+                  continue
+                fi
+                if [[ -n "$rebuilt_ld_library_path" ]]; then
+                  rebuilt_ld_library_path+=":$entry"
+                else
+                  rebuilt_ld_library_path="$entry"
+                fi
+              done
+              if [[ -n "$rebuilt_ld_library_path" ]]; then
+                export LD_LIBRARY_PATH="$conda_prefix/lib:$rebuilt_ld_library_path"
+              else
+                export LD_LIBRARY_PATH="$conda_prefix/lib"
+              fi
               echo "CONDA_PREFIX=$CONDA_PREFIX" >> "$GITHUB_ENV"
               echo "VLLM_HUST_CONDA_PREFIX=$VLLM_HUST_CONDA_PREFIX" >> "$GITHUB_ENV"
               echo "PATH=$PATH" >> "$GITHUB_ENV"
