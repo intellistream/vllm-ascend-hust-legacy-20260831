@@ -102,7 +102,7 @@ ensure_conda_env_for_install_only() {
   export CONDA_DEFAULT_ENV="$VLLM_HUST_CONDA_ENV"
   export PATH="${resolved_prefix}/bin:$PATH"
 
-  (unset PYTHONPATH; "$conda_bin" run -n "$VLLM_HUST_CONDA_ENV" python -m pip install --upgrade pip "setuptools>=77,<81" wheel "setuptools-scm>=8")
+  (unset PYTHONPATH; "$conda_bin" run -n "$VLLM_HUST_CONDA_ENV" python -m pip install --upgrade pip "setuptools>=77,<81" wheel "setuptools-scm>=8" "setuptools-rust")
   echo "Prepared conda env for install-only flow: $resolved_prefix"
 }
 
