@@ -237,23 +237,27 @@ hust_apply_default_hf_mirror() {
 }
 
 hust_ascend_manager_available() {
+  local manager_src
+  local python_bin
+
+  if [[ -n "${HUST_ASCEND_MANAGER_REPO:-}" ]]; then
+    manager_src="$(_resolve_hust_ascend_manager_src 2>/dev/null)" || manager_src=""
+    python_bin="$(_resolve_hust_ascend_manager_python 2>/dev/null)" || python_bin=""
+    if [[ -n "${manager_src}" && -n "${python_bin}" ]]; then
+      return 0
+    fi
+  fi
+
   if command -v hust-ascend-manager >/dev/null 2>&1; then
     return 0
   fi
 
-  local manager_src
-  local python_bin
   manager_src="$(_resolve_hust_ascend_manager_src 2>/dev/null)" || return 1
   python_bin="$(_resolve_hust_ascend_manager_python 2>/dev/null)" || return 1
   [[ -n "${manager_src}" && -n "${python_bin}" ]]
 }
 
-hust_ascend_manager_run() {
-  if command -v hust-ascend-manager >/dev/null 2>&1; then
-    hust-ascend-manager "$@"
-    return $?
-  fi
-
+_hust_ascend_manager_run_local() {
   local manager_src
   local python_bin
   manager_src="$(_resolve_hust_ascend_manager_src 2>/dev/null)" || {
@@ -278,4 +282,18 @@ hust_ascend_manager_run() {
 
   PYTHONPATH="${manager_src}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${python_bin}" -m hust_ascend_manager.cli "$@"
+}
+
+hust_ascend_manager_run() {
+  if [[ -n "${HUST_ASCEND_MANAGER_REPO:-}" ]] && _resolve_hust_ascend_manager_src >/dev/null 2>&1; then
+    _hust_ascend_manager_run_local "$@"
+    return $?
+  fi
+
+  if command -v hust-ascend-manager >/dev/null 2>&1; then
+    hust-ascend-manager "$@"
+    return $?
+  fi
+
+  _hust_ascend_manager_run_local "$@"
 }

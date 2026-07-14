@@ -97,6 +97,11 @@ ensure_conda_env_for_install_only() {
     echo "Using existing conda env for install-only flow: $resolved_prefix"
   fi
 
+  export CONDA_PREFIX="$resolved_prefix"
+  export VLLM_HUST_CONDA_PREFIX="$resolved_prefix"
+  export CONDA_DEFAULT_ENV="$VLLM_HUST_CONDA_ENV"
+  export PATH="${resolved_prefix}/bin:$PATH"
+
   (unset PYTHONPATH; "$conda_bin" run -n "$VLLM_HUST_CONDA_ENV" python -m pip install --upgrade pip "setuptools>=77,<81" wheel "setuptools-scm>=8")
   echo "Prepared conda env for install-only flow: $resolved_prefix"
 }
@@ -132,6 +137,11 @@ run_timed() {
   echo "${label} duration: $((end_ts - start_ts))s"
   echo "::endgroup::"
   return "$status"
+}
+
+install_vllm_hust_repo() {
+  VLLM_TARGET_DEVICE=empty VLLM_USE_PRECOMPILED=0 \
+    hust_run_pip install -e "$VLLM_HUST_REPO" --no-build-isolation --no-deps
 }
 
 if [[ ! -f "$VLLM_HUST_DEV_HUB_REPO/scripts/install-miniconda.sh" ]]; then
@@ -171,8 +181,7 @@ echo "  VLLM_HUST_PYTHON_BIN=$VLLM_HUST_PYTHON_BIN"
 echo "  PYTHONPATH=$PYTHONPATH"
 
 run_timed "install vllm-hust repo" \
-  env VLLM_TARGET_DEVICE=empty VLLM_USE_PRECOMPILED=0 \
-  hust_run_pip install -e "$VLLM_HUST_REPO" --no-build-isolation --no-deps
+  install_vllm_hust_repo
 
 run_timed "install benchmark runtime Python deps" \
   hust_run_pip install jsonschema
