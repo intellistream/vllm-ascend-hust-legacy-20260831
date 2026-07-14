@@ -100,6 +100,7 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "os.environ.get('BENCH_SCENARIO_COUNT', '1') == '1'" in workflow
     assert "timeout-minutes: 60" in workflow
     assert "VLLM_ASCEND_HUST_PUBLISH_BENCHMARK_ON_PR" not in workflow
+    assert 'HF_HUB_DISABLE_XET: "1"' in workflow
     assert "github.event_name == 'pull_request' || github.event_name == 'issue_comment'" in workflow
     assert "Checkout dev-hub repo" in workflow
     assert "VLLM_HUST_DEV_HUB_REF" in workflow
