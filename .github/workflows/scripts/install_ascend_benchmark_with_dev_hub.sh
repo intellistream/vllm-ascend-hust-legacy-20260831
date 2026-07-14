@@ -102,6 +102,18 @@ ensure_conda_env_for_install_only() {
   export CONDA_DEFAULT_ENV="$VLLM_HUST_CONDA_ENV"
   export PATH="${resolved_prefix}/bin:$PATH"
 
+  if ! (unset PYTHONPATH; "$conda_bin" install -y -n "$VLLM_HUST_CONDA_ENV" \
+    --override-channels \
+    -c "https://repo.huaweicloud.com/ascend/repos/conda/" \
+    -c "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/" \
+    libgcc-ng libstdcxx-ng); then
+    (unset PYTHONPATH; "$conda_bin" install -y -n "$VLLM_HUST_CONDA_ENV" \
+      --override-channels \
+      -c "https://repo.huaweicloud.com/ascend/repos/conda/" \
+      -c "conda-forge" \
+      libgcc-ng libstdcxx-ng)
+  fi
+
   (unset PYTHONPATH; "$conda_bin" run -n "$VLLM_HUST_CONDA_ENV" python -m pip install --upgrade pip "setuptools>=77,<81" wheel "setuptools-scm>=8" "setuptools-rust")
   echo "Prepared conda env for install-only flow: $resolved_prefix"
 }

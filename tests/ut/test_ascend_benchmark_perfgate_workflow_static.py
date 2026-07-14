@@ -304,6 +304,7 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
     assert "install-miniconda.sh" in install_dev_hub_script
     assert 'export CONDA_PREFIX="$resolved_prefix"' in install_dev_hub_script
     assert 'export VLLM_HUST_CONDA_PREFIX="$resolved_prefix"' in install_dev_hub_script
+    assert "libgcc-ng libstdcxx-ng" in install_dev_hub_script
     assert "setuptools-rust" in install_dev_hub_script
     assert "install_vllm_hust_repo()" in install_dev_hub_script
     assert "env VLLM_TARGET_DEVICE=empty VLLM_USE_PRECOMPILED=0" not in install_dev_hub_script
@@ -428,6 +429,7 @@ def test_dev_hub_install_wrapper_uses_direct_repo_installs() -> None:
     assert "setuptools-scm>=8" in install_script
     assert 'export CONDA_PREFIX="$resolved_prefix"' in install_script
     assert 'export VLLM_HUST_CONDA_PREFIX="$resolved_prefix"' in install_script
+    assert "libgcc-ng libstdcxx-ng" in install_script
     assert "setuptools-rust" in install_script
     assert "install_vllm_hust_repo()" in install_script
     assert "env VLLM_TARGET_DEVICE=empty VLLM_USE_PRECOMPILED=0" not in install_script
