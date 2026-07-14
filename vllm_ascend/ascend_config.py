@@ -1000,12 +1000,7 @@ class SplitBatchConfig:
         self.inplace_parallel_replay_policy: str = str(
             split_batch_config.get("inplace_parallel_replay_policy", "full_graph_parallel")
         )
-        self.piecewise_scheduler_sync_policy: str = str(
-            split_batch_config.get("piecewise_scheduler_sync_policy", "event_chain")
-        )
-        self.piecewise_attention_enqueue_policy: str = str(
-            split_batch_config.get("piecewise_attention_enqueue_policy", "persistent_thread")
-        )
+
         self.inplace_validate_metadata_ptrs: bool = bool(
             split_batch_config.get("inplace_validate_metadata_ptrs", False)
         )
@@ -1097,18 +1092,7 @@ class SplitBatchConfig:
                 f"split_batch_config.inplace_parallel_replay_policy must be one of "
                 f"{valid_replay_policies}, got '{self.inplace_parallel_replay_policy}'"
             )
-        valid_sync_policies = ("host_sync", "event_chain")
-        if self.piecewise_scheduler_sync_policy not in valid_sync_policies:
-            raise ValueError(
-                f"split_batch_config.piecewise_scheduler_sync_policy must be one of "
-                f"{valid_sync_policies}, got '{self.piecewise_scheduler_sync_policy}'"
-            )
-        valid_attention_policies = ("per_piece_thread", "persistent_thread")
-        if self.piecewise_attention_enqueue_policy not in valid_attention_policies:
-            raise ValueError(
-                f"split_batch_config.piecewise_attention_enqueue_policy must be one of "
-                f"{valid_attention_policies}, got '{self.piecewise_attention_enqueue_policy}'"
-            )
+
         if (self.inplace_parallel_replay_policy == "piecewise_attention_parallel"
                 and self.mode == "inplace_parallel"):
             logger.info(

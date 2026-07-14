@@ -23,6 +23,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -62,6 +63,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_draft_graph_params_workspaces,
     update_graph_params_workspaces,
 )
+from vllm_ascend.compilation.acl_graph_split_batch import ensure_graph_param_key
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.flashcomm2_oshard_manager import flashcomm2_oshard_manager
 from vllm_ascend.utils import weak_ref_tensors
@@ -467,7 +469,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 else:
                     graph_params = get_draft_graph_params()
             else:
-                graph_params = get_graph_params()
+                in_parallel_streams = bool(
+                    getattr(forward_context, "in_parallel_streams", False))
+                graph_params = get_graph_params(in_parallel_streams)
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
                     forward_context.attn_metadata,
@@ -526,7 +530,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 ]
                 attn_keys = [key for _, key in draft_attn_key_steps]
             else:
-                graph_params = get_graph_params()
+                in_parallel_streams = bool(
+                    getattr(forward_context, "in_parallel_streams", False))
+                graph_params = get_graph_params(in_parallel_streams)
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
             # For Qwen3-next, since the kv_cache_config has already categorized
@@ -631,7 +637,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 ]
                 attn_keys = [key for _, key in draft_attn_key_steps]
             else:
-                graph_params = get_graph_params()
+                in_parallel_streams = bool(
+                    getattr(forward_context, "in_parallel_streams", False))
+                graph_params = get_graph_params(in_parallel_streams)
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
                 if not use_layer_aware_replay:
@@ -825,7 +833,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
             else:
                 graph_params = get_draft_graph_params()
         else:
-            graph_params = get_graph_params()
+            in_parallel_streams = bool(
+                getattr(get_forward_context(), "in_parallel_streams", False))
+            graph_params = get_graph_params(in_parallel_streams)
+        from vllm_ascend.compilation.acl_graph_split_batch import get_graph_param_key
+        forward_context = get_forward_context()
+        param_key = get_graph_param_key(forward_context, num_tokens)
+        ensure_graph_param_key(graph_params, param_key)
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
@@ -856,7 +870,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_mask = None
             sparse_mode = 0
         use_max_workspace = self._use_max_workspace_for_fia_graph
-        workspace = graph_params.workspaces.get(num_tokens)
+        workspace = graph_params.workspaces.get(param_key)
         should_update_workspace_cache = False
         if use_max_workspace:
             # Some models mix attention layer shapes under the same graph size.
@@ -881,7 +895,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             workspace = cache_graph_workspace(
                 graph_params,
-                num_tokens,
+                param_key,
                 candidate_workspace,
                 use_max_workspace=use_max_workspace,
             )
@@ -908,9 +922,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
             should_update_workspace_cache = True
         if should_update_workspace_cache:
             if _EXTRA_CTX.is_draft_model:
-                update_draft_graph_params_workspaces(num_tokens, workspace)
+                update_draft_graph_params_workspaces(param_key, workspace)
             else:
-                update_graph_params_workspaces(num_tokens, workspace)
+                update_graph_params_workspaces(param_key, workspace)
 
         # Handle graph capturing mode
         stream = torch_npu.npu.current_stream()
@@ -918,7 +932,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         event = torch.npu.ExternalEvent()
         event.wait(stream)
         event.reset(stream)
-        graph_params.events[num_tokens].append(event)
+        graph_params.events[param_key].append(event)
         attn_params = (
             weak_ref_tensors(query),
             weak_ref_tensors(key),
@@ -948,7 +962,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_params = attn_params + (None, None, None, None)  # type: ignore
         layer_name = self._graph_metadata_layer_name(layer) if self._use_layer_aware_fia_graph_replay else None
         attn_params = attn_params + (layer_name,)  # type: ignore
-        graph_params.attn_params[num_tokens].append(attn_params)
+        graph_params.attn_params[param_key].append(attn_params)
 
         torch.npu.graph_task_group_begin(stream)
         torch_npu.npu_fused_infer_attention_score.out(
@@ -975,7 +989,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output = output.view(num_tokens, self.num_heads, self.head_size)
 
         handle = torch.npu.graph_task_group_end(stream)
-        graph_params.handles[num_tokens].append(handle)
+        graph_params.handles[param_key].append(handle)
         return output, num_tokens
 
     def full_graph_fia_v2(
@@ -992,7 +1006,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
-            graph_params = get_graph_params()
+            in_parallel_streams = bool(
+                getattr(get_forward_context(), "in_parallel_streams", False))
+            graph_params = get_graph_params(in_parallel_streams)
 
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
@@ -1110,7 +1126,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ):
-        graph_params = get_graph_params()
+        in_parallel_streams = bool(
+            getattr(get_forward_context(), "in_parallel_streams", False))
+        graph_params = get_graph_params(in_parallel_streams)
         num_tokens = query.shape[0]
         if _EXTRA_CTX.capturing:
             # Get workspace from cache or calculate it if not present.
@@ -1225,6 +1243,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
+        forward_context = get_forward_context()
+        batch_descriptor = forward_context.batch_descriptor
+        if (attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+                and batch_descriptor is not None
+                and getattr(batch_descriptor, 'capture_metadata_mode', '') == "template"
+                and getattr(batch_descriptor, 'attention_backend', '') == "fia"):
+            from vllm_ascend.compilation.acl_graph_split_batch import maybe_template_fia_seq_lens, _get_fia_key_t
+            actual_seq_lengths_kv = maybe_template_fia_seq_lens(
+                forward_context, actual_seq_lengths_kv,
+                _get_fia_key_t(key, block_size),
+                source="attention_get_fia_params")
         return key, value, block_size, block_table, actual_seq_lengths_kv
 
     def forward_fused_infer_attention(

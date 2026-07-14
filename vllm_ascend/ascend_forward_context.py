@@ -214,6 +214,124 @@ def set_ascend_forward_context(
             pass
 
 
+
+def create_ascend_forward_context(
+    cur_forward_context: Any,
+    attn_metadata: Any,
+    vllm_config: VllmConfig,
+    virtual_engine: int = 0,
+    dp_metadata: Any = None,
+    cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+    batch_descriptor: BatchDescriptor | None = None,
+    ubatch_slices: Any = None,
+    ubatch_num: int = 0,
+    positions: Any = None,
+    in_parallel_streams: bool = False,
+    cos_sin_slot_id: int = 0,
+) -> Any:
+    from vllm.forward_context import ForwardContext
+
+    new_forward_context = ForwardContext(
+        no_compile_layers=vllm_config.compilation_config.static_forward_context,
+        attn_metadata=attn_metadata,
+        slot_mapping={},
+        dp_metadata=dp_metadata,
+        cudagraph_runtime_mode=cudagraph_runtime_mode,
+        batch_descriptor=batch_descriptor,
+        ubatch_slices=ubatch_slices,
+        in_parallel_streams=in_parallel_streams,
+    )
+
+    if attn_metadata is not None:
+        if isinstance(attn_metadata, dict):
+            attn_meta_i = next(iter(attn_metadata.values()))
+        else:
+            attn_meta_i = attn_metadata
+        new_forward_context.num_tokens = getattr(attn_meta_i, "num_actual_tokens", 0)
+
+    tp_world_size = get_tensor_model_parallel_world_size()
+    dp_world_size = get_dp_group().world_size
+
+    new_forward_context.moe_comm_type = getattr(cur_forward_context, "moe_comm_type", None)
+    from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
+    try:
+        new_forward_context.moe_comm_method = get_moe_comm_method(
+            new_forward_context.moe_comm_type, ubatch_num)
+    except TypeError:
+        new_forward_context.moe_comm_method = get_moe_comm_method(
+            new_forward_context.moe_comm_type)
+    new_forward_context.sp_enabled = getattr(cur_forward_context, "sp_enabled", False)
+    new_forward_context.with_prefill = getattr(cur_forward_context, "with_prefill", True)
+    new_forward_context.in_profile_run = getattr(cur_forward_context, "in_profile_run", False)
+    new_forward_context.capturing = False
+    new_forward_context.mmrs_fusion = getattr(cur_forward_context, "mmrs_fusion", False)
+    new_forward_context.flash_comm_v1_enabled = getattr(cur_forward_context, "flash_comm_v1_enabled", False)
+    new_forward_context.flashcomm_v2_enabled = getattr(cur_forward_context, "flashcomm_v2_enabled", False)
+    new_forward_context.pad_size = 0
+    new_forward_context.is_first_layer = True
+    new_forward_context.layer_idx = getattr(cur_forward_context, "layer_idx", None)
+    new_forward_context.model_instance = getattr(cur_forward_context, "model_instance", None)
+    new_forward_context.is_draft_model = getattr(cur_forward_context, "is_draft_model", False)
+    new_forward_context.is_draft_model_prefill = False
+    new_forward_context.prefetch_mlp_enabled = getattr(cur_forward_context, "prefetch_mlp_enabled", False)
+    new_forward_context.weight_prefetch_method = getattr(cur_forward_context, "weight_prefetch_method", None)
+    new_forward_context.is_mtp_model = getattr(cur_forward_context, "is_mtp_model", False)
+    new_forward_context.dbo_enabled = True
+    new_forward_context.dbo_first_layer_sync = True
+    new_forward_context.prefetch_mlp_gate_up_proj = False
+    new_forward_context.prefetch_mlp_down_proj = False
+
+    new_forward_context.cos_sin_slot_id = cos_sin_slot_id
+    new_forward_context.ubatch_num = ubatch_num
+
+    num_tokens = new_forward_context.num_tokens or 0
+    if num_tokens:
+        new_forward_context.padded_num_tokens = math.ceil(
+            (getattr(cur_forward_context, "max_tokens_across_dp", num_tokens) or num_tokens) / tp_world_size
+        ) * tp_world_size
+
+    if dp_world_size > 1 and dp_metadata is not None:
+        max_tokens_across_dp = dp_metadata.max_tokens_across_dp_cpu.item()
+        new_forward_context.max_tokens_across_dp = max_tokens_across_dp
+    else:
+        new_forward_context.max_tokens_across_dp = num_tokens
+
+    from vllm_ascend.ops.rotary_embedding import update_cos_sin, get_cos_and_sin_slice, get_cos_and_sin_mla
+    if ubatch_slices and ubatch_slices[ubatch_num]:
+        from vllm_ascend.attention.utils import slice_positions_by_token
+        token_slice = ubatch_slices[ubatch_num].token_slice
+        if positions is not None:
+            positions = slice_positions_by_token(positions, token_slice)
+        num_speculative_tokens = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config else 0)
+        decode_token_per_req = 1 + num_speculative_tokens
+        mla_slice = slice(
+            ubatch_slices[ubatch_num].request_slice.start *
+            decode_token_per_req,
+            ubatch_slices[ubatch_num].request_slice.stop *
+            decode_token_per_req)
+        if positions is not None:
+            update_cos_sin(positions, slot_id=cos_sin_slot_id)
+            cos_slice, sin_slice = get_cos_and_sin_slice(slot_id=cos_sin_slot_id)
+            new_forward_context.cos = cos_slice.clone()
+            new_forward_context.sin = sin_slice.clone()
+        cos_mla, sin_mla = get_cos_and_sin_mla()
+
+        new_forward_context.cos_mla = cos_mla[
+            mla_slice] if cos_mla is not None else None
+
+        new_forward_context.sin_mla = sin_mla[
+            mla_slice] if sin_mla is not None else None
+    elif positions is not None:
+        update_cos_sin(positions, slot_id=cos_sin_slot_id)
+        cos_slice, sin_slice = get_cos_and_sin_slice(slot_id=cos_sin_slot_id)
+        new_forward_context.cos = cos_slice.clone()
+        new_forward_context.sin = sin_slice.clone()
+
+    return new_forward_context
+
+
 _mc2_tokens_capacity: int | None = None
 _reserved_mc2_mask: torch.Tensor | None = None
 
@@ -382,6 +500,7 @@ class _ExtraForwardContextProxy:
         "num_accept_tokens",
         "in_profile_run",
         "padded_num_tokens",
+
         "sinks",
         "eplb_heat_collection_status",
         "validate_inplace_metadata_ptrs",

@@ -65,12 +65,10 @@ class SplitBatchSlice:
         )
 
 
-SplitBatchSlices = list[SplitBatchSlice]
-
 
 @dataclass(frozen=True)
 class InplaceSplitPlan:
-    split_slices: SplitBatchSlices
+    split_slices: list[SplitBatchSlice]
     reason: str
     total_num_tokens: int
     padded_num_tokens_without_split: int
@@ -90,32 +88,7 @@ class InplaceSplitPlan:
     offset_min_graph_tokens: int
     offset_max_graph_tokens_by_start: dict[int, int] | None
     offset_allowed_graph_tokens_by_start: dict[int, list[int]] | None
-    extra_debug_payload: dict[str, Any] | None = None
 
-    def debug_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "reason": self.reason,
-            "dry_run": True,
-            "total_num_tokens": self.total_num_tokens,
-            "padded_num_tokens_without_split": self.padded_num_tokens_without_split,
-            "first_tokens": self.first_tokens,
-            "second_tokens": self.second_tokens,
-            "first_reqs": self.first_reqs,
-            "second_reqs": self.second_reqs,
-            "lower_capture_size": self.lower_capture_size,
-            "remainder_tokens": self.remainder_tokens,
-            "capture_sizes_considered": self.capture_sizes_considered,
-            "first_tokens_policy": self.first_tokens_policy,
-            "offset_match_policy": self.offset_match_policy,
-            "second_actual_tokens": self.second_actual_tokens,
-            "second_graph_tokens": self.second_graph_tokens,
-            "second_padding_tokens": self.second_padding_tokens,
-            "offset_capture_sizes_considered": self.offset_capture_sizes_considered,
-            "offset_min_graph_tokens": self.offset_min_graph_tokens,
-        }
-        if self.extra_debug_payload:
-            payload.update(self.extra_debug_payload)
-        return payload
 
 
 def _padded_graph_size(total_tokens: int, capture_sizes: list[int]) -> int:
