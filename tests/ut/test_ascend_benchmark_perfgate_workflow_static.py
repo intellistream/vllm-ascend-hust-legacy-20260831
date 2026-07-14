@@ -313,6 +313,22 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
     assert "VLLM_HUST_PYTHON_BIN" in prepare_step
 
 
+def test_benchmark_checkout_avoids_full_ref_fetch_before_fork_point_detection() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    checkout_step = workflow[workflow.index("Checkout workflow ref") :]
+    checkout_step = checkout_step[: checkout_step.index("- name: Checkout manual benchmark repo history")]
+    fork_point_step = workflow[workflow.index("Detect PR fork point") :]
+    fork_point_step = fork_point_step[: fork_point_step.index("- name: Capture benchmark target metadata")]
+
+    assert "fetch-depth: 1" in checkout_step
+    assert "fetch-depth: 0" not in checkout_step
+    assert "git fetch --no-tags --depth=500 origin main \"$PR_HEAD_SHA\" \"$PR_BASE_SHA\"" in fork_point_step
+    assert "git fetch --no-tags --deepen=2000 origin main \"$PR_HEAD_SHA\" \"$PR_BASE_SHA\"" in fork_point_step
+    assert "git fetch --no-tags --unshallow origin" in fork_point_step
+    assert "+refs/heads/*" not in fork_point_step
+    assert "+refs/tags/*" not in fork_point_step
+
+
 def test_benchmark_runner_auto_disables_sudo_when_unavailable() -> None:
     runner_script = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
 
