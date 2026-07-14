@@ -117,7 +117,7 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "CURRENT_VLLM_CACHE_ROOT: ${{ github.workspace }}/../.hf-cache/vllm" in workflow
     assert "VLLM_ASCEND_HUST_SAME_SPEC_READY_TIMEOUT_SECONDS || '1800'" in workflow
     assert "VLLM_ASCEND_HUST_SAME_SPEC_CLIENT_READY_TIMEOUT_SECONDS || '300'" in workflow
-    assert "vars.VLLM_ASCEND_HUST_COMPILE_CUSTOM_KERNELS || 'auto'" in workflow
+    assert "vars.VLLM_ASCEND_HUST_COMPILE_CUSTOM_KERNELS || '0'" in workflow
 
 
 def test_schedule_runs_registered_multi_scenario_benchmark_publish() -> None:
@@ -144,6 +144,9 @@ def test_schedule_runs_registered_multi_scenario_benchmark_publish() -> None:
 def test_benchmark_runner_resolves_same_spec_without_random_online_default() -> None:
     runner_script = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
 
+    assert "normalize_compile_custom_kernels_env()" in runner_script
+    assert 'export COMPILE_CUSTOM_KERNELS="${normalized_value}"' in runner_script
+    assert '""|0|false|no|off|auto)' in runner_script
     assert "SAME_SPEC_SPEC_FILE=${SAME_SPEC_SPEC_FILE:-}" in runner_script
     assert "SAME_SPEC_PR_PREVIEW_COMPAT=${SAME_SPEC_PR_PREVIEW_COMPAT:-1}" in runner_script
     assert "SAME_SPEC_CLIENT_READY_TIMEOUT_SECONDS=${SAME_SPEC_CLIENT_READY_TIMEOUT_SECONDS:-300}" in runner_script

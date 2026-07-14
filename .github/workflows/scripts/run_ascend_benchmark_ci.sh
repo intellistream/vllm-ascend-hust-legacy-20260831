@@ -76,7 +76,32 @@ validate_benchmark_inputs() {
   fi
 }
 
+normalize_compile_custom_kernels_env() {
+  local raw_value="${COMPILE_CUSTOM_KERNELS:-0}"
+  local normalized_value
+
+  case "${raw_value,,}" in
+    1|true|yes|on)
+      normalized_value=1
+      ;;
+    ""|0|false|no|off|auto)
+      normalized_value=0
+      ;;
+    *)
+      echo "Invalid COMPILE_CUSTOM_KERNELS value for vllm-ascend runtime: ${raw_value}" >&2
+      echo "Expected one of: 0, 1, true, false, yes, no, on, off, auto." >&2
+      exit 2
+      ;;
+  esac
+
+  if [[ "${raw_value}" != "${normalized_value}" ]]; then
+    echo "[INFO] Normalized COMPILE_CUSTOM_KERNELS=${raw_value} to ${normalized_value} for vllm-ascend runtime"
+  fi
+  export COMPILE_CUSTOM_KERNELS="${normalized_value}"
+}
+
 validate_benchmark_inputs
+normalize_compile_custom_kernels_env
 
 # shellcheck source=/dev/null
 source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
