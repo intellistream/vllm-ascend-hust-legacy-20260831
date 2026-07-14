@@ -169,6 +169,13 @@ def test_benchmark_runner_resolves_same_spec_without_random_online_default() -> 
     assert "print_same_spec_server_log_tail" in runner_script
     assert "same_spec_server_log_indicates_node_env_failure" in runner_script
     assert "same-spec server log diagnostics" in runner_script
+    detector = runner_script[runner_script.index("same_spec_server_log_indicates_node_env_failure()") :]
+    detector = detector[: detector.index("print_same_spec_server_log_tail()")]
+    assert "Engine core initialization failed" not in detector
+    assert "ERR99999 UNKNOWN applicaiton exception" not in detector
+    assert "ERR99999 UNKNOWN application exception" not in detector
+    assert "rtGetDeviceCount" in detector
+    assert "Resource_Busy" in detector
     assert "prepare_same_spec_pr_preview_compat_file()" in runner_script
     assert 'server_parameters["no_enable_chunked_prefill"] = True' in runner_script
     assert 'server_parameters["no_enable_prefix_caching"] = True' in runner_script

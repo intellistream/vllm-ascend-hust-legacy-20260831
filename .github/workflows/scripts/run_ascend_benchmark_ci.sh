@@ -550,7 +550,7 @@ same_spec_server_log_indicates_resource_busy() {
 
 same_spec_server_log_indicates_node_env_failure() {
   local same_spec_server_log=$RESULT_ROOT/server.stdout.log
-  [[ -f "$same_spec_server_log" ]] && grep -qE "DrvMngGetConsoleLogLevel failed|dcmi model initialized failed|ret is -8020|drvRet=87|drvRetCode=87|ErrCode=507899|error code is 507899|rtGetDeviceCount|Can't get ascend_hal device count|driver error:internal error|Resource_Busy\(EL0005\)|The resources are busy|ERR99999 UNKNOWN applicaiton exception|ERR99999 UNKNOWN application exception" "$same_spec_server_log"
+  [[ -f "$same_spec_server_log" ]] && grep -qE "DrvMngGetConsoleLogLevel failed|dcmi model initialized failed|ret is -8020|drvRet=87|drvRetCode=87|ErrCode=507899|error code is 507899|rtGetDeviceCount|Can't get ascend_hal device count|driver error:internal error|Resource_Busy\(EL0005\)|The resources are busy" "$same_spec_server_log"
 }
 
 print_same_spec_server_log_tail() {
