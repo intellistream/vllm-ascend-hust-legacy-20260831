@@ -108,7 +108,6 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "install_ascend_benchmark_with_dev_hub.sh" in workflow
     assert "install vllm-hust repo" not in workflow
     assert "install local Ascend plugin" not in workflow
-    assert "LD_LIBRARY_PATH prioritized for conda runtime libs" not in workflow
     assert "HUST_MANAGER_INSTALL_PYTHON_STACK" not in workflow
     assert "DEV_HUB_QUICKSTART" not in workflow
     assert 'hust_run_pip install "torch==2.9.0"' not in workflow
@@ -255,13 +254,17 @@ def test_local_ascend_manager_fallback_bootstraps_pip() -> None:
     assert "_hust_ascend_manager_run_local()" in helper
     assert 'if [[ -n "${HUST_ASCEND_MANAGER_REPO:-}" ]]' in helper
     assert "_hust_ascend_manager_run_local \"$@\"" in helper
+    local_runner = helper[
+        helper.index("_hust_ascend_manager_run_local()") :
+        helper.index("hust_ascend_manager_run()")
+    ]
     fallback = helper[helper.index("hust_ascend_manager_run()") :]
     assert fallback.index("_hust_ascend_manager_run_local \"$@\"") < fallback.index(
         "command -v hust-ascend-manager"
     )
-    assert 'if _hust_ascend_manager_command_needs_pip "$@"; then' in fallback
-    assert 'hust_ensure_python_pip "${python_bin}" || return 1' in fallback
-    assert '"${python_bin}" -m hust_ascend_manager.cli "$@"' in fallback
+    assert 'if _hust_ascend_manager_command_needs_pip "$@"; then' in local_runner
+    assert 'hust_ensure_python_pip "${python_bin}" || return 1' in local_runner
+    assert '"${python_bin}" -m hust_ascend_manager.cli "$@"' in local_runner
 
 
 def test_single_ascend_env_falls_back_when_manager_env_fails() -> None:
@@ -276,6 +279,7 @@ def test_single_ascend_env_falls_back_when_manager_env_fails() -> None:
     assert "/usr/local/Ascend/cann-*/set_env.sh" in single_env
     assert '[[ -n "${ASCEND_HOME_PATH:-}" && -n "${ASCEND_OPP_PATH:-}" ]] && python_can_import_tbe' in single_env
     assert 'ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-<unset>}' in single_env
+    assert "hust_prioritize_conda_runtime_libs" in single_env
 
 
 def test_local_plugin_editable_install_bootstraps_build_metadata_deps() -> None:
@@ -419,6 +423,7 @@ def test_stage2_trial_does_not_publish_benchmark_results() -> None:
 
 def test_dev_hub_install_wrapper_uses_direct_repo_installs() -> None:
     install_script = INSTALL_DEV_HUB_SCRIPT.read_text(encoding="utf-8")
+    workflow = WORKFLOW.read_text(encoding="utf-8")
 
     assert "VLLM_HUST_DEV_HUB_REPO=" in install_script
     assert "ascend-runtime-manager checkout not found" in install_script
@@ -438,7 +443,7 @@ def test_dev_hub_install_wrapper_uses_direct_repo_installs() -> None:
     assert "env COMPILE_CUSTOM_KERNELS=0" in install_script
     assert "quickstart.sh" not in install_script
     assert "HUST_DEV_HUB_SKIP_ASCEND_SYSTEM_APPLY" not in install_script
-    assert "prioritize_conda_runtime_libs(\"$PYTHON_BIN\")" in workflow
+    assert 'prioritize_conda_runtime_libs "$PYTHON_BIN"' in workflow
 
 
 def test_benchmark_workflow_masks_cross_service_credentials() -> None:

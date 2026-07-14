@@ -112,6 +112,8 @@ ensure_cann_tbe_env() {
 
 ensure_cann_tbe_env || return 1
 
+hust_prioritize_conda_runtime_libs
+
 normalize_visible_devices() {
   local raw_value="${1:-}"
   local device

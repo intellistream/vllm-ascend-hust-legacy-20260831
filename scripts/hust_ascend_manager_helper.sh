@@ -236,6 +236,38 @@ hust_apply_default_hf_mirror() {
   export HF_ENDPOINT="${_HUST_DEFAULT_HF_ENDPOINT}"
 }
 
+hust_prioritize_conda_runtime_libs() {
+  local conda_prefix="${1:-${CONDA_PREFIX:-${VLLM_HUST_CONDA_PREFIX:-}}}"
+  local conda_lib_dir
+
+  if [[ -z "${conda_prefix}" && -n "${PYTHON_BIN:-}" ]]; then
+    conda_prefix="$(cd "$(dirname "${PYTHON_BIN}")/.." && pwd -P 2>/dev/null || true)"
+  fi
+  if [[ -z "${conda_prefix}" && -n "${VLLM_HUST_PYTHON_BIN:-}" ]]; then
+    conda_prefix="$(cd "$(dirname "${VLLM_HUST_PYTHON_BIN}")/.." && pwd -P 2>/dev/null || true)"
+  fi
+
+  if [[ -z "${conda_prefix}" ]]; then
+    return 0
+  fi
+
+  conda_lib_dir="${conda_prefix}/lib"
+  if [[ ! -d "${conda_lib_dir}" ]]; then
+    return 0
+  fi
+
+  case ":${LD_LIBRARY_PATH:-}:" in
+    *":${conda_lib_dir}:"*) return 0 ;;
+  esac
+
+  if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    export LD_LIBRARY_PATH="${conda_lib_dir}:${LD_LIBRARY_PATH}"
+  else
+    export LD_LIBRARY_PATH="${conda_lib_dir}"
+  fi
+  echo "[INFO] LD_LIBRARY_PATH prioritized for conda runtime libs: ${conda_lib_dir}"
+}
+
 hust_ascend_manager_available() {
   local manager_src
   local python_bin
