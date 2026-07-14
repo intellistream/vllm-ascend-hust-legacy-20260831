@@ -295,6 +295,7 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
 
     assert "install_ascend_benchmark_with_dev_hub.sh" in prepare_step
     assert "hust_ascend_manager_run setup --non-interactive" not in prepare_step
+    assert "prioritize_conda_runtime_libs()" in prepare_step
     install_dev_hub_script = INSTALL_DEV_HUB_SCRIPT.read_text(encoding="utf-8")
     assert "install vllm-hust repo" in install_dev_hub_script
     assert "install vllm-hust-benchmark repo" in install_dev_hub_script
@@ -437,6 +438,7 @@ def test_dev_hub_install_wrapper_uses_direct_repo_installs() -> None:
     assert "env COMPILE_CUSTOM_KERNELS=0" in install_script
     assert "quickstart.sh" not in install_script
     assert "HUST_DEV_HUB_SKIP_ASCEND_SYSTEM_APPLY" not in install_script
+    assert "prioritize_conda_runtime_libs(\"$PYTHON_BIN\")" in workflow
 
 
 def test_benchmark_workflow_masks_cross_service_credentials() -> None:

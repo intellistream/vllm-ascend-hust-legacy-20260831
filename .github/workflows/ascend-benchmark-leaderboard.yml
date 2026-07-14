@@ -739,10 +739,30 @@ jobs:
           chmod 700 "$HOME"
           bash .github/workflows/scripts/install_ascend_benchmark_with_dev_hub.sh
           source scripts/hust_ascend_manager_helper.sh
+          prioritize_conda_runtime_libs() {
+            local python_bin="$1"
+            local conda_prefix
+            conda_prefix="$(cd "$(dirname "$python_bin")/.." && pwd -P)"
+            if [[ -d "$conda_prefix/lib" ]]; then
+              export CONDA_PREFIX="$conda_prefix"
+              export VLLM_HUST_CONDA_PREFIX="$conda_prefix"
+              export PATH="$conda_prefix/bin:$PATH"
+              case ":${LD_LIBRARY_PATH:-}:" in
+                *":$conda_prefix/lib:"*) ;;
+                *) export LD_LIBRARY_PATH="$conda_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+              esac
+              echo "CONDA_PREFIX=$CONDA_PREFIX" >> "$GITHUB_ENV"
+              echo "VLLM_HUST_CONDA_PREFIX=$VLLM_HUST_CONDA_PREFIX" >> "$GITHUB_ENV"
+              echo "PATH=$PATH" >> "$GITHUB_ENV"
+              echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+              echo "LD_LIBRARY_PATH prioritized for conda runtime libs in workflow shell: $conda_prefix/lib"
+            fi
+          }
           PYTHON_BIN="$(hust_resolve_python_bin)"
           export VLLM_HUST_PYTHON_BIN="$PYTHON_BIN"
           echo "VLLM_HUST_PYTHON_BIN=$VLLM_HUST_PYTHON_BIN" >> "$GITHUB_ENV"
           source scripts/use_single_ascend_env.sh
+          prioritize_conda_runtime_libs "$PYTHON_BIN"
 
           export PYTHONPATH="$VLLM_HUST_REPO:$VLLM_HUST_BENCHMARK_REPO/src${PYTHONPATH:+:$PYTHONPATH}"
           echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
@@ -765,6 +785,7 @@ jobs:
           export VLLM_HUST_PYTHON_BIN="$PYTHON_BIN"
           echo "VLLM_HUST_PYTHON_BIN=$VLLM_HUST_PYTHON_BIN" >> "$GITHUB_ENV"
           echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"
+          prioritize_conda_runtime_libs "$PYTHON_BIN"
           "$PYTHON_BIN" - <<'PY'
           import decorator
           import scipy
