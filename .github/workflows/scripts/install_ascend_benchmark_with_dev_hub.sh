@@ -4,87 +4,10 @@ set -euo pipefail
 WORKSPACE_ROOT=${WORKSPACE_ROOT:-${GITHUB_WORKSPACE:-$PWD}}
 VLLM_ASCEND_HUST_REPO=${VLLM_ASCEND_HUST_REPO:-$WORKSPACE_ROOT}
 VLLM_HUST_DEV_HUB_REPO=${VLLM_HUST_DEV_HUB_REPO:-$WORKSPACE_ROOT/vllm-hust-dev-hub}
+VLLM_HUST_REPO=${VLLM_HUST_REPO:-$WORKSPACE_ROOT/vllm-hust}
+VLLM_HUST_BENCHMARK_REPO=${VLLM_HUST_BENCHMARK_REPO:-$WORKSPACE_ROOT/vllm-hust-benchmark}
 VLLM_HUST_CONDA_ENV=${VLLM_HUST_CONDA_ENV:-vllm-hust-dev}
 PYTHON_VERSION=${PYTHON_VERSION:-3.11}
-DEV_HUB_QUICKSTART_CONDA=${DEV_HUB_QUICKSTART_CONDA:-0}
-# Keep quickstart focused on repo setup; the CI workflow installs the
-# exact torch/torch-npu stack afterwards under pinned constraints.
-: "${HUST_MANAGER_INSTALL_PYTHON_STACK:=0}"
-DEV_HUB_QUICKSTART_INSTALL_MODE=${DEV_HUB_QUICKSTART_INSTALL_MODE:-refresh}
-DEV_HUB_QUICKSTART_INSTALL_SCOPE=${DEV_HUB_QUICKSTART_INSTALL_SCOPE:-full}
-export HUST_MANAGER_INSTALL_PYTHON_STACK
-
-case "$DEV_HUB_QUICKSTART_INSTALL_MODE" in
-  install|refresh) ;;
-  *)
-    echo "Invalid DEV_HUB_QUICKSTART_INSTALL_MODE: $DEV_HUB_QUICKSTART_INSTALL_MODE" >&2
-    exit 2
-    ;;
-esac
-
-case "$DEV_HUB_QUICKSTART_INSTALL_SCOPE" in
-  core|full) ;;
-  *)
-    echo "Invalid DEV_HUB_QUICKSTART_INSTALL_SCOPE: $DEV_HUB_QUICKSTART_INSTALL_SCOPE" >&2
-    exit 2
-    ;;
-esac
-
-case "$DEV_HUB_QUICKSTART_CONDA" in
-  0|1) ;;
-  *)
-    echo "Invalid DEV_HUB_QUICKSTART_CONDA: $DEV_HUB_QUICKSTART_CONDA" >&2
-    exit 2
-    ;;
-esac
-
-ensure_conda_env_for_install_only() {
-  local conda_bin
-  local conda_root
-  local resolved_prefix
-
-  ensure_conda_for_install_only
-  conda_bin="${CONDA_EXE:-}"
-  if [[ -z "$conda_bin" ]]; then
-    conda_bin="$(command -v conda 2>/dev/null || true)"
-  fi
-  if [[ -z "$conda_bin" ]]; then
-    echo "Could not resolve conda binary for quickstart install-only flow." >&2
-    return 2
-  fi
-
-  resolved_prefix="$( (unset PYTHONPATH; "$conda_bin" env list) 2>/dev/null | awk -v env_name="${VLLM_HUST_CONDA_ENV}" '$1 == env_name {print $NF; exit}')"
-  if [[ -n "$resolved_prefix" && -x "${resolved_prefix}/bin/python" ]]; then
-    echo "Using existing conda env for quickstart install-only flow: $resolved_prefix"
-    return 0
-  fi
-
-  echo "Creating minimal conda env '$VLLM_HUST_CONDA_ENV' for quickstart install-only flow."
-  echo "This benchmark CI intentionally skips quickstart --conda to avoid Ascend Python stack reconciliation."
-  if ! (unset PYTHONPATH; "$conda_bin" create -y -n "$VLLM_HUST_CONDA_ENV" \
-    --override-channels \
-    -c "https://repo.huaweicloud.com/ascend/repos/conda/" \
-    -c "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/" \
-    "python=$PYTHON_VERSION" pip); then
-    (unset PYTHONPATH; "$conda_bin" create -y -n "$VLLM_HUST_CONDA_ENV" \
-      --override-channels \
-      -c "https://repo.huaweicloud.com/ascend/repos/conda/" \
-      -c "conda-forge" \
-      "python=$PYTHON_VERSION" pip)
-  fi
-
-  (unset PYTHONPATH; "$conda_bin" run -n "$VLLM_HUST_CONDA_ENV" python -m pip install --upgrade pip "setuptools>=77,<81" wheel)
-
-  resolved_prefix="$( (unset PYTHONPATH; "$conda_bin" env list) 2>/dev/null | awk -v env_name="${VLLM_HUST_CONDA_ENV}" '$1 == env_name {print $NF; exit}')"
-  if [[ -z "$resolved_prefix" || ! -x "${resolved_prefix}/bin/python" ]]; then
-    echo "Failed to create conda env '$VLLM_HUST_CONDA_ENV' for quickstart install-only flow." >&2
-    return 2
-  fi
-
-  conda_root="$(cd "$(dirname "$conda_bin")/.." && pwd -P)"
-  echo "Using newly created conda env for quickstart install-only flow: $resolved_prefix"
-  echo "Conda root for install-only flow: $conda_root"
-}
 
 find_conda_for_install_only() {
   local candidate
@@ -118,12 +41,12 @@ ensure_conda_for_install_only() {
   if conda_bin="$(find_conda_for_install_only)"; then
     export CONDA_EXE="$conda_bin"
     export PATH="$(dirname "$conda_bin"):$PATH"
-    echo "Using conda for quickstart install-only flow: $conda_bin"
+    echo "Using conda for install-only flow: $conda_bin"
     return 0
   fi
 
   conda_prefix="${CI_HOME:-${HOME:-/tmp}}/miniconda3"
-  echo "Installing Miniconda for quickstart install-only flow: $conda_prefix"
+  echo "Installing Miniconda for install-only flow: $conda_prefix"
   HOME="${CI_HOME:-${HOME:-/tmp}}" bash "$VLLM_HUST_DEV_HUB_REPO/scripts/install-miniconda.sh" --prefix "$conda_prefix" --yes
 
   conda_bin="$conda_prefix/bin/conda"
@@ -134,78 +57,90 @@ ensure_conda_for_install_only() {
 
   export CONDA_EXE="$conda_bin"
   export PATH="$(dirname "$conda_bin"):$PATH"
-  echo "Using newly installed conda for quickstart install-only flow: $conda_bin"
+  echo "Using newly installed conda for install-only flow: $conda_bin"
 }
 
-detect_cann_major_version() {
-  local candidate
-  local version
-  for candidate in \
-    "${ASCEND_HOME_PATH:-}/version.info" \
-    "${ASCEND_HOME_PATH:-}/runtime/version.info" \
-    "/usr/local/Ascend/ascend-toolkit/latest/version.info" \
-    "/usr/local/Ascend/ascend-toolkit/latest/runtime/version.info" \
-    "${CONDA_PREFIX:-}/Ascend/cann/version.info" \
-    "${CONDA_PREFIX:-}/Ascend/cann/runtime/version.info"; do
-    if [[ -f "$candidate" ]]; then
-      version="$(grep -oE '[0-9]+[.][0-9]+([.][0-9]+)?' "$candidate" | head -n 1 || true)"
-      if [[ -n "$version" ]]; then
-        printf '%s\n' "${version%%.*}"
-        return 0
-      fi
-    fi
-  done
-  return 1
-}
+ensure_conda_env_for_install_only() {
+  local conda_bin
+  local resolved_prefix
 
-resolve_compile_custom_kernels() {
-  local requested="${COMPILE_CUSTOM_KERNELS:-auto}"
-  local cann_major
-
-  if [[ "$requested" == "auto" ]]; then
-    cann_major="$(detect_cann_major_version || true)"
-    if [[ "$cann_major" == "9" ]]; then
-      printf 'dev-hub-default\n'
-    else
-      printf '0\n'
-    fi
-    return 0
+  ensure_conda_for_install_only
+  conda_bin="${CONDA_EXE:-}"
+  if [[ -z "$conda_bin" ]]; then
+    conda_bin="$(command -v conda 2>/dev/null || true)"
   fi
-
-  if [[ ! "$requested" =~ ^[0-9]+$ ]]; then
-    echo "Invalid COMPILE_CUSTOM_KERNELS: $requested" >&2
+  if [[ -z "$conda_bin" ]]; then
+    echo "Could not resolve conda binary for install-only flow." >&2
     return 2
   fi
 
-  printf '%s\n' "$requested"
-}
-
-ensure_ascend_repo_workspace_entry() {
-  local workspace_entry="$WORKSPACE_ROOT/vllm-ascend-hust"
-  local entry_real
-  local repo_real
-
-  repo_real="$(cd "$VLLM_ASCEND_HUST_REPO" && pwd -P)"
-
-  if [[ -L "$workspace_entry" ]]; then
-    ln -sfn "$VLLM_ASCEND_HUST_REPO" "$workspace_entry"
-    return 0
-  fi
-
-  if [[ -e "$workspace_entry" ]]; then
-    entry_real="$(cd "$workspace_entry" && pwd -P)"
-    if [[ "$entry_real" != "$repo_real" ]]; then
-      echo "Workspace entry $workspace_entry points to $entry_real, expected $repo_real" >&2
+  resolved_prefix="$( (unset PYTHONPATH; "$conda_bin" env list) 2>/dev/null | awk -v env_name="${VLLM_HUST_CONDA_ENV}" '$1 == env_name {print $NF; exit}')"
+  if [[ -z "$resolved_prefix" || ! -x "${resolved_prefix}/bin/python" ]]; then
+    echo "Creating minimal conda env '$VLLM_HUST_CONDA_ENV' for install-only flow."
+    if ! (unset PYTHONPATH; "$conda_bin" create -y -n "$VLLM_HUST_CONDA_ENV" \
+      --override-channels \
+      -c "https://repo.huaweicloud.com/ascend/repos/conda/" \
+      -c "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/" \
+      "python=$PYTHON_VERSION" pip); then
+      (unset PYTHONPATH; "$conda_bin" create -y -n "$VLLM_HUST_CONDA_ENV" \
+        --override-channels \
+        -c "https://repo.huaweicloud.com/ascend/repos/conda/" \
+        -c "conda-forge" \
+        "python=$PYTHON_VERSION" pip)
+    fi
+    resolved_prefix="$( (unset PYTHONPATH; "$conda_bin" env list) 2>/dev/null | awk -v env_name="${VLLM_HUST_CONDA_ENV}" '$1 == env_name {print $NF; exit}')"
+    if [[ -z "$resolved_prefix" || ! -x "${resolved_prefix}/bin/python" ]]; then
+      echo "Failed to create conda env '$VLLM_HUST_CONDA_ENV' for install-only flow." >&2
       return 2
     fi
-    return 0
+  else
+    echo "Using existing conda env for install-only flow: $resolved_prefix"
   fi
 
-  ln -s "$VLLM_ASCEND_HUST_REPO" "$workspace_entry"
+  (unset PYTHONPATH; "$conda_bin" run -n "$VLLM_HUST_CONDA_ENV" python -m pip install --upgrade pip "setuptools>=77,<81" wheel "setuptools-scm>=8")
+  echo "Prepared conda env for install-only flow: $resolved_prefix"
 }
 
-if [[ ! -f "$VLLM_HUST_DEV_HUB_REPO/scripts/quickstart.sh" ]]; then
-  echo "dev-hub quickstart not found: $VLLM_HUST_DEV_HUB_REPO/scripts/quickstart.sh" >&2
+ensure_conda_ld_library_path_priority() {
+  if [[ -n "${CONDA_PREFIX:-}" && -d "${CONDA_PREFIX}/lib" ]]; then
+    case ":${LD_LIBRARY_PATH:-}:" in
+      *":${CONDA_PREFIX}/lib:"*) return 0 ;;
+    esac
+    if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+      export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}"
+    else
+      export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib"
+    fi
+    echo "LD_LIBRARY_PATH prioritized for conda runtime libs: ${CONDA_PREFIX}/lib"
+  fi
+}
+
+run_timed() {
+  local label="$1"
+  shift
+  local start_ts
+  local end_ts
+  local status
+
+  start_ts=$(date +%s)
+  echo "::group::${label}"
+  set +e
+  "$@"
+  status=$?
+  set -e
+  end_ts=$(date +%s)
+  echo "${label} duration: $((end_ts - start_ts))s"
+  echo "::endgroup::"
+  return "$status"
+}
+
+if [[ ! -f "$VLLM_HUST_DEV_HUB_REPO/scripts/install-miniconda.sh" ]]; then
+  echo "install-miniconda not found: $VLLM_HUST_DEV_HUB_REPO/scripts/install-miniconda.sh" >&2
+  exit 2
+fi
+
+if [[ ! -f "$VLLM_ASCEND_HUST_REPO/scripts/install_local_ascend_plugin.sh" ]]; then
+  echo "install_local_ascend_plugin not found: $VLLM_ASCEND_HUST_REPO/scripts/install_local_ascend_plugin.sh" >&2
   exit 2
 fi
 
@@ -214,66 +149,42 @@ if [[ ! -f "$WORKSPACE_ROOT/ascend-runtime-manager/pyproject.toml" ]]; then
   exit 2
 fi
 
+ensure_conda_env_for_install_only
+
+# shellcheck source=/dev/null
+source "$VLLM_ASCEND_HUST_REPO/scripts/hust_ascend_manager_helper.sh"
+
+PYTHON_BIN="$(hust_resolve_python_bin)"
+export VLLM_HUST_PYTHON_BIN="$PYTHON_BIN"
+export PYTHON_BIN="$PYTHON_BIN"
+
 if [[ -f "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh" ]]; then
   # shellcheck source=/dev/null
   source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
 fi
 
-export HUST_DEV_HUB_SKIP_ASCEND_SYSTEM_APPLY=1
+ensure_conda_ld_library_path_priority
 
-ensure_ascend_repo_workspace_entry
+export PYTHONPATH="$VLLM_HUST_REPO:$VLLM_HUST_BENCHMARK_REPO/src${PYTHONPATH:+:$PYTHONPATH}"
+echo "Using install-only workspace bootstrap:"
+echo "  VLLM_HUST_PYTHON_BIN=$VLLM_HUST_PYTHON_BIN"
+echo "  PYTHONPATH=$PYTHONPATH"
 
-echo "Using dev-hub quickstart: $VLLM_HUST_DEV_HUB_REPO/scripts/quickstart.sh"
-echo "HUST_MANAGER_INSTALL_PYTHON_STACK=$HUST_MANAGER_INSTALL_PYTHON_STACK"
-echo "DEV_HUB_QUICKSTART_CONDA=$DEV_HUB_QUICKSTART_CONDA"
-echo "DEV_HUB_QUICKSTART_INSTALL_MODE=$DEV_HUB_QUICKSTART_INSTALL_MODE"
-echo "DEV_HUB_QUICKSTART_INSTALL_SCOPE=$DEV_HUB_QUICKSTART_INSTALL_SCOPE"
+run_timed "install vllm-hust repo" \
+  env VLLM_TARGET_DEVICE=empty VLLM_USE_PRECOMPILED=0 \
+  hust_run_pip install -e "$VLLM_HUST_REPO" --no-build-isolation --no-deps
 
-quickstart_args=(
-  --install
-  --install-mode "$DEV_HUB_QUICKSTART_INSTALL_MODE"
-  --install-scope "$DEV_HUB_QUICKSTART_INSTALL_SCOPE"
-  --env-name "$VLLM_HUST_CONDA_ENV"
-  -y
-)
+run_timed "install benchmark runtime Python deps" \
+  hust_run_pip install jsonschema
 
-if [[ "$DEV_HUB_QUICKSTART_CONDA" == "1" ]]; then
-  quickstart_args=(
-    --conda
-    "${quickstart_args[@]}"
-    --python "$PYTHON_VERSION"
-  )
-else
-  ensure_conda_env_for_install_only
+run_timed "install vllm-hust-benchmark repo" \
+  hust_run_pip install -e "$VLLM_HUST_BENCHMARK_REPO" --no-build-isolation --no-deps
+
+if [[ "${PUBLISH_TO_HF:-0}" == "1" ]]; then
+  run_timed "install huggingface_hub for HF publish" \
+    hust_run_pip install "huggingface_hub>=0.20"
 fi
 
-requested_compile_custom_kernels="${COMPILE_CUSTOM_KERNELS:-auto}"
-resolved_compile_custom_kernels="$(resolve_compile_custom_kernels)"
-case "$resolved_compile_custom_kernels" in
-  dev-hub-default)
-    unset HUST_DEV_HUB_ASCEND_COMPILE_CUSTOM_KERNELS
-    echo "COMPILE_CUSTOM_KERNELS=auto resolved to dev-hub default policy for CANN 9"
-    ;;
-  0)
-    export COMPILE_CUSTOM_KERNELS=0
-    export HUST_DEV_HUB_ASCEND_COMPILE_CUSTOM_KERNELS=0
-    quickstart_args+=(--ascend-lightweight)
-    if [[ "$requested_compile_custom_kernels" == "auto" ]]; then
-      echo "COMPILE_CUSTOM_KERNELS=auto resolved to lightweight mode for CANN 8.x or unknown runtime"
-    else
-      echo "Using configured COMPILE_CUSTOM_KERNELS=0"
-    fi
-    ;;
-  *)
-    export COMPILE_CUSTOM_KERNELS="$resolved_compile_custom_kernels"
-    export HUST_DEV_HUB_ASCEND_COMPILE_CUSTOM_KERNELS="$resolved_compile_custom_kernels"
-    quickstart_args+=(--ascend-custom-kernels "$resolved_compile_custom_kernels")
-    echo "Using configured COMPILE_CUSTOM_KERNELS=$resolved_compile_custom_kernels"
-    ;;
-esac
-
-bash "$VLLM_HUST_DEV_HUB_REPO/scripts/quickstart.sh" "${quickstart_args[@]}"
-
-if [[ -n "${GITHUB_ENV:-}" ]]; then
-  echo "COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS:-auto}" >> "$GITHUB_ENV"
-fi
+run_timed "install local Ascend plugin" \
+  env COMPILE_CUSTOM_KERNELS=0 \
+  bash "$VLLM_ASCEND_HUST_REPO/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"
