@@ -182,6 +182,7 @@ def test_benchmark_runner_resolves_same_spec_without_random_online_default() -> 
     assert "prepare_same_spec_pr_preview_compat_file()" in runner_script
     assert 'server_parameters["no_enable_chunked_prefill"] = True' in runner_script
     assert 'server_parameters["no_enable_prefix_caching"] = True' in runner_script
+    assert 'server_parameters["gpu_memory_utilization"] = 0.70' in runner_script
     assert 'client_parameters.setdefault("temperature", 0)' in runner_script
     assert 'client_parameters["max_concurrency"] = 1' in runner_script
     assert 'client_parameters["request_rate"] = 1' in runner_script

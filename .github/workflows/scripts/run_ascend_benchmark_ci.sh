@@ -964,6 +964,7 @@ client_parameters = dict(payload.get("client_parameters") or {})
 # defaults can exercise unstable plugin paths before the CI signal is useful.
 server_parameters["no_enable_chunked_prefill"] = True
 server_parameters["no_enable_prefix_caching"] = True
+server_parameters["gpu_memory_utilization"] = 0.70
 client_parameters.setdefault("temperature", 0)
 client_parameters["max_concurrency"] = 1
 client_parameters["request_rate"] = 1
