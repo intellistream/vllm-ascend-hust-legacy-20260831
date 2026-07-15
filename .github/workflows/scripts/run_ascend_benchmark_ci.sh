@@ -77,14 +77,14 @@ validate_benchmark_inputs() {
 }
 
 normalize_compile_custom_kernels_env() {
-  local raw_value="${COMPILE_CUSTOM_KERNELS:-0}"
+  local raw_value="${COMPILE_CUSTOM_KERNELS:-1}"
   local normalized_value
 
   case "${raw_value,,}" in
-    1|true|yes|on)
+    ""|1|true|yes|on|auto)
       normalized_value=1
       ;;
-    ""|0|false|no|off|auto)
+    0|false|no|off)
       normalized_value=0
       ;;
     *)

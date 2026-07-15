@@ -201,7 +201,7 @@ fi
 ensure_conda_ld_library_path_priority
 
 export PYTHONPATH="$VLLM_HUST_REPO:$VLLM_HUST_BENCHMARK_REPO/src${PYTHONPATH:+:$PYTHONPATH}"
-echo "Using install-only repo bootstrap (no quickstart; editable --no-deps installs):"
+echo "Using install-only repo bootstrap (no quickstart; repo installs only):"
 echo "  VLLM_HUST_PYTHON_BIN=$VLLM_HUST_PYTHON_BIN"
 echo "  PYTHONPATH=$PYTHONPATH"
 
@@ -218,7 +218,3 @@ if [[ "${PUBLISH_TO_HF:-0}" == "1" ]]; then
   run_timed "install huggingface_hub for HF publish" \
     hust_run_pip install "huggingface_hub>=0.20"
 fi
-
-run_timed "install local Ascend plugin" \
-  env COMPILE_CUSTOM_KERNELS=0 \
-  bash "$VLLM_ASCEND_HUST_REPO/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"

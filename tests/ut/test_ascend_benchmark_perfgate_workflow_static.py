@@ -108,17 +108,17 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "ref: ${{ env.HUST_ASCEND_MANAGER_REF }}" in workflow
     assert "install_ascend_benchmark_with_dev_hub.sh" in workflow
     assert "install vllm-hust repo" not in workflow
-    assert "install local Ascend plugin" not in workflow
+    assert "Installing local Ascend plugin" in workflow
     assert "HUST_MANAGER_INSTALL_PYTHON_STACK" not in workflow
     assert "DEV_HUB_QUICKSTART" not in workflow
     assert 'hust_run_pip install "torch==2.9.0"' not in workflow
-    assert "scripts/install_local_ascend_plugin.sh" not in workflow
+    assert "scripts/install_local_ascend_plugin.sh" in workflow
     assert "resolve_cann_major_version()" not in workflow
     assert "vars.VLLM_ASCEND_HUST_BENCHMARK_USE_SUDO || 'auto'" in workflow
     assert "CURRENT_VLLM_CACHE_ROOT: ${{ github.workspace }}/../.hf-cache/vllm" in workflow
     assert "VLLM_ASCEND_HUST_SAME_SPEC_READY_TIMEOUT_SECONDS || '1800'" in workflow
     assert "VLLM_ASCEND_HUST_SAME_SPEC_CLIENT_READY_TIMEOUT_SECONDS || '300'" in workflow
-    assert "vars.VLLM_ASCEND_HUST_COMPILE_CUSTOM_KERNELS || '0'" in workflow
+    assert "vars.VLLM_ASCEND_HUST_COMPILE_CUSTOM_KERNELS || '1'" in workflow
 
 
 def test_schedule_runs_registered_multi_scenario_benchmark_publish() -> None:
@@ -146,8 +146,10 @@ def test_benchmark_runner_resolves_same_spec_without_random_online_default() -> 
     runner_script = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
 
     assert "normalize_compile_custom_kernels_env()" in runner_script
+    assert 'local raw_value="${COMPILE_CUSTOM_KERNELS:-1}"' in runner_script
     assert 'export COMPILE_CUSTOM_KERNELS="${normalized_value}"' in runner_script
-    assert '""|0|false|no|off|auto)' in runner_script
+    assert '""|1|true|yes|on|auto)' in runner_script
+    assert "0|false|no|off)" in runner_script
     assert "SAME_SPEC_SPEC_FILE=${SAME_SPEC_SPEC_FILE:-}" in runner_script
     assert "SAME_SPEC_PR_PREVIEW_COMPAT=${SAME_SPEC_PR_PREVIEW_COMPAT:-1}" in runner_script
     assert "SAME_SPEC_CLIENT_READY_TIMEOUT_SECONDS=${SAME_SPEC_CLIENT_READY_TIMEOUT_SECONDS:-300}" in runner_script
@@ -297,6 +299,8 @@ def test_single_ascend_env_falls_back_when_manager_env_fails() -> None:
 def test_local_plugin_editable_install_bootstraps_build_metadata_deps() -> None:
     install_script = INSTALL_PLUGIN_SCRIPT.read_text(encoding="utf-8")
 
+    assert "normalize_compile_custom_kernels_for_install()" in install_script
+    assert "1|true|yes|on|auto)" in install_script
     assert "import setuptools_scm" in install_script
     assert "import wheel.bdist_wheel" in install_script
     assert 'hust_run_pip install "setuptools-scm>=8"' in install_script
@@ -315,8 +319,8 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
     install_dev_hub_script = INSTALL_DEV_HUB_SCRIPT.read_text(encoding="utf-8")
     assert "install vllm-hust repo" in install_dev_hub_script
     assert "install vllm-hust-benchmark repo" in install_dev_hub_script
-    assert "install local Ascend plugin" in install_dev_hub_script
-    assert "Using install-only repo bootstrap (no quickstart; editable --no-deps installs)" in install_dev_hub_script
+    assert "install local Ascend plugin" not in install_dev_hub_script
+    assert "Using install-only repo bootstrap (no quickstart; repo installs only)" in install_dev_hub_script
     assert "LD_LIBRARY_PATH prioritized for conda runtime libs" in install_dev_hub_script
     assert '"${entry}" == "${CONDA_PREFIX}/lib"' in install_dev_hub_script
     assert 'export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${rebuilt_ld_library_path}"' in install_dev_hub_script
@@ -331,7 +335,7 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
     assert "--no-build-isolation --no-deps" in install_dev_hub_script
     assert "PUBLISH_TO_HF" in install_dev_hub_script
     assert "huggingface_hub>=0.20" in install_dev_hub_script
-    assert "env COMPILE_CUSTOM_KERNELS=0" in install_dev_hub_script
+    assert "env COMPILE_CUSTOM_KERNELS=0" not in install_dev_hub_script
     assert "quickstart.sh" not in install_dev_hub_script
     assert "HUST_MANAGER_INSTALL_PYTHON_STACK" not in install_dev_hub_script
     assert "DEV_HUB_QUICKSTART" not in install_dev_hub_script
@@ -342,6 +346,11 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
     assert "torchaudio==2.10.0" in prepare_step
     assert 'hust_run_pip install -c "$torch_constraints"' in prepare_step
     assert 'hust_run_pip install -c "$torch_constraints" -r "$VLLM_HUST_REPO/requirements/common.txt"' in prepare_step
+    assert "install_local_ascend_plugin.sh" in prepare_step
+    assert 'COMPILE_CUSTOM_KERNELS="${COMPILE_CUSTOM_KERNELS:-1}"' in prepare_step
+    assert prepare_step.index("install_local_ascend_plugin.sh") > prepare_step.index(
+        'hust_run_pip install -c "$torch_constraints" -r "$VLLM_HUST_REPO/requirements/common.txt"'
+    )
     assert "VLLM_HUST_PYTHON_BIN" in prepare_step
 
 
@@ -433,7 +442,11 @@ def test_stage2_trial_does_not_publish_benchmark_results() -> None:
     assert "BENCHMARK_RESULTS_ROOT" in stage2_script
     assert "install_ascend_benchmark_with_dev_hub.sh" in stage2_script
     assert "DEV_HUB_QUICKSTART_CONDA" not in stage2_script
-    assert "install_local_ascend_plugin.sh" not in stage2_script
+    assert "install_local_ascend_plugin.sh" in stage2_script
+    assert 'COMPILE_CUSTOM_KERNELS="${COMPILE_CUSTOM_KERNELS:-1}"' in stage2_script
+    assert stage2_script.index("install_local_ascend_plugin.sh") > stage2_script.index(
+        "install_ascend_benchmark_with_dev_hub.sh"
+    )
 
 
 def test_dev_hub_install_wrapper_uses_direct_repo_installs() -> None:
@@ -445,8 +458,8 @@ def test_dev_hub_install_wrapper_uses_direct_repo_installs() -> None:
     assert "install vllm-hust repo" in install_script
     assert "install benchmark runtime Python deps" in install_script
     assert "install vllm-hust-benchmark repo" in install_script
-    assert "install local Ascend plugin" in install_script
-    assert "Using install-only repo bootstrap (no quickstart; editable --no-deps installs)" in install_script
+    assert "install local Ascend plugin" not in install_script
+    assert "Using install-only repo bootstrap (no quickstart; repo installs only)" in install_script
     assert "LD_LIBRARY_PATH prioritized for conda runtime libs" in install_script
     assert '"${entry}" == "${CONDA_PREFIX}/lib"' in install_script
     assert 'export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${rebuilt_ld_library_path}"' in install_script
@@ -458,12 +471,13 @@ def test_dev_hub_install_wrapper_uses_direct_repo_installs() -> None:
     assert "install_vllm_hust_repo()" in install_script
     assert "env VLLM_TARGET_DEVICE=empty VLLM_USE_PRECOMPILED=0" not in install_script
     assert "--no-build-isolation --no-deps" in install_script
-    assert "env COMPILE_CUSTOM_KERNELS=0" in install_script
+    assert "env COMPILE_CUSTOM_KERNELS=0" not in install_script
     assert "quickstart.sh" not in install_script
     assert "HUST_DEV_HUB_SKIP_ASCEND_SYSTEM_APPLY" not in install_script
     assert 'prioritize_conda_runtime_libs "$PYTHON_BIN"' in workflow
     assert '"$entry" == "$conda_prefix/lib"' in workflow
     assert 'export LD_LIBRARY_PATH="$conda_prefix/lib:$rebuilt_ld_library_path"' in workflow
+    assert "install_local_ascend_plugin.sh" in workflow
 
 
 def test_benchmark_workflow_masks_cross_service_credentials() -> None:

@@ -82,8 +82,32 @@ if [[ ! -f "${PLUGIN_REPO}/pyproject.toml" ]]; then
   exit 1
 fi
 
+normalize_compile_custom_kernels_for_install() {
+  local raw_value="${COMPILE_CUSTOM_KERNELS:-0}"
+  local normalized_value
+
+  case "${raw_value,,}" in
+    1|true|yes|on|auto)
+      normalized_value=1
+      ;;
+    ""|0|false|no|off)
+      normalized_value=0
+      ;;
+    *)
+      echo "[ERROR] Invalid COMPILE_CUSTOM_KERNELS value for plugin install: ${raw_value}" >&2
+      echo "[ERROR] Expected one of: 0, 1, true, false, yes, no, on, off, auto." >&2
+      exit 2
+      ;;
+  esac
+
+  if [[ "${raw_value}" != "${normalized_value}" ]]; then
+    echo "[INFO] Normalized COMPILE_CUSTOM_KERNELS=${raw_value} to ${normalized_value} for plugin install"
+  fi
+  export COMPILE_CUSTOM_KERNELS="${normalized_value}"
+}
+
 echo "[INFO] Installing local vllm-ascend-hust plugin from: ${PLUGIN_REPO}"
-export COMPILE_CUSTOM_KERNELS="${COMPILE_CUSTOM_KERNELS:-0}"
+normalize_compile_custom_kernels_for_install
 if [[ "${COMPILE_CUSTOM_KERNELS}" == "1" ]]; then
   echo "[INFO] Using runtime mode: COMPILE_CUSTOM_KERNELS=1, --no-deps"
 else

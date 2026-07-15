@@ -92,6 +92,9 @@ if [[ "$rebase_rc" -ne 0 ]]; then
 fi
 
 bash .github/workflows/scripts/install_ascend_benchmark_with_dev_hub.sh
+echo "Installing local Ascend plugin for Stage 2 benchmark"
+env COMPILE_CUSTOM_KERNELS="${COMPILE_CUSTOM_KERNELS:-1}" \
+  bash "$VLLM_ASCEND_HUST_REPO/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"
 
 run_stage2_benchmark() {
   local max_attempts=${NODE_ENV_RETRY_MAX_ATTEMPTS:-3}
