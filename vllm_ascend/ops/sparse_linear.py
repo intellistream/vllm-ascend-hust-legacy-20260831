@@ -138,7 +138,7 @@ def activation_sparse_linear_direct(
         if _requires_backend_kernel():
             raise RuntimeError(
                 "activation_sparse_linear_direct requires the Ascend custom "
-                "fp16 op when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
+                "fp16/bf16 op when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
             )
         return activation_sparse_linear_ref(
             x,
@@ -174,7 +174,7 @@ def activation_sparse_linear_direct_t(
         if _requires_backend_kernel():
             raise RuntimeError(
                 "activation_sparse_linear_direct_t requires the Ascend custom "
-                "fp16 op when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
+                "fp16/bf16 op when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
             )
         return activation_sparse_linear_ref(
             x,
@@ -210,8 +210,8 @@ def activation_sparse_silu_and_mul_direct_t(
         if _requires_backend_kernel():
             raise RuntimeError(
                 "activation_sparse_silu_and_mul_direct_t requires the Ascend "
-                "custom fp16 op when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
-        )
+                "custom fp16/bf16 op when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
+            )
         sparse_gate_up = activation_sparse_linear_ref(
             x,
             weight_t.t().contiguous(),
@@ -255,7 +255,7 @@ def activation_sparse_silu_and_mul_packed_t(
         if _requires_backend_kernel():
             raise RuntimeError(
                 "activation_sparse_silu_and_mul_packed_t requires the Ascend "
-                "custom fp16 ops when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
+                "custom fp16/bf16 ops when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
             )
         values, indices, counts = activation_sparse_pack_ref(
             x,
@@ -303,7 +303,7 @@ def activation_sparse_linear(
         if _requires_backend_kernel():
             raise RuntimeError(
                 "activation_sparse_linear requires the Ascend packed custom "
-                "fp16 ops when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
+                "fp16/bf16 ops when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
             )
         values, indices, counts = activation_sparse_pack_ref(
             x,
@@ -375,11 +375,12 @@ def _requires_backend_kernel() -> bool:
 
 
 def _can_use_custom_op(x: torch.Tensor, weight: torch.Tensor | None) -> bool:
+    supported_dtype = x.dtype in (torch.float16, torch.bfloat16)
     return (
         getattr(x, "is_npu", False)
         and _custom_op_enabled()
-        and x.dtype == torch.float16
-        and (weight is None or weight.dtype == torch.float16)
+        and supported_dtype
+        and (weight is None or weight.dtype == x.dtype)
     )
 
 

@@ -4,16 +4,19 @@ import pytest
 import torch
 
 from vllm_ascend.ops.sparse_linear import (
-    _custom_op_enabled,
     _CUSTOM_OP_MARKED,
+    _custom_op_enabled,
     _record_custom_op_invocation,
     activation_sparse_linear,
     activation_sparse_linear_direct,
     activation_sparse_linear_direct_t,
-    activation_sparse_linear_ref,
-    activation_sparse_linear_packed_t_ref,
     activation_sparse_linear_packed_ref,
+    activation_sparse_linear_packed_t_ref,
+    activation_sparse_linear_ref,
     activation_sparse_pack_ref,
+    activation_sparse_silu_and_mul_direct_t,
+    activation_sparse_silu_and_mul_packed_t,
+    activation_sparse_silu_and_mul_packed_t_ref,
 )
 
 
@@ -219,7 +222,7 @@ def _npu_sparse_tolerances(dtype: torch.dtype) -> tuple[float, float]:
     return 5e-2, 5e-2
 
 
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_activation_sparse_linear_npu_matches_ref(dtype):
     _requires_npu_custom_op()
     torch.manual_seed(0)
@@ -242,7 +245,7 @@ def test_activation_sparse_linear_npu_matches_ref(dtype):
     assert torch.allclose(direct_t.cpu(), expected.cpu(), atol=atol, rtol=rtol)
 
 
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("inclusive", [False, True])
 def test_activation_sparse_linear_npu_packed_ops_edge_cases(dtype, inclusive):
     _requires_npu_custom_op()
@@ -307,7 +310,7 @@ def test_activation_sparse_linear_npu_packed_ops_edge_cases(dtype, inclusive):
     assert torch.allclose(wrapper.cpu(), expected.cpu(), atol=atol, rtol=rtol)
 
 
-@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_activation_sparse_linear_npu_batched_row_topk_matches_ref(dtype):
     _requires_npu_custom_op()
     torch.manual_seed(1)
@@ -360,17 +363,32 @@ def test_activation_sparse_linear_npu_batched_row_topk_matches_ref(dtype):
     assert torch.allclose(wrapper.cpu(), expected.cpu(), atol=atol, rtol=rtol)
 
 
-def test_activation_sparse_linear_npu_bf16_wrapper_falls_back_to_ref():
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_activation_sparse_silu_and_mul_npu_matches_ref(dtype):
     _requires_npu_custom_op()
     torch.manual_seed(2)
-    x = torch.randn(3, 32, device="npu", dtype=torch.bfloat16)
-    weight = torch.randn(17, 32, device="npu", dtype=torch.bfloat16)
+    x = torch.randn(3, 32, device="npu", dtype=dtype)
+    weight_t = torch.randn(32, 34, device="npu", dtype=dtype)
     threshold = torch.tensor([0.25, 0.5, 0.75], device="npu")
 
-    actual = activation_sparse_linear(x, weight, threshold)
-    direct = activation_sparse_linear_direct(x, weight, threshold)
-    expected = activation_sparse_linear_ref(x, weight, threshold)
+    packed = activation_sparse_silu_and_mul_packed_t(
+        x,
+        weight_t,
+        threshold,
+    )
+    direct = activation_sparse_silu_and_mul_direct_t(
+        x,
+        weight_t,
+        threshold,
+    )
+    values, indices, counts = activation_sparse_pack_ref(x, threshold)
+    expected = activation_sparse_silu_and_mul_packed_t_ref(
+        values,
+        indices,
+        counts,
+        weight_t,
+    )
 
-    atol, rtol = _npu_sparse_tolerances(torch.bfloat16)
-    assert torch.allclose(actual.cpu(), expected.cpu(), atol=atol, rtol=rtol)
+    atol, rtol = _npu_sparse_tolerances(dtype)
+    assert torch.allclose(packed.cpu(), expected.cpu(), atol=atol, rtol=rtol)
     assert torch.allclose(direct.cpu(), expected.cpu(), atol=atol, rtol=rtol)

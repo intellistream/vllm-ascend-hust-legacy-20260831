@@ -52,6 +52,16 @@ def parse_args() -> argparse.Namespace:
         choices=["float16", "bfloat16"],
         default="bfloat16",
     )
+    parser.add_argument(
+        "--weight-format",
+        choices=["nd", "nz"],
+        default="nz",
+        help=(
+            "Storage format for the dense reference weight. vLLM converts "
+            "linear weights to FRACTAL_NZ on Ascend, while the sparse kernel "
+            "uses a cached contiguous ND transpose."
+        ),
+    )
     parser.add_argument("--inclusive", action="store_true")
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=100)
@@ -196,6 +206,15 @@ def apply_dense_op(
     return torch.nn.functional.silu(gate) * up
 
 
+def npu_format(tensor: torch.Tensor) -> int | None:
+    try:
+        import torch_npu
+
+        return int(torch_npu.get_npu_format(tensor))
+    except (AttributeError, ImportError, RuntimeError):
+        return None
+
+
 def error_stats(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
     actual_f = actual.to(dtype=torch.float32)
     expected_f = expected.to(dtype=torch.float32)
@@ -230,6 +249,10 @@ def main() -> None:
 
     x = torch.randn(args.batch_size, args.input_dim, device=device, dtype=dtype)
     weight = torch.randn(args.output_dim, args.input_dim, device=device, dtype=dtype)
+    if args.weight_format == "nz":
+        import torch_npu
+
+        weight = torch_npu.npu_format_cast(weight, 29)
     weight_t = weight.t().contiguous()
     topk_keep_count = (
         topk_keep(args.input_dim, args.sparsity)
@@ -592,6 +615,9 @@ def main() -> None:
         "output_dim": args.output_dim,
         "fused_silu_and_mul": args.fused_silu_and_mul,
         "dtype": args.dtype,
+        "weight_format": args.weight_format,
+        "weight_npu_format": npu_format(weight),
+        "weight_t_npu_format": npu_format(weight_t),
         "threshold_mode": args.threshold_mode,
         "row_topk_threshold_backend": args.row_topk_threshold_backend,
         "requested_inclusive": args.inclusive,

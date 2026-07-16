@@ -24,6 +24,50 @@ __aicore__ inline float AbsFloat(float value)
     return value < 0.0F ? -value : value;
 }
 
+template <typename T>
+__aicore__ inline float SparseScalarToFloat(const T& value)
+{
+    if constexpr (AscendC::IsSameType<T, bfloat16_t>::value) {
+        union BFloat16Bits {
+            __aicore__ BFloat16Bits() {}
+            bfloat16_t value;
+            uint16_t bits;
+        } source;
+        union FloatBits {
+            __aicore__ FloatBits() {}
+            uint32_t bits;
+            float value;
+        } result;
+        source.value = value;
+        result.bits = static_cast<uint32_t>(source.bits) << 16;
+        return result.value;
+    } else {
+        return static_cast<float>(value);
+    }
+}
+
+template <typename T>
+__aicore__ inline T SparseFloatToScalar(float value)
+{
+    if constexpr (AscendC::IsSameType<T, bfloat16_t>::value) {
+        union FloatBits {
+            __aicore__ FloatBits() {}
+            float value;
+            uint32_t bits;
+        } source;
+        union BFloat16Bits {
+            __aicore__ BFloat16Bits() {}
+            uint16_t bits;
+            bfloat16_t value;
+        } result;
+        source.value = value;
+        result.bits = static_cast<uint16_t>(source.bits >> 16);
+        return result.value;
+    } else {
+        return static_cast<T>(value);
+    }
+}
+
 template <typename scalar_t>
 class ActivationSparsePack {
 public:
@@ -60,7 +104,7 @@ public:
             int32_t count = 0;
             for (uint32_t in_col = 0; in_col < inputDim_; ++in_col) {
                 X_T raw_value = xGm_.GetValue(row_offset + in_col);
-                float x_value = static_cast<float>(raw_value);
+                float x_value = SparseScalarToFloat(raw_value);
                 float magnitude = AbsFloat(x_value);
                 bool active = inclusive_ ? (magnitude >= threshold)
                                          : (magnitude > threshold);
@@ -131,13 +175,14 @@ public:
             for (int32_t nz_pos = 0; nz_pos < nnz; ++nz_pos) {
                 uint64_t value_offset = packed_offset + static_cast<uint32_t>(nz_pos);
                 int32_t in_col = indicesGm_.GetValue(value_offset);
-                float x_value = static_cast<float>(valuesGm_.GetValue(value_offset));
-                float w_value = static_cast<float>(
+                float x_value =
+                    SparseScalarToFloat(valuesGm_.GetValue(value_offset));
+                float w_value = SparseScalarToFloat(
                     weightGm_.GetValue(w_offset + static_cast<uint32_t>(in_col)));
                 acc += x_value * w_value;
             }
 
-            yGm_.SetValue(linear_idx, static_cast<Y_T>(acc));
+            yGm_.SetValue(linear_idx, SparseFloatToScalar<Y_T>(acc));
         }
     }
 
@@ -221,7 +266,8 @@ private:
         for (int32_t nz_pos = 0; nz_pos < nnz; ++nz_pos) {
             uint64_t value_offset = packed_offset + static_cast<uint32_t>(nz_pos);
             int32_t in_col = indicesGm_.GetValue(value_offset);
-            float x_value = static_cast<float>(valuesGm_.GetValue(value_offset));
+            float x_value =
+                SparseScalarToFloat(valuesGm_.GetValue(value_offset));
             CopyInW(static_cast<uint32_t>(in_col), out_start, tile_len);
             Compute(x_value, tile_len);
         }
@@ -372,7 +418,8 @@ private:
         for (int32_t nz_pos = 0; nz_pos < nnz; ++nz_pos) {
             uint64_t value_offset = packed_offset + static_cast<uint32_t>(nz_pos);
             int32_t in_col = indicesGm_.GetValue(value_offset);
-            float x_value = static_cast<float>(valuesGm_.GetValue(value_offset));
+            float x_value =
+                SparseScalarToFloat(valuesGm_.GetValue(value_offset));
             CopyInGateUp(static_cast<uint32_t>(in_col), out_start, tile_len);
             ComputeGateUp(accGate, accUp, x_value, tile_len);
         }
@@ -542,7 +589,7 @@ private:
         uint64_t x_offset = static_cast<uint64_t>(row) * inputDim_;
         for (uint32_t in_col = 0; in_col < inputDim_; ++in_col) {
             float x_value =
-                static_cast<float>(xGm_.GetValue(x_offset + in_col));
+                SparseScalarToFloat(xGm_.GetValue(x_offset + in_col));
             float magnitude = AbsFloat(x_value);
             bool active = inclusive_ ? (magnitude >= threshold)
                                      : (magnitude > threshold);
@@ -700,7 +747,7 @@ private:
         uint64_t x_offset = static_cast<uint64_t>(row) * inputDim_;
         for (uint32_t in_col = 0; in_col < inputDim_; ++in_col) {
             float x_value =
-                static_cast<float>(xGm_.GetValue(x_offset + in_col));
+                SparseScalarToFloat(xGm_.GetValue(x_offset + in_col));
             float magnitude = AbsFloat(x_value);
             bool active = inclusive_ ? (magnitude >= threshold)
                                      : (magnitude > threshold);
@@ -850,18 +897,18 @@ public:
             uint64_t w_offset = static_cast<uint64_t>(out_col) * inputDim_;
             for (uint32_t in_col = 0; in_col < inputDim_; ++in_col) {
                 float x_value =
-                    static_cast<float>(xGm_.GetValue(x_offset + in_col));
+                    SparseScalarToFloat(xGm_.GetValue(x_offset + in_col));
                 float magnitude = AbsFloat(x_value);
                 bool active = inclusive_ ? (magnitude >= threshold)
                                          : (magnitude > threshold);
                 if (active) {
-                    float w_value = static_cast<float>(
+                    float w_value = SparseScalarToFloat(
                         weightGm_.GetValue(w_offset + in_col));
                     acc += x_value * w_value;
                 }
             }
 
-            yGm_.SetValue(linear_idx, static_cast<Y_T>(acc));
+            yGm_.SetValue(linear_idx, SparseFloatToScalar<Y_T>(acc));
         }
     }
 
@@ -984,6 +1031,15 @@ ACTIVATION_SPARSE_SILU_AND_MUL_PACKED_T_TYPE_DECLARE(half)
 ACTIVATION_SPARSE_LINEAR_DIRECT_T_TYPE_DECLARE(half)
 ACTIVATION_SPARSE_SILU_AND_MUL_DIRECT_T_TYPE_DECLARE(half)
 ACTIVATION_SPARSE_LINEAR_TYPE_DECLARE(half)
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+ACTIVATION_SPARSE_PACK_TYPE_DECLARE(bfloat16_t)
+ACTIVATION_SPARSE_LINEAR_PACKED_TYPE_DECLARE(bfloat16_t)
+ACTIVATION_SPARSE_LINEAR_PACKED_T_TYPE_DECLARE(bfloat16_t)
+ACTIVATION_SPARSE_SILU_AND_MUL_PACKED_T_TYPE_DECLARE(bfloat16_t)
+ACTIVATION_SPARSE_LINEAR_DIRECT_T_TYPE_DECLARE(bfloat16_t)
+ACTIVATION_SPARSE_SILU_AND_MUL_DIRECT_T_TYPE_DECLARE(bfloat16_t)
+ACTIVATION_SPARSE_LINEAR_TYPE_DECLARE(bfloat16_t)
+#endif
 
 } // namespace
 
@@ -1005,6 +1061,12 @@ extern void activation_sparse_pack_impl(AscendType type, void* stream, void* x,
         activation_sparse_pack_half<<<block_dim, nullptr, stream>>>(
             x, threshold, values, indices, counts, batch_size, input_dim,
             block_dim, threshold_per_row, inclusive);
+    } else if (type == AscendType::BF16) {
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        activation_sparse_pack_bfloat16_t<<<block_dim, nullptr, stream>>>(
+            x, threshold, values, indices, counts, batch_size, input_dim,
+            block_dim, threshold_per_row, inclusive);
+#endif
     } else {
         return;
     }
@@ -1023,6 +1085,13 @@ extern void activation_sparse_linear_packed_impl(
         activation_sparse_linear_packed_half<<<block_dim, nullptr, stream>>>(
             values, indices, counts, weight, y, input_dim, output_dim,
             work_items, block_dim);
+    } else if (type == AscendType::BF16) {
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        activation_sparse_linear_packed_bfloat16_t<<<block_dim, nullptr,
+                                                    stream>>>(
+            values, indices, counts, weight, y, input_dim, output_dim,
+            work_items, block_dim);
+#endif
     } else {
         return;
     }
@@ -1042,6 +1111,13 @@ extern void activation_sparse_linear_packed_t_impl(
         activation_sparse_linear_packed_t_half<<<block_dim, nullptr, stream>>>(
             values, indices, counts, weight_t, y, input_dim, output_dim,
             tile_count, work_items, block_dim, output_tile);
+    } else if (type == AscendType::BF16) {
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        activation_sparse_linear_packed_t_bfloat16_t<<<block_dim, nullptr,
+                                                      stream>>>(
+            values, indices, counts, weight_t, y, input_dim, output_dim,
+            tile_count, work_items, block_dim, output_tile);
+#endif
     } else {
         return;
     }
@@ -1062,6 +1138,13 @@ extern void activation_sparse_silu_and_mul_packed_t_impl(
                                                        stream>>>(
             values, indices, counts, weight_t, y, input_dim, intermediate_dim,
             tile_count, work_items, block_dim, output_tile);
+    } else if (type == AscendType::BF16) {
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        activation_sparse_silu_and_mul_packed_t_bfloat16_t<<<block_dim, nullptr,
+                                                            stream>>>(
+            values, indices, counts, weight_t, y, input_dim, intermediate_dim,
+            tile_count, work_items, block_dim, output_tile);
+#endif
     } else {
         return;
     }
@@ -1082,6 +1165,13 @@ extern void activation_sparse_linear_direct_t_impl(
         activation_sparse_linear_direct_t_half<<<block_dim, nullptr, stream>>>(
             x, weight_t, threshold, y, input_dim, output_dim, tile_count,
             work_items, block_dim, output_tile, threshold_per_row, inclusive);
+    } else if (type == AscendType::BF16) {
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        activation_sparse_linear_direct_t_bfloat16_t<<<block_dim, nullptr,
+                                                      stream>>>(
+            x, weight_t, threshold, y, input_dim, output_dim, tile_count,
+            work_items, block_dim, output_tile, threshold_per_row, inclusive);
+#endif
     } else {
         return;
     }
@@ -1103,6 +1193,13 @@ extern void activation_sparse_silu_and_mul_direct_t_impl(
                                                        stream>>>(
             x, weight_t, threshold, y, input_dim, intermediate_dim, tile_count,
             work_items, block_dim, output_tile, threshold_per_row, inclusive);
+    } else if (type == AscendType::BF16) {
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        activation_sparse_silu_and_mul_direct_t_bfloat16_t<<<block_dim, nullptr,
+                                                            stream>>>(
+            x, weight_t, threshold, y, input_dim, intermediate_dim, tile_count,
+            work_items, block_dim, output_tile, threshold_per_row, inclusive);
+#endif
     } else {
         return;
     }
@@ -1125,6 +1222,12 @@ extern void activation_sparse_linear_impl(AscendType type, void* stream, void* x
         activation_sparse_linear_half<<<block_dim, nullptr, stream>>>(
             x, weight, threshold, y, input_dim, output_dim, threshold_per_row,
             inclusive, work_items, block_dim);
+    } else if (type == AscendType::BF16) {
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        activation_sparse_linear_bfloat16_t<<<block_dim, nullptr, stream>>>(
+            x, weight, threshold, y, input_dim, output_dim, threshold_per_row,
+            inclusive, work_items, block_dim);
+#endif
     } else {
         return;
     }

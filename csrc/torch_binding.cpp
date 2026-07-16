@@ -414,6 +414,11 @@ AscendType get_dtype_from_torch(at::ScalarType scalarType)
     }
 }
 
+bool is_activation_sparse_dtype(at::ScalarType scalar_type)
+{
+    return scalar_type == torch::kHalf || scalar_type == torch::kBFloat16;
+}
+
 uint32_t get_sparse_launch_block_dim(const char* env_name,
                                      uint32_t fallback,
                                      uint32_t max_work_items)
@@ -754,8 +759,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> activation_sparse_pack(
     bool inclusive)
 {
     at::ScalarType scalar_type = x.scalar_type();
-    TORCH_CHECK(scalar_type == torch::kHalf,
-                "activation_sparse_pack only supports fp16");
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_pack only supports fp16 and bf16");
     TORCH_CHECK(threshold.scalar_type() == torch::kFloat,
                 "activation_sparse_pack threshold must be float32");
     TORCH_CHECK(x.dim() == 2, "activation_sparse_pack x should be [batch, hidden_in]");
@@ -811,8 +816,8 @@ at::Tensor activation_sparse_linear_packed(const at::Tensor& values,
                                            const at::Tensor& weight)
 {
     at::ScalarType scalar_type = values.scalar_type();
-    TORCH_CHECK(scalar_type == torch::kHalf,
-                "activation_sparse_linear_packed only supports fp16");
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_linear_packed only supports fp16 and bf16");
     TORCH_CHECK(weight.scalar_type() == scalar_type,
                 "activation_sparse_linear_packed requires values and weight to have the same dtype");
     TORCH_CHECK(indices.scalar_type() == at::kInt,
@@ -878,8 +883,8 @@ at::Tensor activation_sparse_linear_packed_t(const at::Tensor& values,
                                              const at::Tensor& weight_t)
 {
     at::ScalarType scalar_type = values.scalar_type();
-    TORCH_CHECK(scalar_type == torch::kHalf,
-                "activation_sparse_linear_packed_t only supports fp16");
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_linear_packed_t only supports fp16 and bf16");
     TORCH_CHECK(weight_t.scalar_type() == scalar_type,
                 "activation_sparse_linear_packed_t requires values and weight_t to have the same dtype");
     TORCH_CHECK(indices.scalar_type() == at::kInt,
@@ -952,8 +957,8 @@ at::Tensor activation_sparse_silu_and_mul_packed_t(const at::Tensor& values,
                                                    const at::Tensor& weight_t)
 {
     at::ScalarType scalar_type = values.scalar_type();
-    TORCH_CHECK(scalar_type == torch::kHalf,
-                "activation_sparse_silu_and_mul_packed_t only supports fp16");
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_silu_and_mul_packed_t only supports fp16 and bf16");
     TORCH_CHECK(weight_t.scalar_type() == scalar_type,
                 "activation_sparse_silu_and_mul_packed_t requires values and weight_t to have the same dtype");
     TORCH_CHECK(indices.scalar_type() == at::kInt,
@@ -1030,8 +1035,8 @@ at::Tensor activation_sparse_linear_direct_t(const at::Tensor& x,
                                              bool inclusive)
 {
     at::ScalarType scalar_type = x.scalar_type();
-    TORCH_CHECK(scalar_type == torch::kHalf,
-                "activation_sparse_linear_direct_t only supports fp16");
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_linear_direct_t only supports fp16 and bf16");
     TORCH_CHECK(weight_t.scalar_type() == scalar_type,
                 "activation_sparse_linear_direct_t requires x and weight_t to have the same dtype");
     TORCH_CHECK(threshold.scalar_type() == torch::kFloat,
@@ -1111,8 +1116,8 @@ at::Tensor activation_sparse_silu_and_mul_direct_t(const at::Tensor& x,
                                                    bool inclusive)
 {
     at::ScalarType scalar_type = x.scalar_type();
-    TORCH_CHECK(scalar_type == torch::kHalf,
-                "activation_sparse_silu_and_mul_direct_t only supports fp16");
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_silu_and_mul_direct_t only supports fp16 and bf16");
     TORCH_CHECK(weight_t.scalar_type() == scalar_type,
                 "activation_sparse_silu_and_mul_direct_t requires x and weight_t to have the same dtype");
     TORCH_CHECK(threshold.scalar_type() == torch::kFloat,
@@ -1196,8 +1201,8 @@ at::Tensor activation_sparse_linear(const at::Tensor& x,
                                     bool inclusive)
 {
     at::ScalarType scalar_type = x.scalar_type();
-    TORCH_CHECK(scalar_type == torch::kHalf,
-                "activation_sparse_linear only supports fp16");
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_linear only supports fp16 and bf16");
     TORCH_CHECK(weight.scalar_type() == scalar_type,
                 "activation_sparse_linear requires x and weight to have the same dtype");
     TORCH_CHECK(threshold.scalar_type() == torch::kFloat,
