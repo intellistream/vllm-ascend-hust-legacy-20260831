@@ -15,6 +15,7 @@ from vllm_ascend.ops.sparse_linear import (
     activation_sparse_linear_direct_t,
     activation_sparse_silu_and_mul_direct_t,
     activation_sparse_silu_and_mul_packed_t,
+    activation_sparse_topk_threshold,
 )
 
 
@@ -43,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--row-topk-threshold-backend",
-        choices=["kthvalue", "topk"],
+        choices=["kthvalue", "topk", "ascend"],
         default="kthvalue",
         help="Threshold primitive used by --threshold-mode row_topk.",
     )
@@ -135,6 +136,15 @@ def parse_args() -> argparse.Namespace:
         help="Fail if dense_ms / direct_t_sparse_ms is below this value.",
     )
     parser.add_argument(
+        "--min-direct-t-with-threshold-speedup",
+        type=float,
+        default=None,
+        help=(
+            "Fail if dense_ms / (direct_t_sparse_ms + online threshold_ms) "
+            "is below this value."
+        ),
+    )
+    parser.add_argument(
         "--skip-direct",
         action="store_true",
         help="Skip the direct sparse kernel and benchmark only the packed path.",
@@ -175,11 +185,14 @@ def build_threshold(
     threshold_mode: str,
     row_topk_threshold_backend: str,
 ) -> torch.Tensor:
-    x_abs = x.abs().to(dtype=torch.float32)
     if threshold_mode == "scalar":
+        x_abs = x.abs().to(dtype=torch.float32)
         return torch.quantile(x_abs.flatten(), sparsity).reshape(())
     if threshold_mode == "row_topk":
         keep = topk_keep(x.shape[-1], sparsity)
+        if row_topk_threshold_backend == "ascend":
+            return activation_sparse_topk_threshold(x, keep)
+        x_abs = x.abs().to(dtype=torch.float32)
         if row_topk_threshold_backend == "topk":
             topk_values, _ = torch.topk(x_abs, keep, dim=-1)
             return topk_values[..., -1].contiguous()
@@ -453,6 +466,9 @@ def main() -> None:
     threshold_online = args.threshold_mode == "row_topk"
     online_threshold_time = threshold_time if threshold_online else 0.0
     packed_total_with_threshold_time = packed_total_time + online_threshold_time
+    direct_t_with_threshold_time = (
+        direct_t_sparse_time + online_threshold_time
+    )
     density = (
         compare(x.abs().to(dtype=torch.float32), threshold_mask)
         .float()
@@ -463,6 +479,9 @@ def main() -> None:
         None if direct_sparse_time is None else dense_time / direct_sparse_time
     )
     direct_t_speedup = dense_time / direct_t_sparse_time
+    direct_t_with_threshold_speedup = (
+        dense_time / direct_t_with_threshold_time
+    )
     packed_total_speedup = dense_time / packed_total_time
     packed_compute_speedup = dense_time / packed_compute_time
     packed_total_with_threshold_speedup = (
@@ -608,6 +627,16 @@ def main() -> None:
             "direct_t speedup "
             f"{direct_t_speedup:.6g} < {args.min_direct_t_speedup:.6g}"
         )
+    if (
+        args.min_direct_t_with_threshold_speedup is not None
+        and direct_t_with_threshold_speedup
+        < args.min_direct_t_with_threshold_speedup
+    ):
+        failures.append(
+            "direct_t with threshold speedup "
+            f"{direct_t_with_threshold_speedup:.6g} < "
+            f"{args.min_direct_t_with_threshold_speedup:.6g}"
+        )
 
     result = {
         "batch_size": args.batch_size,
@@ -667,6 +696,9 @@ def main() -> None:
             None if direct_sparse_time is None else direct_sparse_time * 1000.0
         ),
         "direct_t_sparse_ms": direct_t_sparse_time * 1000.0,
+        "direct_t_with_threshold_ms": (
+            direct_t_with_threshold_time * 1000.0
+        ),
         "pack_ms": pack_time * 1000.0,
         "packed_compute_ms": packed_compute_time * 1000.0,
         "packed_total_ms": packed_total_time * 1000.0,
@@ -675,6 +707,9 @@ def main() -> None:
         ),
         "direct_speedup": direct_speedup,
         "direct_t_speedup": direct_t_speedup,
+        "direct_t_with_threshold_speedup": (
+            direct_t_with_threshold_speedup
+        ),
         "packed_total_speedup": packed_total_speedup,
         "packed_total_with_threshold_speedup": (
             packed_total_with_threshold_speedup

@@ -810,6 +810,50 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> activation_sparse_pack(
     return {values, indices, counts};
 }
 
+at::Tensor activation_sparse_topk_threshold(const at::Tensor& x,
+                                             int64_t keep)
+{
+    at::ScalarType scalar_type = x.scalar_type();
+    TORCH_CHECK(is_activation_sparse_dtype(scalar_type),
+                "activation_sparse_topk_threshold only supports fp16 and bf16");
+    TORCH_CHECK(x.dim() == 2,
+                "activation_sparse_topk_threshold x should be [batch, hidden_in]");
+    TORCH_CHECK(x.size(0) == 1,
+                "activation_sparse_topk_threshold only supports batch size 1");
+    TORCH_CHECK(x.is_contiguous(),
+                "activation_sparse_topk_threshold x must be contiguous");
+    TORCH_CHECK(keep > 0 && keep <= x.size(1),
+                "activation_sparse_topk_threshold keep must be in [1, ",
+                x.size(1), "], got ", keep);
+
+    at::Tensor threshold = at::empty(
+        {x.size(0)}, x.options().dtype(at::kFloat));
+    if (x.numel() == 0) {
+        return threshold;
+    }
+
+    void* x_ptr = x.data_ptr();
+    void* threshold_ptr = threshold.data_ptr();
+    uint32_t batch_size = static_cast<uint32_t>(x.size(0));
+    uint32_t input_dim = static_cast<uint32_t>(x.size(1));
+    uint32_t keep_u32 = static_cast<uint32_t>(keep);
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("activation_sparse_topk_threshold");
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, threshold_ptr,
+                          batch_size, input_dim, keep_u32]() -> int {
+        auto dtype = get_dtype_from_torch(scalar_type);
+        constexpr uint32_t block_dim = 1;
+        activation_sparse_topk_threshold_impl(
+            dtype, stream, x_ptr, threshold_ptr, batch_size, input_dim,
+            keep_u32, block_dim);
+        return 0;
+    });
+    cmd.Run();
+    return threshold;
+}
+
 at::Tensor activation_sparse_linear_packed(const at::Tensor& values,
                                            const at::Tensor& indices,
                                            const at::Tensor& counts,
@@ -2969,6 +3013,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def("activation_sparse_pack(Tensor x, Tensor threshold, bool inclusive=False) -> (Tensor values, Tensor indices, Tensor counts)");
     ops.impl("activation_sparse_pack", torch::kPrivateUse1, &vllm_ascend::activation_sparse_pack);
+
+    ops.def("activation_sparse_topk_threshold(Tensor x, int keep) -> Tensor");
+    ops.impl("activation_sparse_topk_threshold", torch::kPrivateUse1, &vllm_ascend::activation_sparse_topk_threshold);
 
     ops.def("activation_sparse_linear_packed(Tensor values, Tensor indices, Tensor counts, Tensor weight) -> Tensor");
     ops.impl("activation_sparse_linear_packed", torch::kPrivateUse1, &vllm_ascend::activation_sparse_linear_packed);

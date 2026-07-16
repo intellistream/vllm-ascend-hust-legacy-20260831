@@ -90,6 +90,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> activation_sparse_pack_meta(
     return {values, indices, counts};
 }
 
+at::Tensor activation_sparse_topk_threshold_meta(
+    const at::Tensor &x,
+    int64_t keep)
+{
+    (void)keep;
+    return at::empty({x.size(0)}, x.options().dtype(at::kFloat));
+}
+
 at::Tensor activation_sparse_linear_packed_meta(const at::Tensor &values,
                                                 const at::Tensor &indices,
                                                 const at::Tensor &counts,
@@ -1756,6 +1764,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // Activation sparse pack
     ops.impl("activation_sparse_pack", &vllm_ascend::meta::activation_sparse_pack_meta);
+    // Activation sparse exact top-k threshold
+    ops.impl("activation_sparse_topk_threshold", &vllm_ascend::meta::activation_sparse_topk_threshold_meta);
     // Activation packed sparse linear
     ops.impl("activation_sparse_linear_packed", &vllm_ascend::meta::activation_sparse_linear_packed_meta);
     // Activation packed sparse linear with transposed weight

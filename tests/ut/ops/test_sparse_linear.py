@@ -17,6 +17,8 @@ from vllm_ascend.ops.sparse_linear import (
     activation_sparse_silu_and_mul_direct_t,
     activation_sparse_silu_and_mul_packed_t,
     activation_sparse_silu_and_mul_packed_t_ref,
+    activation_sparse_topk_threshold,
+    activation_sparse_topk_threshold_ref,
 )
 
 
@@ -79,6 +81,23 @@ def test_activation_sparse_pack_ref_contract():
     assert indices[0, :2].tolist() == [1, 2]
     assert torch.allclose(values[1, :2], torch.tensor([1.2, -1.5]))
     assert indices[1, :2].tolist() == [0, 2]
+
+
+@pytest.mark.parametrize("keep", [1, 3, 5])
+def test_activation_sparse_topk_threshold_cpu_ref(keep):
+    x = torch.tensor(
+        [
+            [0.1, -3.0, 2.0, -2.0, 0.5],
+            [-4.0, 1.0, 4.0, 0.0, -2.0],
+        ],
+        dtype=torch.float32,
+    )
+    expected = torch.topk(x.abs(), keep, dim=-1).values[..., -1]
+
+    assert torch.equal(
+        activation_sparse_topk_threshold_ref(x, keep),
+        expected,
+    )
 
 
 def test_activation_sparse_linear_packed_ref_matches_masked_linear():
@@ -214,6 +233,34 @@ def _requires_npu_custom_op():
         pytest.skip("NPU is required for the AscendC sparse kernel")
     if not _custom_op_enabled():
         pytest.skip("Ascend custom ops must be enabled")
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("keep", [1, 17, 129, 257])
+def test_activation_sparse_topk_threshold_npu_matches_ref(dtype, keep):
+    _requires_npu_custom_op()
+    torch.manual_seed(11)
+    x = torch.randn(1, 257, device="npu", dtype=dtype)
+    x[:, 3:7] = x[:, 0:1]
+
+    actual = activation_sparse_topk_threshold(x, keep)
+    expected = activation_sparse_topk_threshold_ref(x, keep)
+
+    assert actual.dtype == torch.float32
+    assert actual.shape == (1,)
+    assert torch.equal(actual.cpu(), expected.cpu())
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_activation_sparse_topk_threshold_npu_production_shape(dtype):
+    _requires_npu_custom_op()
+    torch.manual_seed(17)
+    x = torch.randn(1, 3584, device="npu", dtype=dtype)
+
+    actual = activation_sparse_topk_threshold(x, 716)
+    expected = activation_sparse_topk_threshold_ref(x, 716)
+
+    assert torch.equal(actual.cpu(), expected.cpu())
 
 
 def _npu_sparse_tolerances(dtype: torch.dtype) -> tuple[float, float]:

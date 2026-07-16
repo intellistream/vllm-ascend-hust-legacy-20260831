@@ -15,6 +15,7 @@
  */
 
 #include "kernel_operator.h"
+#include "kernel_tiling/kernel_tiling.h"
 #include "types.h"
 
 namespace {
@@ -67,6 +68,153 @@ __aicore__ inline T SparseFloatToScalar(float value)
         return static_cast<T>(value);
     }
 }
+
+template <typename T>
+__aicore__ inline float SparseMagnitudeBitsToFloat(uint16_t bits)
+{
+    union ScalarBits {
+        __aicore__ ScalarBits() {}
+        T value;
+        uint16_t bits;
+    } source;
+    source.bits = bits;
+    return SparseScalarToFloat(source.value);
+}
+
+template <typename scalar_t>
+class ActivationSparseTopkThreshold {
+public:
+    using X_T = scalar_t;
+    static constexpr uint32_t INPUT_ALIGN_ELEMENTS = 32;
+    static constexpr uint32_t OUTPUT_ALIGN_ELEMENTS = 16;
+
+    __aicore__ inline explicit ActivationSparseTopkThreshold(AscendC::TPipe* pipe)
+        : pipe_(pipe)
+    {}
+
+    __aicore__ inline void Init(__gm__ void* x, __gm__ void* threshold,
+                                uint32_t batch_size, uint32_t input_dim,
+                                uint32_t keep, uint32_t block_dim)
+    {
+        batchSize_ = batch_size;
+        inputDim_ = input_dim;
+        keep_ = keep;
+        blockDim_ = block_dim;
+        inputAligned_ = AlignElements(input_dim, INPUT_ALIGN_ELEMENTS);
+        keepAligned_ = AlignElements(keep, OUTPUT_ALIGN_ELEMENTS);
+        xGm_.SetGlobalBuffer((__gm__ X_T*)x);
+        thresholdGm_.SetGlobalBuffer((__gm__ float*)threshold);
+        pipe_->InitBuffer(inputQueue_, 1, inputAligned_ * sizeof(X_T));
+        pipe_->InitBuffer(valuesQueue_, 1, keepAligned_ * sizeof(half));
+        pipe_->InitBuffer(indicesQueue_, 1,
+                          keepAligned_ * sizeof(int32_t));
+    }
+
+    __aicore__ inline void Process()
+    {
+        uint32_t block_idx = AscendC::GetBlockIdx();
+        for (uint32_t row = block_idx; row < batchSize_; row += blockDim_) {
+            uint64_t row_offset = static_cast<uint64_t>(row) * inputDim_;
+            CopyMagnitudeToUb(row_offset);
+            AscendC::LocalTensor<X_T> x_local =
+                inputQueue_.DeQue<X_T>();
+            AscendC::LocalTensor<half> magnitude =
+                x_local.template ReinterpretCast<half>();
+            AscendC::Abs(magnitude, magnitude, inputDim_);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::LocalTensor<half> values =
+                valuesQueue_.AllocTensor<half>();
+            AscendC::LocalTensor<int32_t> indices =
+                indicesQueue_.AllocTensor<int32_t>();
+            AscendC::LocalTensor<int32_t> source_indices;
+            AscendC::LocalTensor<bool> finish;
+            AscendC::TopKInfo info;
+            info.outter = 1;
+            info.inner = inputAligned_;
+            info.n = inputDim_;
+            AscendC::tiling::TopkTiling tiling = BuildTopkTiling();
+            AscendC::TopK<half, false, false, false,
+                          AscendC::TopKMode::TOPK_NORMAL>(
+                values, indices, magnitude, source_indices, finish,
+                static_cast<int32_t>(keep_), tiling, info, true);
+            event_t event_id = static_cast<event_t>(
+                GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_S));
+            AscendC::SetFlag<AscendC::HardEvent::V_S>(event_id);
+            AscendC::WaitFlag<AscendC::HardEvent::V_S>(event_id);
+            uint16_t threshold_bits =
+                values.template ReinterpretCast<uint16_t>().GetValue(keep_ - 1);
+            thresholdGm_.SetValue(
+                row, SparseMagnitudeBitsToFloat<X_T>(threshold_bits));
+            valuesQueue_.FreeTensor(values);
+            indicesQueue_.FreeTensor(indices);
+            inputQueue_.FreeTensor(x_local);
+        }
+    }
+
+private:
+    __aicore__ inline uint32_t AlignElements(uint32_t value,
+                                             uint32_t alignment)
+    {
+        return (value + alignment - 1) & ~(alignment - 1);
+    }
+
+    __aicore__ inline void CopyMagnitudeToUb(uint64_t row_offset)
+    {
+        AscendC::LocalTensor<X_T> x_local =
+            inputQueue_.AllocTensor<X_T>();
+        AscendC::LocalTensor<half> magnitude =
+            x_local.template ReinterpretCast<half>();
+        AscendC::Duplicate(
+            magnitude, static_cast<half>(-65504), inputAligned_);
+        event_t event_id = static_cast<event_t>(
+            GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_MTE2));
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(event_id);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(event_id);
+        AscendC::DataCopyExtParams copy_params{
+            1, static_cast<uint32_t>(inputDim_ * sizeof(X_T)), 0, 0, 0};
+        AscendC::DataCopyPadExtParams<X_T> pad_params{false, 0, 0, 0};
+        AscendC::DataCopyPad(x_local, xGm_[row_offset], copy_params,
+                             pad_params);
+        inputQueue_.EnQue(x_local);
+    }
+
+    __aicore__ inline AscendC::tiling::TopkTiling BuildTopkTiling()
+    {
+        AscendC::tiling::TopkTiling tiling;
+        tiling.tmpLocalSize = 10 * inputAligned_;
+        tiling.allDataSize = inputAligned_;
+        tiling.innerDataSize = 4 * inputAligned_;
+        tiling.sortRepeat = inputAligned_ / 32;
+        tiling.mrgSortRepeat = inputAligned_ / 4;
+        tiling.kAlignFourBytes = (keep_ + 7) & ~7U;
+        tiling.kAlignTwoBytes = keepAligned_;
+        tiling.maskOffset = keepAligned_;
+        tiling.maskVreducev2FourBytes = 2 * keep_;
+        tiling.maskVreducev2TwoBytes = 4 * keep_;
+        tiling.mrgSortSrc1offset = 4;
+        tiling.mrgSortSrc2offset = 8;
+        tiling.mrgSortSrc3offset = 12;
+        tiling.mrgSortTwoQueueSrc1Offset = 4;
+        tiling.mrgFourQueueTailPara1 = 2 * inputAligned_;
+        tiling.mrgFourQueueTailPara2 = 2;
+        tiling.srcIndexOffset = 8 * inputAligned_;
+        tiling.copyUbToUbBlockCount = inputAligned_ / 4;
+        return tiling;
+    }
+
+    AscendC::TPipe* pipe_;
+    AscendC::GlobalTensor<X_T> xGm_;
+    AscendC::GlobalTensor<float> thresholdGm_;
+    AscendC::TQue<AscendC::QuePosition::VECIN, 1> inputQueue_;
+    AscendC::TQue<AscendC::QuePosition::VECOUT, 1> valuesQueue_;
+    AscendC::TQue<AscendC::QuePosition::VECOUT, 1> indicesQueue_;
+    uint32_t batchSize_;
+    uint32_t inputDim_;
+    uint32_t keep_;
+    uint32_t blockDim_;
+    uint32_t inputAligned_;
+    uint32_t keepAligned_;
+};
 
 template <typename scalar_t>
 class ActivationSparsePack {
@@ -938,6 +1086,18 @@ private:
         op.Process();                                                              \
     }
 
+#define ACTIVATION_SPARSE_TOPK_THRESHOLD_TYPE_DECLARE(TYPE)                        \
+    extern "C" __global__ __aicore__ void                                         \
+    activation_sparse_topk_threshold_##TYPE(                                       \
+        __gm__ void* x, __gm__ void* threshold, uint32_t batch_size,               \
+        uint32_t input_dim, uint32_t keep, uint32_t block_dim)                     \
+    {                                                                              \
+        AscendC::TPipe pipe;                                                       \
+        ActivationSparseTopkThreshold<TYPE> op(&pipe);                             \
+        op.Init(x, threshold, batch_size, input_dim, keep, block_dim);              \
+        op.Process();                                                              \
+    }
+
 #define ACTIVATION_SPARSE_LINEAR_PACKED_TYPE_DECLARE(TYPE)                         \
     extern "C" __global__ __aicore__ void activation_sparse_linear_packed_##TYPE(  \
         __gm__ void* values, __gm__ void* indices, __gm__ void* counts,            \
@@ -1025,6 +1185,7 @@ private:
     }
 
 ACTIVATION_SPARSE_PACK_TYPE_DECLARE(half)
+ACTIVATION_SPARSE_TOPK_THRESHOLD_TYPE_DECLARE(half)
 ACTIVATION_SPARSE_LINEAR_PACKED_TYPE_DECLARE(half)
 ACTIVATION_SPARSE_LINEAR_PACKED_T_TYPE_DECLARE(half)
 ACTIVATION_SPARSE_SILU_AND_MUL_PACKED_T_TYPE_DECLARE(half)
@@ -1033,6 +1194,7 @@ ACTIVATION_SPARSE_SILU_AND_MUL_DIRECT_T_TYPE_DECLARE(half)
 ACTIVATION_SPARSE_LINEAR_TYPE_DECLARE(half)
 #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
 ACTIVATION_SPARSE_PACK_TYPE_DECLARE(bfloat16_t)
+ACTIVATION_SPARSE_TOPK_THRESHOLD_TYPE_DECLARE(bfloat16_t)
 ACTIVATION_SPARSE_LINEAR_PACKED_TYPE_DECLARE(bfloat16_t)
 ACTIVATION_SPARSE_LINEAR_PACKED_T_TYPE_DECLARE(bfloat16_t)
 ACTIVATION_SPARSE_SILU_AND_MUL_PACKED_T_TYPE_DECLARE(bfloat16_t)
@@ -1044,6 +1206,26 @@ ACTIVATION_SPARSE_LINEAR_TYPE_DECLARE(bfloat16_t)
 } // namespace
 
 namespace vllm_ascend {
+
+extern void activation_sparse_topk_threshold_impl(
+    AscendType type, void* stream, void* x, void* threshold,
+    uint32_t batch_size, uint32_t input_dim, uint32_t keep,
+    uint32_t block_dim)
+{
+    if (batch_size == 0 || input_dim == 0 || block_dim == 0) {
+        return;
+    }
+    if (type == AscendType::FP16) {
+        activation_sparse_topk_threshold_half<<<block_dim, nullptr, stream>>>(
+            x, threshold, batch_size, input_dim, keep, block_dim);
+    } else if (type == AscendType::BF16) {
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
+        activation_sparse_topk_threshold_bfloat16_t<<<block_dim, nullptr,
+                                                      stream>>>(
+            x, threshold, batch_size, input_dim, keep, block_dim);
+#endif
+    }
+}
 
 extern void activation_sparse_pack_impl(AscendType type, void* stream, void* x,
                                         void* threshold, void* values,

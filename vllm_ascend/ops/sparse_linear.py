@@ -48,6 +48,39 @@ def activation_sparse_pack_ref(
     return values, indices, counts
 
 
+def activation_sparse_topk_threshold_ref(
+    x: torch.Tensor,
+    keep: int,
+) -> torch.Tensor:
+    if keep < 1 or keep > x.shape[-1]:
+        raise ValueError(
+            f"keep must be in [1, {x.shape[-1]}], got {keep}."
+        )
+    kth = x.shape[-1] - keep + 1
+    return torch.kthvalue(
+        x.abs().to(dtype=torch.float32),
+        kth,
+        dim=-1,
+    ).values
+
+
+def activation_sparse_topk_threshold(
+    x: torch.Tensor,
+    keep: int,
+) -> torch.Tensor:
+    if not _can_use_custom_op(x, None):
+        if _requires_backend_kernel():
+            raise RuntimeError(
+                "activation_sparse_topk_threshold requires the Ascend custom "
+                "fp16/bf16 op when VLLM_SPARSE_GEMV_REQUIRE_KERNEL is set."
+            )
+        return activation_sparse_topk_threshold_ref(x, keep)
+    return torch.ops._C_ascend.activation_sparse_topk_threshold(
+        x.contiguous(),
+        keep,
+    )
+
+
 def activation_sparse_linear_packed_ref(
     values: torch.Tensor,
     indices: torch.Tensor,

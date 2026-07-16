@@ -130,6 +130,16 @@ namespace vllm_ascend {
         bool threshold_per_row,
         bool inclusive);
 
+    extern void activation_sparse_topk_threshold_impl(
+        AscendType type,
+        void *stream,
+        void *x,
+        void *threshold,
+        uint32_t batch_size,
+        uint32_t input_dim,
+        uint32_t keep,
+        uint32_t block_dim);
+
     extern void activation_sparse_linear_packed_impl(
         AscendType type,
         void *stream,
