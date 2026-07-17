@@ -48,6 +48,24 @@ These compatibility changes affect baseline and optimized runs equally. The
 optimization does not bypass transformer layers or replace model forward
 execution.
 
+## End-to-end validation
+
+The integration was validated with Qwen3-235B-A22B, PP4 + TP2, and eight
+Ascend 910C NPUs per mode using the paired repository's 1,000-request
+conversation benchmark. Both modes executed all 94 MoE transformer layers,
+completed 1,000/1,000 requests, and generated the same 349,357 output tokens.
+
+| Mode | Duration | Request throughput | Output throughput |
+| --- | ---: | ---: | ---: |
+| Baseline | 1,735.38 s | 0.5762 req/s | 201.31 tok/s |
+| PP-opt | 1,479.88 s | 0.6757 req/s | 236.07 tok/s |
+| Speedup | **1.173x** | **+17.27%** | **+17.27%** |
+
+The full pair was launched only after a 200-request regression gate passed at
+1.201x. Detailed methodology, latency measurements, and machine-readable
+results are in `vllm-hust/benchmarks/pp_opt/results.md` and its adjacent
+`results/end_to_end` directory.
+
 ## Editable setup
 
 From the parent workspace:
