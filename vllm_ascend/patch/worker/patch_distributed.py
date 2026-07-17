@@ -21,6 +21,7 @@ from typing import Any, cast
 
 import torch
 import vllm
+import vllm.envs as envs
 from torch.distributed import Backend
 from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
 
@@ -124,6 +125,10 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.device = None
         self.use_custom_op_call = True
         self.use_cpu_custom_send_recv = False
+        if envs.VLLM_USE_PP_OPT_SCHEDULER:
+            self.size_send_work: torch.distributed.Work | None = None
+            self.object_send_work: torch.distributed.Work | None = None
+            self.tensor_send_works: list[torch.distributed.Work] = []
 
         reuse_domain = _resolve_reuse_domain(group_name)
 

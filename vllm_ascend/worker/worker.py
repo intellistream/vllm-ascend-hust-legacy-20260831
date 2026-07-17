@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 from types import NoneType
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -48,6 +49,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker import pp_opt_profile
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.worker_base import (
     CompilationTimes,  # noqa: E402
@@ -358,6 +360,7 @@ class NPUWorker(WorkerBase):
 
         self.use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
         self._pp_send_work: list[Handle] = []
+        self._pp_send_buffer_refs: list[tuple[list[Handle], dict[str, Any]]] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -632,6 +635,7 @@ class NPUWorker(WorkerBase):
 
         return int(self.available_kv_cache_memory_bytes)
 
+    @pp_opt_profile.profile_worker_execute
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -640,9 +644,26 @@ class NPUWorker(WorkerBase):
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
 
-        if self._pp_send_work:
+        if envs_vllm.VLLM_PP_OPT_OVERLAP_SENDS and self._pp_send_buffer_refs:
+            active_send_refs: list[tuple[list[Handle], dict[str, Any]]] = []
+            for handles, tensor_dict in self._pp_send_buffer_refs:
+                if handles and all(handle.is_completed() for handle in handles):
+                    continue
+                active_send_refs.append((handles, tensor_dict))
+            self._pp_send_buffer_refs = active_send_refs
+            max_retained_sends = max(
+                8, self.parallel_config.pipeline_parallel_size * 2
+            )
+            while len(self._pp_send_buffer_refs) >= max_retained_sends:
+                handles, _ = self._pp_send_buffer_refs.pop(0)
+                for handle in handles:
+                    handle.wait()
+
+        if self._pp_send_work and not envs_vllm.VLLM_USE_PP_OPT_SCHEDULER:
             for handle in self._pp_send_work:
                 handle.wait()
+            self._pp_send_work = []
+        elif self._pp_send_work:
             self._pp_send_work = []
 
         intermediate_tensors = None
@@ -677,10 +698,27 @@ class NPUWorker(WorkerBase):
             all_gather_group = None
         else:
             all_gather_group = get_tp_group()
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
-            output.tensors,
+        send_tensors = output.tensors
+        if (
+            envs_vllm.VLLM_USE_PP_OPT_SCHEDULER
+            and envs_vllm.VLLM_PP_OPT_OVERLAP_SENDS
+        ):
+            send_tensors = {
+                key: value.clone() if isinstance(value, torch.Tensor) else value
+                for key, value in output.tensors.items()
+            }
+        pp_send_work = get_pp_group().isend_tensor_dict(
+            send_tensors,
             all_gather_group=all_gather_group,
         )
+        if (
+            envs_vllm.VLLM_USE_PP_OPT_SCHEDULER
+            and envs_vllm.VLLM_PP_OPT_OVERLAP_SENDS
+            and pp_send_work
+        ):
+            self._pp_send_buffer_refs.append((pp_send_work, send_tensors))
+        elif not envs_vllm.VLLM_USE_PP_OPT_SCHEDULER:
+            self._pp_send_work = pp_send_work
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
@@ -695,6 +733,7 @@ class NPUWorker(WorkerBase):
         return output
 
     @torch.inference_mode()
+    @pp_opt_profile.profile_worker_sample_tokens
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
