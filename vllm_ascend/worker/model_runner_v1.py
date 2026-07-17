@@ -20,6 +20,7 @@
 import gc
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -92,7 +93,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
-from vllm.v1.worker import mamba_utils
+from vllm.v1.worker import mamba_utils, pp_opt_profile
 from vllm.v1.worker.cp_utils import (
     get_total_cp_world_size,
 )
@@ -182,6 +183,7 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+
     from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
@@ -1309,11 +1311,17 @@ class NPUModelRunner(GPUModelRunner):
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
         if self.pcp_size <= 1:
-            self.input_batch.block_table.compute_slot_mapping(
-                num_reqs,
-                self.query_start_loc.gpu[: num_reqs + 1],
-                self.positions[:total_num_scheduled_tokens],
-            )
+            if os.environ.get("VLLM_ASCEND_FORCE_CPU_SLOT_MAPPING", "0") == "1":
+                self.input_batch.block_table.compute_slot_mapping_cpu(
+                    req_indices,
+                    positions_np[:total_num_scheduled_tokens],
+                )
+            else:
+                self.input_batch.block_table.compute_slot_mapping(
+                    num_reqs,
+                    self.query_start_loc.gpu[: num_reqs + 1],
+                    self.positions[:total_num_scheduled_tokens],
+                )
 
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
             drift = self.num_computed_tokens[req_indices_gpu].to(
@@ -1991,6 +1999,7 @@ class NPUModelRunner(GPUModelRunner):
             self.draft_token_ids_event.record()
 
     @torch.inference_mode()
+    @pp_opt_profile.profile_model_runner_execute
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2064,6 +2073,7 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        forward_profile_scope = "forward"
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 # Fix up prev_req_id_to_index for requests that were discarded
@@ -2131,6 +2141,24 @@ class NPUModelRunner(GPUModelRunner):
                         return EMPTY_MODEL_RUNNER_OUTPUT
                     return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+                pp_opt_profile.set_microbatch_stats(
+                    self.input_batch, num_scheduled_tokens_np
+                )
+                if os.getenv("VLLM_CUSTOM_SCOPES_FOR_PROFILING", "0") == "1":
+                    computed_tokens = self.input_batch.num_computed_tokens_cpu[
+                        :num_reqs
+                    ].astype(np.int64, copy=False)
+                    aggregated_ctx_len = int(
+                        np.sum(computed_tokens + num_scheduled_tokens_np)
+                    )
+                    forward_profile_scope = (
+                        "pp_forward"
+                        f"|pp={get_pp_group().rank_in_group}"
+                        f"|mb={getattr(scheduler_output, 'microbatch_id', -1)}"
+                        f"|reqs={num_reqs}"
+                        f"|ctx={aggregated_ctx_len}"
+                        f"|tokens={int(np.sum(num_scheduled_tokens_np))}"
+                    )
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
                 (
                     logits_indices,
@@ -2334,7 +2362,7 @@ class NPUModelRunner(GPUModelRunner):
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
         with (
-            record_function_or_nullcontext("forward"),
+            record_function_or_nullcontext(forward_profile_scope),
             set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -2359,9 +2387,20 @@ class NPUModelRunner(GPUModelRunner):
         ):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
-            hidden_states = self._model_forward(
-                num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
-            )
+            pp_opt_profile.mark_t2()
+            try:
+                hidden_states = self._model_forward(
+                    num_tokens_padded,
+                    input_ids,
+                    positions,
+                    intermediate_tensors,
+                    inputs_embeds,
+                    **model_kwargs,
+                )
+            finally:
+                if pp_opt_profile.record_active():
+                    torch.npu.synchronize()
+                pp_opt_profile.mark_t3()
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -3103,7 +3142,6 @@ class NPUModelRunner(GPUModelRunner):
             max_seq_len = self.optimistic_seq_lens_cpu.numpy()[:num_reqs].max().item()
         else:
             max_seq_len = self.seq_lens[:num_reqs].max().item()
-
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
