@@ -263,6 +263,19 @@ if(NOT DEFINED ASCEND_OP_NAME
     list(REMOVE_DUPLICATES OP_DIR_LIST)
 endif()
 
+if(NOT DEFINED ASCEND_OP_NAME
+    OR "${ASCEND_OP_NAME}" STREQUAL ""
+    OR "${ASCEND_OP_NAME}" STREQUAL "all"
+    OR "${ASCEND_OP_NAME}" STREQUAL "ALL"
+    OR "kv_cache_hybrid_attention_proto" IN_LIST ASCEND_OP_NAME
+    OR "KvCacheHybridAttentionProto" IN_LIST ASCEND_OP_NAME)
+    list(APPEND OP_LIST "kv_cache_hybrid_attention_proto")
+    list(APPEND OP_DIR_LIST
+        ${CMAKE_CURRENT_SOURCE_DIR}/kv_cache_hybrid_attention_proto)
+    list(REMOVE_DUPLICATES OP_LIST)
+    list(REMOVE_DUPLICATES OP_DIR_LIST)
+endif()
+
 if (BUILD_OPEN_PROJECT)
     if (ENABLE_TEST)
         set(OP_UT_LIST)

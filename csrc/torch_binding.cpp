@@ -728,6 +728,128 @@ void kv_cache_block_gather(const torch::Tensor& src_block_ids,
     cmd.Run();
 }
 
+void kv_cache_hybrid_attention_proto(const torch::Tensor& source_kinds,
+                                     const torch::Tensor& source_block_ids,
+                                     const torch::Tensor& host_pages,
+                                     const torch::Tensor& device_pages,
+                                     const torch::Tensor& query,
+                                     const torch::Tensor& promote_flag,
+                                     torch::Tensor& scores,
+                                     torch::Tensor& promoted_pages)
+{
+    TORCH_CHECK(source_kinds.is_privateuseone() &&
+                    source_block_ids.is_privateuseone() &&
+                    device_pages.is_privateuseone() && query.is_privateuseone() &&
+                    promote_flag.is_privateuseone() && scores.is_privateuseone() &&
+                    promoted_pages.is_privateuseone(),
+                "hybrid attention prototype metadata, device pages, query, and outputs must be on NPU");
+    TORCH_CHECK(host_pages.device().is_cpu(),
+                "hybrid attention prototype host_pages must be on CPU");
+    TORCH_CHECK(source_kinds.scalar_type() == at::kInt &&
+                    source_block_ids.scalar_type() == at::kInt &&
+                    promote_flag.scalar_type() == at::kInt,
+                "hybrid attention prototype metadata must be int32");
+    TORCH_CHECK(host_pages.scalar_type() == at::kFloat &&
+                    device_pages.scalar_type() == at::kFloat &&
+                    query.scalar_type() == at::kFloat &&
+                    scores.scalar_type() == at::kFloat &&
+                    promoted_pages.scalar_type() == at::kFloat,
+                "hybrid attention prototype supports float32 only");
+    TORCH_CHECK(source_kinds.dim() == 1 && source_block_ids.dim() == 1 &&
+                    source_kinds.numel() == source_block_ids.numel() &&
+                    source_kinds.numel() > 0,
+                "hybrid attention prototype source metadata must be matching non-empty 1D tensors");
+    TORCH_CHECK(host_pages.dim() >= 2 && device_pages.dim() >= 2 &&
+                    query.dim() == 1 && promote_flag.numel() == 1 &&
+                    scores.numel() == source_kinds.numel() * 8,
+                "hybrid attention prototype received invalid shapes");
+    const int64_t elems_per_block = device_pages.numel() / device_pages.size(0);
+    TORCH_CHECK(elems_per_block > 0 && elems_per_block % 8 == 0 &&
+                    host_pages.numel() % elems_per_block == 0 &&
+                    query.numel() == elems_per_block &&
+                    promoted_pages.numel() ==
+                        source_kinds.numel() * elems_per_block,
+                "hybrid attention prototype block/query/promotion shapes disagree");
+    TORCH_CHECK(source_kinds.is_contiguous() &&
+                    source_block_ids.is_contiguous() && host_pages.is_contiguous() &&
+                    device_pages.is_contiguous() && query.is_contiguous() &&
+                    promote_flag.is_contiguous() && scores.is_contiguous() &&
+                    promoted_pages.is_contiguous(),
+                "hybrid attention prototype tensors must be contiguous");
+
+    const c10_npu::OptionalNPUGuard npu_guard(device_pages.device());
+    void* mapped_host_pages = get_mapped_host_device_ptr(
+        host_pages.data_ptr(),
+        static_cast<uint64_t>(host_pages.numel() * host_pages.element_size()));
+
+    aclTensor* acl_source_kinds = ConvertType(source_kinds);
+    aclTensor* acl_source_block_ids = ConvertType(source_block_ids);
+    aclTensor* acl_host_pages =
+        create_acl_tensor_with_data(host_pages, mapped_host_pages);
+    aclTensor* acl_device_pages = ConvertType(device_pages);
+    aclTensor* acl_query = ConvertType(query);
+    aclTensor* acl_promote_flag = ConvertType(promote_flag);
+    aclTensor* acl_scores = ConvertType(scores);
+    aclTensor* acl_promoted_pages = ConvertType(promoted_pages);
+
+    static const auto get_workspace_addr = get_host_gather_opapi_func_addr(
+        "aclnnKvCacheHybridAttentionProtoGetWorkspaceSize");
+    static const auto op_api_addr = get_host_gather_opapi_func_addr(
+        "aclnnKvCacheHybridAttentionProto");
+    TORCH_CHECK(get_workspace_addr != nullptr && op_api_addr != nullptr,
+                "hybrid attention prototype ACLNN symbols not found");
+    using GetWorkspaceFunc = int (*)(const aclTensor*, const aclTensor*,
+        const aclTensor*, const aclTensor*, const aclTensor*, const aclTensor*,
+        const aclTensor*, const aclTensor*, uint64_t*, aclOpExecutor**);
+    auto get_workspace = reinterpret_cast<GetWorkspaceFunc>(get_workspace_addr);
+    uint64_t workspace_size = 0;
+    aclOpExecutor* executor = nullptr;
+    const int workspace_status = get_workspace(acl_source_kinds,
+        acl_source_block_ids, acl_host_pages, acl_device_pages, acl_query,
+        acl_promote_flag, acl_scores, acl_promoted_pages, &workspace_size,
+        &executor);
+    TORCH_CHECK(workspace_status == 0,
+                "hybrid attention prototype workspace query failed: ",
+                aclGetRecentErrMsg());
+
+    void* workspace_addr = nullptr;
+    at::Tensor workspace_tensor;
+    if (workspace_size != 0) {
+        at::TensorOptions options =
+            at::TensorOptions(torch_npu::utils::get_npu_device_type());
+        workspace_tensor = at::empty({static_cast<int64_t>(workspace_size)},
+            options.dtype(at::kByte));
+        workspace_addr = const_cast<void*>(workspace_tensor.storage().data());
+    }
+
+    auto acl_call = [workspace_addr, workspace_size, executor,
+                     acl_source_kinds, acl_source_block_ids, acl_host_pages,
+                     acl_device_pages, acl_query, acl_promote_flag, acl_scores,
+                     acl_promoted_pages, op_api_addr]() -> int {
+        using OpApiFunc = int (*)(void*, uint64_t, aclOpExecutor*,
+            const aclrtStream);
+        auto op_api = reinterpret_cast<OpApiFunc>(op_api_addr);
+        auto stream = c10_npu::getCurrentNPUStream().stream(false);
+        const int ret = op_api(workspace_addr, workspace_size, executor, stream);
+        Release(acl_source_kinds);
+        Release(acl_source_block_ids);
+        Release(acl_host_pages);
+        Release(acl_device_pages);
+        Release(acl_query);
+        Release(acl_promote_flag);
+        Release(acl_scores);
+        Release(acl_promoted_pages);
+        TORCH_CHECK(ret == 0,
+                    "hybrid attention prototype launch failed: ",
+                    aclGetRecentErrMsg());
+        return ret;
+    };
+    at_npu::native::OpCommand cmd;
+    cmd.Name("aclnnKvCacheHybridAttentionProto");
+    cmd.SetCustomHandler(acl_call);
+    cmd.Run();
+}
+
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 // Direct kernel wrappers depend on vllm_ascend_kernels, which is skipped on
 // 310P and A5 builds.
@@ -2819,6 +2941,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def("kv_cache_block_gather(Tensor src_block_ids, Tensor src_pages, Tensor dst_block_ids, Tensor! out) -> ()");
     ops.impl("kv_cache_block_gather", torch::kPrivateUse1, &vllm_ascend::kv_cache_block_gather);
+    ops.def("kv_cache_hybrid_attention_proto(Tensor source_kinds, Tensor source_block_ids, Tensor host_pages, Tensor device_pages, Tensor query, Tensor promote_flag, Tensor! scores, Tensor! promoted_pages) -> ()");
+    ops.impl("kv_cache_hybrid_attention_proto", torch::kPrivateUse1,
+             &vllm_ascend::kv_cache_hybrid_attention_proto);
     ops.def("is_kv_cache_block_gather_host_mapping_cached(Tensor src_pages) -> bool");
     ops.impl("is_kv_cache_block_gather_host_mapping_cached",
              c10::DispatchKey::CompositeExplicitAutograd,
