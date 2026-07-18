@@ -63,8 +63,10 @@ completed 1,000/1,000 requests, and generated the same 349,357 output tokens.
 
 The full pair was launched only after a 200-request regression gate passed at
 1.201x. Detailed methodology, latency measurements, and machine-readable
-results are in `vllm-hust/benchmarks/pp_opt/results.md` and its adjacent
-`results/end_to_end` directory.
+results are in `vllm-hust/benchmarks/pp_opt/results.md`. The adjacent
+`results/end_to_end` directory contains unsmoothed one-second throughput
+series and centered 30-second moving-average figures for both validated Qwen3
+models.
 
 ## Editable setup
 
