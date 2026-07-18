@@ -80,9 +80,13 @@ except Exception:  # pragma: no cover - depends on package composition.
 
 try:
     from vllm_segment_reuse.live_runner_bundle import (
+        tensor_summary as segment_reuse_tensor_summary,
+        write_runtime_terminal_replay_attention_failure_bundle_part,
         write_runtime_terminal_replay_attention_bundle_part,
     )
 except Exception:  # pragma: no cover - parent package is optional here.
+    segment_reuse_tensor_summary = None
+    write_runtime_terminal_replay_attention_failure_bundle_part = None
     write_runtime_terminal_replay_attention_bundle_part = None
 
 # default max value of sliding window size
@@ -510,6 +514,51 @@ def _segment_reuse_write_attention_bundle_part(
         )
         extra_metadata.update(logical_metadata)
     except Exception as exc:
+        if write_runtime_terminal_replay_attention_failure_bundle_part is not None:
+            failure_diagnostics = extra_metadata
+            key_summary = (
+                segment_reuse_tensor_summary(key)
+                if segment_reuse_tensor_summary is not None
+                else failure_diagnostics.get("key_shape")
+            )
+            value_summary = (
+                segment_reuse_tensor_summary(value)
+                if segment_reuse_tensor_summary is not None
+                else failure_diagnostics.get("value_shape")
+            )
+            event = write_runtime_terminal_replay_attention_failure_bundle_part(
+                request_id=str(request_id),
+                query=query,
+                envelope_tokens=int(
+                    getattr(
+                        metadata,
+                        "segment_reuse_body_isolation_envelope_tokens",
+                        0,
+                    )
+                    or 0
+                ),
+                query_start=int(
+                    getattr(metadata, "segment_reuse_terminal_query_start", -1)
+                    or -1
+                ),
+                query_tokens=terminal_query_tokens,
+                context_tokens=int(
+                    getattr(metadata, "max_seq_len", 0) or 0
+                ),
+                key_summary=key_summary,
+                value_summary=value_summary,
+                block_table=block_table,
+                diagnostics_file=os.environ.get(
+                    "VLLM_SEGMENT_REUSE_DIAGNOSTICS_FILE"
+                ),
+                tensor_source=f"{path}:logical_kv_materialization_failed",
+                semantic_reason="runtime_attention_bundle_logical_kv_materialization_failed",
+                error_type=type(exc).__name__,
+                error_reason=getattr(exc, "reason", None),
+                error=str(exc),
+                extra_metadata=extra_metadata,
+            )
+            _segment_reuse_trace_event(str(event.pop("event")), **event)
         _segment_reuse_trace_event(
             "runtime_terminal_replay_tensor_bundle_missing",
             request_id=str(request_id),
