@@ -80,6 +80,22 @@ def register_connector():
             "AscendSimpleCPUOffloadConnector",
         )
 
+    # TieredKVCacheConnector extends the native simple offload lifecycle.
+    # Route it through the same NPU worker adaptation; otherwise its direct
+    # upstream registration constructs the CUDA worker on Ascend.
+    try:
+        import vllm.distributed.kv_transfer.kv_connector.v1.tiered_kv_cache_connector  # noqa: F401, E501
+    except ImportError:
+        pass
+    else:
+        if "TieredKVCacheConnector" in KVConnectorFactory._registry:
+            KVConnectorFactory._registry.pop("TieredKVCacheConnector")
+        KVConnectorFactory.register_connector(
+            "TieredKVCacheConnector",
+            "vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.tiered_kv_cache_connector",  # noqa: E501
+            "AscendTieredKVCacheConnector",
+        )
+
     KVConnectorFactory.register_connector(
         "RecomputeCPUOffloadConnector",
         "vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.recompute_cpu_offload_connector",
