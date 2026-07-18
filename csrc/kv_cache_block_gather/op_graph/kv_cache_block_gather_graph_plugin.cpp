@@ -5,6 +5,9 @@ namespace ops {
 static constexpr int64_t IDX_0 = 0;
 static constexpr int64_t IDX_SRC_PAGES = 1;
 
+// Graph inference runs on the host before the device kernel.  The gather does
+// not change payload type, so the output dtype follows src_pages.  This rule is
+// metadata for graph compilation, not part of the runtime copy path.
 static ge::graphStatus InferDataTypeKvCacheBlockGather(gert::InferDataTypeContext* context)
 {
     OP_LOGD(context->GetNodeName(), "Begin InferDataTypeKvCacheBlockGather");

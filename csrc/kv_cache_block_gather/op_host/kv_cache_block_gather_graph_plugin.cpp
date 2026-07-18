@@ -6,6 +6,9 @@ namespace ops {
 static constexpr int64_t IDX_0 = 0;
 static constexpr int64_t IDX_SRC_PAGES = 1;
 
+// Host-packaged counterpart of the op_graph dtype rule.  Both declarations
+// must agree that out follows the KV payload dtype.  This metadata hook runs on
+// the host only.
 static ge::graphStatus InferDataTypeKvCacheBlockGather(gert::InferDataTypeContext* context)
 {
     OP_LOGD(context->GetNodeName(), "Begin InferDataTypeKvCacheBlockGather");

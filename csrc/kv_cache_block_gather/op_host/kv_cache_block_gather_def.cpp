@@ -1,6 +1,10 @@
 #include "register/op_def_registry.h"
 
 namespace ops {
+// Host-side OpDef: a richer version of the graph schema used by the ACLNN
+// custom-op build.  It specifies required inputs, layouts, supported dtypes,
+// dynamic-shape capabilities, and target SoCs.  It is not a CPU implementation
+// of gather; the payload movement is performed by the AscendC kernel.
 class KvCacheBlockGather : public OpDef {
 public:
     explicit KvCacheBlockGather(const char* name) : OpDef(name)
@@ -30,6 +34,8 @@ public:
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
 
+        // Tell the build/runtime which kernel file and hardware variants back
+        // this logical operator.
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)
             .DynamicFormatFlag(false)

@@ -227,6 +227,8 @@ HostRange get_host_range(void* host_ptr, uint64_t bytes)
     TORCH_CHECK(host_ptr != nullptr, "kv_cache_block_gather: src_pages data pointer is null");
     TORCH_CHECK(bytes > 0, "kv_cache_block_gather: src_pages must not be empty");
 
+    // aclrtHostRegister works on OS-page ranges.  Preserve the caller's offset
+    // while expanding the registration to page-aligned start/end addresses.
     const long page_size_long = sysconf(_SC_PAGESIZE);
     TORCH_CHECK(page_size_long > 0, "kv_cache_block_gather: sysconf(_SC_PAGESIZE) failed");
     const uint64_t page_size = static_cast<uint64_t>(page_size_long);
@@ -284,6 +286,9 @@ void* get_host_gather_opapi_func_addr(const char* api_name)
 
 HostMappingLookupResult get_or_register_mapped_host_range(void* host_ptr, uint64_t bytes)
 {
+    // This is the control-plane trick behind mapped-host gather.  Registration
+    // returns a device-visible alias for ordinary host RAM.  Cache that alias so
+    // long-lived CPU KV slabs pay registration cost once, not per layer/request.
     const auto lookup_start = std::chrono::steady_clock::now();
     const HostRange range = get_host_range(host_ptr, bytes);
 
@@ -370,6 +375,10 @@ void* get_mapped_host_device_ptr(void* host_ptr, uint64_t bytes)
 
 aclTensor* create_acl_tensor_with_data(const at::Tensor& tensor, void* data)
 {
+    // Reuse the CPU tensor's shape/dtype/stride metadata, but replace its data
+    // pointer with the device-visible mapped alias returned by aclrtHostRegister.
+    // The custom kernel can then treat src_pages like GM without staging it into
+    // NPU HBM first.
     static const auto aclCreateTensor = GET_OP_API_FUNC(aclCreateTensor);
     TORCH_CHECK(aclCreateTensor != nullptr, "kv_cache_block_gather: aclCreateTensor not found");
     const aclDataType acl_data_type =
@@ -610,6 +619,10 @@ void kv_cache_block_gather(const torch::Tensor& src_block_ids,
                            const torch::Tensor& dst_block_ids,
                            torch::Tensor& out)
 {
+    // Framework adapter, not the device algorithm.  Its responsibilities are:
+    // validate the Torch contract, map/cache the CPU source range, create ACL
+    // tensor descriptors, query host tiling/workspace, and enqueue ACLNN on the
+    // current NPU stream.  op_kernel/ performs the actual payload movement.
     TORCH_CHECK(src_block_ids.is_privateuseone(), "src_block_ids must be on NPU");
     TORCH_CHECK(dst_block_ids.is_privateuseone(), "dst_block_ids must be on NPU");
     TORCH_CHECK(out.is_privateuseone(), "out must be on NPU");
@@ -660,6 +673,9 @@ void kv_cache_block_gather(const torch::Tensor& src_block_ids,
                                      aclOpExecutor**);
     auto get_workspace = reinterpret_cast<GetWorkspaceFunc>(get_workspace_addr);
 
+    // ACLNN asks the op_host tiling implementation for this value.  The current
+    // definition returns 16 MiB; keep that behavior explicit in measurements
+    // even though the present device algorithm does not dereference workspace.
     uint64_t workspace_size = 0;
     aclOpExecutor* executor = nullptr;
     const int workspace_status = get_workspace(acl_src_block_ids,
@@ -692,6 +708,9 @@ void kv_cache_block_gather(const torch::Tensor& src_block_ids,
                      op_api_addr]() -> int {
         using OpApiFunc = int (*)(void*, uint64_t, aclOpExecutor*, const aclrtStream);
         auto op_api = reinterpret_cast<OpApiFunc>(op_api_addr);
+        // Resolve the current stream inside the custom handler.  Timing harnesses
+        // must synchronize completed device work, not assume a Python-side event
+        // on an unrelated custom stream covers this submission.
         auto acl_stream = c10_npu::getCurrentNPUStream().stream(false);
         const int ret = op_api(workspace_addr, workspace_size, executor, acl_stream);
         Release(acl_src_block_ids);

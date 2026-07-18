@@ -6,6 +6,10 @@
 
 namespace ge {
 
+// Graph-facing operator schema: this is the public contract seen by GE during
+// graph construction/compilation.  It declares names and legal dtypes only;
+// no data is moved here.  src_block_ids[i] and dst_block_ids[i] form one page
+// mapping, while src_pages and out contain the page payloads.
 REG_OP(KvCacheBlockGather)
     .INPUT(src_block_ids, TensorType({DT_INT32, DT_INT32, DT_INT32}))
     .INPUT(src_pages, TensorType({DT_FLOAT, DT_FLOAT16, DT_BF16}))

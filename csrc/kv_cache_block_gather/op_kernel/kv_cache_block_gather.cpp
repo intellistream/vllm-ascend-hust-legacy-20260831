@@ -11,6 +11,9 @@ __global__ __aicore__ void kv_cache_block_gather(
     GM_ADDR srcBlockIds, GM_ADDR srcPages, GM_ADDR dstBlockIds, GM_ADDR out,
     GM_ADDR workspace, GM_ADDR tiling)
 {
+    // Device entry point.  CANN appends workspace and tiling to the logical
+    // tensor arguments.  The host has already selected schMode and serialized
+    // KvCacheBlockGatherTilingData before this kernel is launched.
     REGISTER_TILING_DEFAULT(KvCacheBlockGatherTilingData);
     GET_TILING_DATA_WITH_STRUCT(KvCacheBlockGatherTilingData, tilingData, tiling);
     if constexpr (schMode == static_cast<uint32_t>(KvCacheBlockGatherTilingKey::TILING_KEY_FLOAT)) {

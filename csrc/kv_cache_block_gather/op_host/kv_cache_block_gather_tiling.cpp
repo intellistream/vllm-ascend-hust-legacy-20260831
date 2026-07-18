@@ -12,7 +12,17 @@
 namespace optiling {
 
 namespace {
+// Host-side tiling is the launch planner.  It validates runtime metadata and
+// serializes a small KvCacheBlockGatherTilingData record for the device kernel.
+// It does not copy KV payloads itself.
+
+// The current ACLNN contract asks the runtime for 16 MiB even though the
+// kernel currently ignores its workspace pointer.  Treat this as part of the
+// existing runtime contract; removing it requires separate CANN/ACLNN
+// validation rather than an assumption that zero is always safe.
 constexpr uint32_t WS_SYS_SIZE = 16U * 1024U * 1024U;
+// Maximum payload elements moved through UB in one loop trip.  This is an
+// element count, so the byte count depends on fp32/fp16/bf16.
 constexpr int64_t DEFAULT_TILE_ELEMS = 1024;
 constexpr uint32_t IDX_SRC_BLOCK_IDS = 0;
 constexpr uint32_t IDX_SRC_PAGES = 1;
@@ -62,6 +72,9 @@ static int64_t GetCoreLimitFromEnv()
 static ge::graphStatus GetShapeInfo(
     gert::TilingContext* context, int64_t& selectedBlocks, int64_t& elemsPerBlock)
 {
+    // The kernel treats every KV page as one flat contiguous payload.  Only
+    // dim 0 identifies pages; all remaining output dimensions are folded into
+    // elemsPerBlock.
     auto srcBlockIdsShape = context->GetInputShape(IDX_SRC_BLOCK_IDS);
     OP_CHECK_NULL_WITH_CONTEXT(context, srcBlockIdsShape);
     auto srcPagesShape = context->GetInputShape(IDX_SRC_PAGES);
@@ -155,6 +168,8 @@ static ge::graphStatus CheckDtypes(gert::TilingContext* context, ge::DataType& p
 
 static uint64_t GetTilingKeyByDtype(ge::DataType payloadDtype)
 {
+    // Select one precompiled template specialization.  The device kernel does
+    // not perform a runtime dtype branch for every copied element.
     if (payloadDtype == ge::DT_FLOAT16) {
         return GET_TPL_TILING_KEY(KV_CACHE_BLOCK_GATHER_FLOAT16_MODE);
     }
@@ -166,6 +181,7 @@ static uint64_t GetTilingKeyByDtype(ge::DataType payloadDtype)
 
 static ge::graphStatus KvCacheBlockGatherTilingFunc(gert::TilingContext* context)
 {
+    // 1. Discover AIV resources and validate tensor metadata.
     int64_t coreNum = 0;
     OP_CHECK_IF(GetPlatformInfo(context, coreNum) != ge::GRAPH_SUCCESS,
         OP_LOGE(context, "GetPlatformInfo failed"), return ge::GRAPH_FAILED);
@@ -180,6 +196,8 @@ static ge::graphStatus KvCacheBlockGatherTilingFunc(gert::TilingContext* context
     OP_CHECK_IF(GetWorkspaceSize(context) != ge::GRAPH_SUCCESS,
         OP_LOGE(context, "GetWorkspaceSize failed"), return ge::GRAPH_FAILED);
 
+    // 2. Write the host-to-kernel ABI record consumed through the `tiling`
+    //    pointer in the AscendC entry point.
     KvCacheBlockGatherTilingData* tiling = context->GetTilingData<KvCacheBlockGatherTilingData>();
     OP_CHECK_NULL_WITH_CONTEXT(context, tiling);
     OP_CHECK_IF(memset_s(tiling, sizeof(KvCacheBlockGatherTilingData), 0, sizeof(KvCacheBlockGatherTilingData)) != EOK,
@@ -188,6 +206,8 @@ static ge::graphStatus KvCacheBlockGatherTilingFunc(gert::TilingContext* context
     tiling->elemsPerBlock = elemsPerBlock;
     tiling->tileElems = std::min<int64_t>(DEFAULT_TILE_ELEMS, elemsPerBlock);
 
+    // 3. Launch at most one AIV core per selected block.  If there are more
+    //    pairs than cores, the kernel's grid-stride loop handles the remainder.
     int64_t blockDim = std::min<int64_t>(coreNum, selectedBlocks);
     const int64_t coreLimit = GetCoreLimitFromEnv();
     if (coreLimit > 0) {

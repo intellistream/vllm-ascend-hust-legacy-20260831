@@ -8,4 +8,6 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+# Package graph registration and inference metadata.  These sources describe
+# what the operator looks like to GE; they do not contain the gather algorithm.
 add_graph_plugin_sources()

@@ -1,3 +1,6 @@
+# Register this operator with the custom-op build.  op_host contains the
+# CPU-side schema/tiling code; add_modules_sources also connects it to the
+# AscendC kernel sources under ../op_kernel.
 add_op_to_compiled_list()
 
 if (BUILD_OPEN_PROJECT)
@@ -6,6 +9,7 @@ if (BUILD_OPEN_PROJECT)
     )
 endif()
 
+# Produce a kernel binary that CANN can relocate/load at runtime.
 add_ops_compile_options(
     OP_NAME KvCacheBlockGather
     OPTIONS --cce-auto-sync=off

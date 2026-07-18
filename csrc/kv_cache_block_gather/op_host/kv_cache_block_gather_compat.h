@@ -2,6 +2,9 @@
 
 #include <cstdio>
 
+// Compatibility fallbacks for CANN/open-project build environments that do
+// not provide the usual operator logging/checking macros.  This file does not
+// define any operator semantics; it only keeps the host sources portable.
 #ifndef OP_LOGE
 #define OP_LOGE(opname, fmt, ...)                         \
     do {                                                  \

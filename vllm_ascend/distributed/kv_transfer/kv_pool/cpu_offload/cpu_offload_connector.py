@@ -955,6 +955,11 @@ class CPUOffloadingConnectorWorker:
         gpu_parts: Sequence[torch.Tensor],
         mapping_profile: dict[str, Any],
     ) -> bool:
+        # Production integration point for the direct mapped-host prototype.
+        # The C++ binding maps the CPU span and the AscendC kernel applies the
+        # sparse src/dst block IDs directly, avoiding one H2D copy submission
+        # per coalesced span.  Returning False lets the caller retain main's
+        # span-copy path as the safe fallback.
         if not self.use_host_gather or self.host_gather_op is None:
             return False
         if len(cpu_parts) != len(gpu_parts):

@@ -7,13 +7,13 @@ reviewable pieces. It is not a merge of the old experiment branch.
 
 - `kv_cache_block_gather` Ascend custom op sources and build hooks.
 - Torch binding for:
-  - `torch.ops._C_ascend.kv_cache_block_gather`
-  - host mapping registration/query/stat helpers
-  - host mapping clear helper for explicit test cleanup
+    - `torch.ops._C_ascend.kv_cache_block_gather`
+    - host mapping registration/query/stat helpers
+    - host mapping clear helper for explicit test cleanup
 - Env-gated CPU offload load paths:
-  - direct mapped-host gather
-  - worker-local staging pool with persistent CPU staging slabs
-  - C++ CPU pack backend
+    - direct mapped-host gather
+    - worker-local staging pool with persistent CPU staging slabs
+    - C++ CPU pack backend
 - Experimental `VLLM_ASCEND_KV_GATHER_MAX_AIV_CORES` tiling knob from the
   prototype. It is disabled unless explicitly set and should only be used for
   resource-contention experiments.
@@ -45,3 +45,14 @@ not to page-by-page copy.
    old cleanup fixes.
 5. Compare main span-copy, direct mapped gather, and staging pool on long-context
    serving workloads.
+
+## Milestone Update: 2026-07-18
+
+The direct mapped-host gather vs main span-copy microbenchmark is complete.
+Mapped gather passed the pre-agreed 10% advantage gate in all 48 comparisons,
+including the one-span cases. The smallest observed advantage was 17.95%.
+
+See
+[`mapped_host_gather_vs_span_copy_20260718.md`](../experiments/mapped_host_gather_vs_span_copy_20260718.md)
+for the corrected measurement process, full results, limitations, and the next
+real-connector evidence gate.
