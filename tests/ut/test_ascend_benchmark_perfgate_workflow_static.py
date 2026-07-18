@@ -16,6 +16,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github/workflows/ascend-benchmark-leaderboard.yml"
 SCRIPT_DIR = REPO_ROOT / ".github/workflows/scripts"
@@ -42,6 +44,64 @@ def test_perfgate_scripts_are_present() -> None:
         assert (SCRIPT_DIR / script_name).is_file()
 
 
+def test_main_push_reaches_benchmark_and_baseline_store_jobs() -> None:
+    workflow_text = WORKFLOW.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(workflow_text)
+
+    assert workflow[True]["push"]["branches"] == ["main"]
+    benchmark_job = workflow_text[
+        workflow_text.index("  ascend-benchmark:") : workflow_text.index(
+            "  store-main-perfgate-baseline:"
+        )
+    ]
+    assert (
+        "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+        in benchmark_job
+    )
+    store_job = workflow_text[
+        workflow_text.index("  store-main-perfgate-baseline:") :
+    ]
+    assert (
+        "if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
+        in store_job
+    )
+    assert "needs: ascend-benchmark" in store_job
+
+
+def test_main_perfgate_producer_uses_shared_pr_spec_without_changing_formal_defaults(
+) -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    producer = workflow[
+        workflow.index("      - name: Run main perfgate baseline producer") : workflow.index(
+            "      - name: Performance gate - Stage 1 comparison"
+        )
+    ]
+
+    assert (
+        "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+        in producer
+    )
+    assert "Qwen/Qwen2.5-3B-Instruct" in producer
+    assert "PERFGATE_MODEL_PRECISION: BF16" in producer
+    assert 'PERFGATE_NUM_PROMPTS: "8"' in producer
+    assert 'PERFGATE_INPUT_LEN: "64"' in producer
+    assert 'PERFGATE_OUTPUT_LEN: "16"' in producer
+    assert 'SAME_SPEC_BENCHMARK_ENABLED: "1"' in producer
+    assert 'PUBLISH_TO_BENCHMARK_REPO: "0"' in producer
+    assert 'PUBLISH_TO_HF: "0"' in producer
+    assert 'SYNC_GITHUB_SNAPSHOTS: "0"' in producer
+    assert "max_attempts=${NODE_ENV_RETRY_MAX_ATTEMPTS:-3}" in producer
+    assert "cleanup_ascend_ci_processes.sh" in producer
+    assert '--explicit-perfgate-spec-file ""' in workflow
+    assert "vllm_hust_benchmark.perfgate_specs resolve" in producer
+    assert (
+        'SAME_SPEC_SPEC_FILE="${VLLM_HUST_BENCHMARK_REPO}/${perfgate_spec_file}"'
+        in producer
+    )
+    assert "PERFGATE_BASELINE_SCENARIO: random-online" in workflow
+    assert "Qwen/Qwen2.5-14B-Instruct" in workflow
+
+
 def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
@@ -61,8 +121,8 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert '--benchmark-repo "${VLLM_HUST_BENCHMARK_REPO}"' in workflow
     assert '--explicit-same-spec-file ""' in workflow
     assert 'spec_file="${SAME_SPEC_SPEC_FILE:-$MAIN_SAME_SPEC_SPEC_FILE}"' in workflow
-    assert "MAIN_BENCH_SCENARIO" in workflow
-    assert '--scenario "${MAIN_BENCH_SCENARIO}"' in workflow
+    assert "PERFGATE_BASELINE_SCENARIO" in workflow
+    assert '--scenario "${PERFGATE_BASELINE_SCENARIO}"' in workflow
     assert '--repo-root "${GITHUB_WORKSPACE}/vllm-hust-benchmark"' in workflow
     assert "docs/official-baselines/perfgate-ascend-qwen25-3b-910b2.json" not in workflow
     assert "docs/official-baselines/perfgate-ascend-qwen25-3b-910b3.json" not in workflow
@@ -97,7 +157,9 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
         "github.event_name != 'pull_request' && github.event_name != 'issue_comment' "
         "&& steps.resolve-scenario.outputs.BENCH_SCENARIO_COUNT == '1'"
     ) in workflow
-    assert "vars.VLLM_ASCEND_HUST_MAIN_BENCHMARK_SCENARIOS == ''" in workflow
+    assert "vars.VLLM_ASCEND_HUST_MAIN_BENCHMARK_SCENARIOS == ''" not in workflow[
+        workflow.index("  store-main-perfgate-baseline:") :
+    ]
     assert "multi_scenario_results.tsv" in workflow
     assert "Perfgate comparison: `skipped for multi-scenario run" in workflow
     assert "os.environ.get('BENCH_SCENARIO_COUNT', '1') == '1'" in workflow
