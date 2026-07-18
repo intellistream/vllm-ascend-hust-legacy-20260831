@@ -3,7 +3,10 @@
 
 from pathlib import Path
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
 
 
 def test_build_requirements_only_contain_setup_dependencies():
