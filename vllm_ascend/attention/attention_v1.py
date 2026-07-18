@@ -78,6 +78,7 @@ _ATTN_KEYS_BUFFER = None
 _ATTN_PATH_PROBE_COUNTS: Counter[str] = Counter()
 _ATTN_PATH_PROBE_RECORDS = 0
 _ATTN_PATH_PROBE_REGISTERED = False
+_ATTN_PATH_PROBE_DISABLED = False
 
 
 def _attention_path_probe_path() -> str:
@@ -88,7 +89,7 @@ def _attention_path_probe_max_records() -> int:
     raw_value = os.getenv("VLLM_ASCEND_ATTENTION_PATH_PROBE_MAX_RECORDS", "2048")
     try:
         return max(0, int(raw_value))
-    except ValueError:
+    except (TypeError, ValueError):
         return 2048
 
 
@@ -104,15 +105,23 @@ def _write_attention_path_probe_record(record: dict) -> None:
 
 
 def _flush_attention_path_probe_summary() -> None:
-    if not _attention_path_probe_path() or not _ATTN_PATH_PROBE_COUNTS:
+    global _ATTN_PATH_PROBE_DISABLED
+    if (
+        _ATTN_PATH_PROBE_DISABLED
+        or not _attention_path_probe_path()
+        or not _ATTN_PATH_PROBE_COUNTS
+    ):
         return
-    _write_attention_path_probe_record(
-        {
-            "event": "summary",
-            "ts": time.time(),
-            "counts": dict(sorted(_ATTN_PATH_PROBE_COUNTS.items())),
-        }
-    )
+    try:
+        _write_attention_path_probe_record(
+            {
+                "event": "summary",
+                "ts": time.time(),
+                "counts": dict(sorted(_ATTN_PATH_PROBE_COUNTS.items())),
+            }
+        )
+    except Exception:
+        _ATTN_PATH_PROBE_DISABLED = True
 
 
 def _record_attention_path_probe(
@@ -122,36 +131,42 @@ def _record_attention_path_probe(
     attn_metadata: "AscendMetadata",
     sliding_window: int | None,
 ) -> None:
-    global _ATTN_PATH_PROBE_RECORDS, _ATTN_PATH_PROBE_REGISTERED
+    global _ATTN_PATH_PROBE_DISABLED, _ATTN_PATH_PROBE_RECORDS, _ATTN_PATH_PROBE_REGISTERED
+    if _ATTN_PATH_PROBE_DISABLED:
+        return
     probe_path = _attention_path_probe_path()
     if not probe_path:
         return
-    if not _ATTN_PATH_PROBE_REGISTERED:
-        atexit.register(_flush_attention_path_probe_summary)
-        _ATTN_PATH_PROBE_REGISTERED = True
-    _ATTN_PATH_PROBE_COUNTS[path] += 1
-    _ATTN_PATH_PROBE_COUNTS[f"{path}:{attn_metadata.attn_state.name}"] += 1
-    if _ATTN_PATH_PROBE_RECORDS >= _attention_path_probe_max_records():
-        return
-    _ATTN_PATH_PROBE_RECORDS += 1
-    seq_lens_list = attn_metadata.seq_lens_list or []
-    _write_attention_path_probe_record(
-        {
-            "event": "attention_path",
-            "ts": time.time(),
-            "path": path,
-            "attn_state": attn_metadata.attn_state.name,
-            "query_tokens": int(query.shape[0]),
-            "num_actual_tokens": int(attn_metadata.num_actual_tokens or 0),
-            "num_decode_tokens": int(attn_metadata.num_decode_tokens or 0),
-            "num_prefills": int(attn_metadata.num_prefills or 0),
-            "num_decodes": int(attn_metadata.num_decodes or 0),
-            "seq_count": len(seq_lens_list),
-            "seq_lens_head": [int(value) for value in seq_lens_list[:8]],
-            "sliding_window": sliding_window,
-            "capturing": bool(_EXTRA_CTX.capturing),
-        }
-    )
+    try:
+        if not _ATTN_PATH_PROBE_REGISTERED:
+            atexit.register(_flush_attention_path_probe_summary)
+            _ATTN_PATH_PROBE_REGISTERED = True
+        attn_state = attn_metadata.attn_state.name
+        _ATTN_PATH_PROBE_COUNTS[path] += 1
+        _ATTN_PATH_PROBE_COUNTS[f"{path}:{attn_state}"] += 1
+        if _attention_path_probe_max_records() <= _ATTN_PATH_PROBE_RECORDS:
+            return
+        seq_lens_list = attn_metadata.seq_lens_list or []
+        _write_attention_path_probe_record(
+            {
+                "event": "attention_path",
+                "ts": time.time(),
+                "path": path,
+                "attn_state": attn_state,
+                "query_tokens": int(query.shape[0]),
+                "num_actual_tokens": int(attn_metadata.num_actual_tokens or 0),
+                "num_decode_tokens": int(attn_metadata.num_decode_tokens or 0),
+                "num_prefills": int(attn_metadata.num_prefills or 0),
+                "num_decodes": int(attn_metadata.num_decodes or 0),
+                "seq_count": len(seq_lens_list),
+                "seq_lens_head": [int(value) for value in seq_lens_list[:8]],
+                "sliding_window": sliding_window,
+                "capturing": bool(_EXTRA_CTX.capturing),
+            }
+        )
+        _ATTN_PATH_PROBE_RECORDS += 1
+    except Exception:
+        _ATTN_PATH_PROBE_DISABLED = True
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
