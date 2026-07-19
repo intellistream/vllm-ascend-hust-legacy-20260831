@@ -24,6 +24,9 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention import Attention
 
 from vllm_ascend.compilation.passes.base_pattern import BasePattern
+from vllm_ascend.compilation.passes.qknorm_rope_pattern_specs import (
+    iter_qknorm_rope_pattern_specs,
+)
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.utils import get_rope_dim
 
@@ -208,33 +211,26 @@ class QKNormRopeFusionPass(VllmInductorPass):
         # same config/process. For example Qwen3-8B has qkv=6144 while
         # Qwen3-0.6B has qkv=4096. Using only the first Attention layer can
         # apply the target pattern to the draft graph and crash qkv.split.
-        seen_shapes = set()
         for layer in attn_layers.values():
-            shape_key = (layer.head_size, layer.num_heads, layer.num_kv_heads)
-            if shape_key in seen_shapes:
-                continue
-            seen_shapes.add(shape_key)
+            if layer.head_size != 128:
+                logger.debug("QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128", layer.head_size)
 
-            for epsilon in [1e-6, 1e-5]:
-                if layer.head_size != 128:
-                    logger.debug("QKNorm and Rope fusion not enabled: head_dim %d is not equal of 128", layer.head_size)
-                    continue
+        for head_dim, num_heads, num_kv_heads, epsilon in iter_qknorm_rope_pattern_specs(attn_layers.values()):
+            QKNormRopeFusionPattern(
+                vllm_config=vllm_config,
+                head_dim=head_dim,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                eps=epsilon,
+            ).register(self.pattern_match_passes)
 
-                QKNormRopeFusionPattern(
-                    vllm_config=vllm_config,
-                    head_dim=layer.head_size,
-                    num_heads=layer.num_heads,
-                    num_kv_heads=layer.num_kv_heads,
-                    eps=epsilon,
-                ).register(self.pattern_match_passes)
-
-                QKNormRopeFusionPatternWithBias(
-                    vllm_config=vllm_config,
-                    head_dim=layer.head_size,
-                    num_heads=layer.num_heads,
-                    num_kv_heads=layer.num_kv_heads,
-                    eps=epsilon,
-                ).register(self.pattern_match_passes)
+            QKNormRopeFusionPatternWithBias(
+                vllm_config=vllm_config,
+                head_dim=head_dim,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                eps=epsilon,
+            ).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
