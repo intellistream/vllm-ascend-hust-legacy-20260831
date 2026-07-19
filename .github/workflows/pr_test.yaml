@@ -239,7 +239,7 @@ jobs:
   validate-hust-dual-editable:
     needs: lint-and-select-tests
     if: ${{ needs.lint-and-select-tests.outputs.packaging_changed == 'true' && contains(github.event.pull_request.labels.*.name, 'e2e') }}
-    runs-on: linux-aarch64-a2b3-1
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12

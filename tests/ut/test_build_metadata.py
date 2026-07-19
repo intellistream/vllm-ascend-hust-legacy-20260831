@@ -31,12 +31,15 @@ def test_paired_editable_workflow_uses_empty_target_dependency_sets():
     root = Path(__file__).resolve().parents[2]
     workflow = (root / ".github/workflows/pr_test.yaml").read_text()
 
+    job = workflow.index("validate-hust-dual-editable:")
     checkout = workflow.index("repository: vLLM-HUST/vllm-hust")
     runtime_install = workflow.index("-r ./vllm-hust/requirements/common.txt")
     build_tools = workflow.index("-r ./vllm-hust/requirements/build/empty.txt")
     core_install = workflow.index("VLLM_TARGET_DEVICE=empty uv pip install")
     plugin_install = workflow.index("COMPILE_CUSTOM_KERNELS=0")
 
+    assert "runs-on: ubuntu-24.04-arm" in workflow[job:checkout]
+    assert "runs-on: linux-aarch64-a2b3-1" not in workflow[job:checkout]
     assert "ref: main" in workflow[checkout:runtime_install]
     assert "-r ./requirements.txt" in workflow[runtime_install:core_install]
     assert runtime_install < build_tools < core_install < plugin_install
