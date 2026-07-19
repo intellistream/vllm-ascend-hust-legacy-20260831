@@ -46,10 +46,7 @@ from vllm_ascend.compilation.acl_graph_split_batch import (
 
 from ..utils import weak_ref_tensors
 
-_ACLGRAPH_REPLAY_GLOBAL_SYNC = (
-    os.environ.get("VLLM_ASCEND_ACLGRAPH_REPLAY_GLOBAL_SYNC", "0")
-    in ("1", "true", "True")
-)
+_ACLGRAPH_REPLAY_GLOBAL_SYNC = os.environ.get("VLLM_ASCEND_ACLGRAPH_REPLAY_GLOBAL_SYNC", "0") in ("1", "true", "True")
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 _STREAM_RESOURCE_ERROR_CODE = "207008"
@@ -179,17 +176,14 @@ class ACLGraphWrapper:
 
     def clear_graphs(self) -> None:
         self.concrete_aclgraph_entries.clear()
+        self.concrete_aclgraph_entries2.clear()
 
     def has_graph(
         self,
         batch_descriptor: BatchDescriptor,
         in_parallel_streams: bool = False,
     ) -> bool:
-        entries = (
-            self.concrete_aclgraph_entries2
-            if in_parallel_streams
-            else self.concrete_aclgraph_entries
-        )
+        entries = self.concrete_aclgraph_entries2 if in_parallel_streams else self.concrete_aclgraph_entries
         entry = entries.get(batch_descriptor)
         return entry is not None and entry.aclgraph is not None
 
@@ -201,18 +195,9 @@ class ACLGraphWrapper:
         if aclgraph_runtime_mode == CUDAGraphMode.NONE or aclgraph_runtime_mode != self.runtime_mode:
             return self.runnable(*args, **kwargs)
 
-        in_parallel_streams = bool(
-            getattr(forward_context, "in_parallel_streams", False))
-        entries = (
-            self.concrete_aclgraph_entries2
-            if in_parallel_streams
-            else self.concrete_aclgraph_entries
-        )
-        graph_pool = (
-            self.graph_pool_parallel_streams
-            if in_parallel_streams
-            else self.graph_pool
-        )
+        in_parallel_streams = bool(getattr(forward_context, "in_parallel_streams", False))
+        entries = self.concrete_aclgraph_entries2 if in_parallel_streams else self.concrete_aclgraph_entries
+        graph_pool = self.graph_pool_parallel_streams if in_parallel_streams else self.graph_pool
 
         if batch_descriptor not in entries:
             entries[batch_descriptor] = ACLGraphEntry(batch_descriptor=batch_descriptor)
@@ -232,7 +217,6 @@ class ACLGraphWrapper:
                     f"BatchDescriptor: {batch_descriptor}"
                 )
 
-
             previous_capture_enabled = compilation_monitor.cudagraph_capturing_enabled
             if is_inplace_lazy_capture:
                 compilation_monitor.set_cudagraph_capturing_enabled(True)
@@ -251,10 +235,9 @@ class ACLGraphWrapper:
             entry.input_tensor_infos = input_tensor_infos
 
             if _should_validate_inplace_metadata_ptrs(forward_context):
-                (entry.attn_metadata_addresses,
-                 entry.attn_metadata_tensor_infos) = (
-                     _collect_attn_metadata_tensor_infos(
-                         getattr(forward_context, "attn_metadata", None)))
+                (entry.attn_metadata_addresses, entry.attn_metadata_tensor_infos) = _collect_attn_metadata_tensor_infos(
+                    getattr(forward_context, "attn_metadata", None)
+                )
             aclgraph = torch.npu.NPUGraph()
 
             with ExitStack() as stack:
@@ -265,7 +248,7 @@ class ACLGraphWrapper:
                 from vllm.model_executor.offloader.base import get_offloader
 
                 get_offloader().sync_prev_onload()
-                previous_capturing = bool(getattr(forward_context, 'capturing', False))
+                previous_capturing = bool(getattr(forward_context, "capturing", False))
                 forward_context.capturing = True
                 set_graph_pool_id(graph_pool)
                 try:
@@ -299,8 +282,7 @@ class ACLGraphWrapper:
             return output
 
         if self.is_debugging_mode or _should_validate_inplace_metadata_ptrs(forward_context):
-            validate_input_addresses(
-                entry.input_addresses, args, self.runnable_name)
+            validate_input_addresses(entry.input_addresses, args, self.runnable_name)
 
         logger.info_once("Replaying aclgraph")
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
@@ -334,7 +316,6 @@ def update_full_graph_params(
     speculative_config=None,
     num_dcp_pcp_tokens=None,
     draft_attn_metadatas=None,
-
 ):
     impl_cls = attn_backend.get_impl_cls()
     impl_cls.update_graph_params(

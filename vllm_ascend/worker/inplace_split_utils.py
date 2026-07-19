@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -31,8 +31,91 @@ NO_SPLIT_LORA_CONFLICT = "no_split_lora_conflict"
 NO_SPLIT_MLA_CONFLICT = "no_split_mla_conflict"
 NO_SPLIT_MROPE_CONFLICT = "no_split_mrope_conflict"
 NO_SPLIT_BATCH_TOO_SMALL = "no_split_batch_too_small"
+NO_SPLIT_DP_UNSUPPORTED = "no_split_dp_unsupported"
+NO_SPLIT_GDN_HYBRID_UNSUPPORTED = "no_split_gdn_hybrid_unsupported"
+NO_SPLIT_SP_UNSUPPORTED = "no_split_sp_unsupported"
+NO_SPLIT_CONTEXT_PARALLEL_UNSUPPORTED = "no_split_context_parallel_unsupported"
+NO_SPLIT_INVALID_SCHEDULE = "no_split_invalid_schedule"
+NO_SPLIT_TP_SHAPE_UNSUPPORTED = "no_split_tp_shape_unsupported"
 
-_INPLACE_SPLIT_MODES = ("inplace_serial", "inplace_parallel")
+_INPLACE_SPLIT_MODES = ("inplace_parallel",)
+
+
+def validate_inplace_split_config_values(
+    *,
+    enabled: bool,
+    mode: str,
+    num_splits: int,
+    enable_parallel_streams: bool,
+    enable_inplace_spec_decode: bool,
+    enable_inplace_mrope: bool,
+    replay_policy: str = "full_graph_parallel",
+) -> None:
+    """Validate feature gates without importing the runtime stack."""
+    if not enabled:
+        return
+    if mode != "inplace_parallel":
+        raise ValueError("enabled split_batch_config only supports mode='inplace_parallel'")
+    if num_splits != 2:
+        raise ValueError("enabled inplace split requires num_splits=2")
+    if not enable_parallel_streams:
+        raise ValueError("enabled inplace split requires enable_parallel_streams=true")
+    if enable_inplace_spec_decode:
+        raise ValueError("inplace speculative decode is not implemented safely")
+    if enable_inplace_mrope:
+        raise ValueError("inplace MRoPE is not implemented safely")
+    if replay_policy != "full_graph_parallel":
+        raise ValueError("enabled inplace split only supports full-graph replay")
+
+
+def padding_fill_value(name: str, *, pad_slot_id: int = -1) -> int:
+    """Return the padding sentinel required by each metadata field."""
+    return pad_slot_id if name == "slot_mapping" else 0
+
+
+def replace_split_metadata(metadata, **overrides):
+    """Preserve every dataclass field not explicitly split by the caller."""
+    return replace(metadata, **overrides)
+
+
+def should_stabilize_inplace_metadata(inplace_split_plan) -> bool:
+    """Disabled/ordinary ubatching must not require an optional split runner."""
+    return inplace_split_plan is not None
+
+
+def inplace_split_runtime_rejection(
+    *,
+    enabled: bool,
+    mode: str,
+    parallel_streams: bool,
+    full_graph: bool,
+    uniform_decode: bool,
+    spec_decode: bool,
+    dp_world_size: int,
+    has_gdn_or_hybrid: bool,
+    sp_enabled: bool,
+    context_parallel_enabled: bool,
+) -> str | None:
+    """Return a fail-closed reason for unsupported runtime topologies."""
+    if not enabled or mode not in _INPLACE_SPLIT_MODES:
+        return NO_SPLIT_MODE_NOT_INPLACE
+    if not parallel_streams:
+        return NO_SPLIT_PARALLEL_STREAMS_DISABLED
+    if dp_world_size > 1:
+        return NO_SPLIT_DP_UNSUPPORTED
+    if has_gdn_or_hybrid:
+        return NO_SPLIT_GDN_HYBRID_UNSUPPORTED
+    if sp_enabled:
+        return NO_SPLIT_SP_UNSUPPORTED
+    if context_parallel_enabled:
+        return NO_SPLIT_CONTEXT_PARALLEL_UNSUPPORTED
+    if not uniform_decode:
+        return NO_SPLIT_NON_UNIFORM_DECODE
+    if not full_graph:
+        return NO_SPLIT_CUDAGRAPH_MODE_NOT_FULL
+    if spec_decode:
+        return NO_SPLIT_SPEC_DECODE_CONFLICT
+    return None
 
 
 @dataclass
@@ -59,11 +142,7 @@ class SplitBatchSlice:
         return self.padded_num_tokens
 
     def is_empty(self) -> bool:
-        return (
-            self.request_slice.start == self.request_slice.stop
-            or self.token_slice.start == self.token_slice.stop
-        )
-
+        return self.request_slice.start == self.request_slice.stop or self.token_slice.start == self.token_slice.stop
 
 
 @dataclass(frozen=True)
@@ -88,7 +167,6 @@ class InplaceSplitPlan:
     offset_min_graph_tokens: int
     offset_max_graph_tokens_by_start: dict[int, int] | None
     offset_allowed_graph_tokens_by_start: dict[int, list[int]] | None
-
 
 
 def _padded_graph_size(total_tokens: int, capture_sizes: list[int]) -> int:
@@ -124,6 +202,7 @@ def create_inplace_split_batch_slices(
     offset_max_graph_tokens_by_start: dict[int, int] | None = None,
     offset_allowed_graph_tokens_by_start: dict[int, list[int]] | None = None,
     first_tokens_policy: str = "largest_lower",
+    tensor_parallel_size: int = 1,
 ) -> tuple[InplaceSplitPlan | None, str]:
     if uniform_decode_query_len < 1:
         return None, NO_SPLIT_INVALID_QUERY_LEN
@@ -140,10 +219,15 @@ def create_inplace_split_batch_slices(
     num_reqs = len(num_scheduled_tokens_per_request)
     if num_reqs == 0:
         return None, NO_SPLIT_NO_CAPTURE_SIZES
+    if int(np.sum(num_scheduled_tokens_per_request)) != total_num_tokens or np.any(
+        num_scheduled_tokens_per_request != uniform_decode_query_len
+    ):
+        return None, NO_SPLIT_INVALID_SCHEDULE
+    if tensor_parallel_size < 1:
+        return None, NO_SPLIT_TP_SHAPE_UNSUPPORTED
 
     valid_lower_sizes = [
-        cs for cs in sorted_capture_sizes
-        if cs < total_num_tokens and cs % uniform_decode_query_len == 0
+        cs for cs in sorted_capture_sizes if cs < total_num_tokens and cs % uniform_decode_query_len == 0
     ]
 
     if not valid_lower_sizes:
@@ -215,6 +299,11 @@ def create_inplace_split_batch_slices(
 
         second_padding_tokens = second_graph_tokens - second_tokens
 
+        if first_tokens % tensor_parallel_size != 0 or second_graph_tokens % tensor_parallel_size != 0:
+            if first_tokens_policy == "largest_lower":
+                return None, NO_SPLIT_TP_SHAPE_UNSUPPORTED
+            continue
+
         if offset_max_padding_tokens is not None and second_padding_tokens > offset_max_padding_tokens:
             if first_tokens_policy == "largest_lower":
                 return None, NO_SPLIT_OFFSET_PADDING_TOO_LARGE
@@ -283,9 +372,7 @@ def create_inplace_split_batch_slices(
             return plan, INPLACE_SPLIT_DRY_RUN
 
         first_padding = first_tokens - split_slices[0].num_tokens
-        score = _balanced_inplace_split_score(
-            first_tokens, second_tokens, first_padding, second_padding_tokens
-        )
+        score = _balanced_inplace_split_score(first_tokens, second_tokens, first_padding, second_padding_tokens)
         if score < best_score:
             best_score = score
             best_plan = plan
@@ -306,11 +393,11 @@ def inplace_split_preserves_attention_backend(
     fused infer attention. Inplace split must not silently change that routing,
     because graph capture records backend-specific task params.
     """
-    unsplit_uses_pa = uses_paged_attention(
-        inplace_split_plan.padded_num_tokens_without_split)
+    unsplit_uses_pa = uses_paged_attention(inplace_split_plan.padded_num_tokens_without_split)
     return all(
         uses_paged_attention(split_slice.graph_num_tokens) == unsplit_uses_pa
-        for split_slice in inplace_split_plan.split_slices)
+        for split_slice in inplace_split_plan.split_slices
+    )
 
 
 def inplace_split_first_graph_matches_attention_backend(
@@ -320,8 +407,7 @@ def inplace_split_first_graph_matches_attention_backend(
     """Return whether split-0 can safely reuse its ordinary graph backend."""
     if not inplace_split_plan.split_slices:
         return False
-    unsplit_uses_pa = uses_paged_attention(
-        inplace_split_plan.padded_num_tokens_without_split)
+    unsplit_uses_pa = uses_paged_attention(inplace_split_plan.padded_num_tokens_without_split)
     first_split = inplace_split_plan.split_slices[0]
     return uses_paged_attention(first_split.graph_num_tokens) == unsplit_uses_pa
 
@@ -331,5 +417,4 @@ def select_inplace_attention_backend(
     uses_paged_attention: Callable[[int], bool],
 ) -> str:
     """Select attention backend for inplace split based on unsplit behavior."""
-    return ("pa" if uses_paged_attention(
-        inplace_split_plan.padded_num_tokens_without_split) else "fia")
+    return "pa" if uses_paged_attention(inplace_split_plan.padded_num_tokens_without_split) else "fia"

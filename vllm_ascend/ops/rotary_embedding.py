@@ -176,17 +176,19 @@ def rope_forward_oot(
         forward_context = get_forward_context()
         slot_id = forward_context.cos_sin_slot_id
         cos, sin = get_cos_and_sin_slice(slot_id=slot_id)
-        if (is_neox_style and head_size == 128
-                and cos_sin_cache.shape[-1] == 128
-                and cos is not None and sin is not None):
+        if (
+            is_neox_style
+            and head_size == 128
+            and cos_sin_cache.shape[-1] == 128
+            and cos is not None
+            and sin is not None
+        ):
             query = query.contiguous().view(1, query.shape[0], -1, head_size)
             key = key.contiguous().view(1, key.shape[0], -1, head_size)
             if getattr(forward_context, "dbo_enabled", False):
-                query, key = torch_npu.npu_apply_rotary_pos_emb(
-                    query, key, forward_context.cos, forward_context.sin)
+                query, key = torch_npu.npu_apply_rotary_pos_emb(query, key, forward_context.cos, forward_context.sin)
             else:
-                query, key = torch_npu.npu_apply_rotary_pos_emb(
-                    query, key, cos, sin)
+                query, key = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin)
         elif rotary_dim < head_size:
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, head_size)

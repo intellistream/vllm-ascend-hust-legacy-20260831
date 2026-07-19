@@ -485,8 +485,7 @@ def enabling_mlapo(vllm_config: VllmConfig) -> bool:
     return bool(config_val and is_decode_instance)
 
 
-def slice_positions_by_token(positions: torch.Tensor,
-                             token_slice: slice) -> torch.Tensor:
+def slice_positions_by_token(positions: torch.Tensor, token_slice: slice) -> torch.Tensor:
     if positions.ndim == 2:
         return positions[:, token_slice]
     return positions[token_slice]
@@ -496,17 +495,14 @@ def slice_query_start_locs(
     query_start_loc: torch.Tensor,
     request_slice: slice,
 ) -> torch.Tensor:
-    return query_start_loc[request_slice.start: request_slice.stop + 1] -\
-        query_start_loc[request_slice.start]
+    return query_start_loc[request_slice.start : request_slice.stop + 1] - query_start_loc[request_slice.start]
 
 
 def _make_metadata_with_slice(
-        ubatch_slice,
-        attn_metadata: AscendCommonAttentionMetadata,
-        max_num_tokens: int = 0) -> AscendCommonAttentionMetadata:
+    ubatch_slice, attn_metadata: AscendCommonAttentionMetadata, max_num_tokens: int = 0
+) -> AscendCommonAttentionMetadata:
 
-    assert not ubatch_slice.is_empty(), (
-        f"Ubatch slice {ubatch_slice} is empty")
+    assert not ubatch_slice.is_empty(), f"Ubatch slice {ubatch_slice} is empty"
 
     request_slice = ubatch_slice.request_slice
     token_slice = ubatch_slice.token_slice
@@ -517,48 +513,45 @@ def _make_metadata_with_slice(
     last_req = request_slice.stop - 1
     last_tok = token_slice.stop - 1
 
-    assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], \
-        "Token slice start outside of first request"
-    assert start_locs[last_req] <= last_tok < start_locs[last_req+1], \
-        "Token slice end outside of last request"
+    assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], "Token slice start outside of first request"
+    assert start_locs[last_req] <= last_tok < start_locs[last_req + 1], "Token slice end outside of last request"
 
     splits_first_request = first_tok > start_locs[first_req]
     splits_last_request = last_tok < start_locs[last_req + 1] - 1
 
     query_start_loc_cpu = slice_query_start_locs(start_locs, request_slice)
-    query_start_loc = slice_query_start_locs(attn_metadata.query_start_loc,
-                                             request_slice)
+    query_start_loc = slice_query_start_locs(attn_metadata.query_start_loc, request_slice)
 
-    assert len(query_start_loc) >= 2, (
-        f"query_start_loc must have at least 2 elements, "
-        f"got {len(query_start_loc)}")
+    assert len(query_start_loc) >= 2, f"query_start_loc must have at least 2 elements, got {len(query_start_loc)}"
 
     if splits_first_request:
         tokens_skipped = first_tok - start_locs[first_req]
         query_start_loc[1:] -= tokens_skipped
         query_start_loc_cpu[1:] -= tokens_skipped
 
-    seq_lens = attn_metadata.seq_lens[request_slice]
-    seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
+    def _slice_optional(value, value_slice):
+        return value[value_slice] if value is not None else None
+
+    seq_lens = _slice_optional(attn_metadata.seq_lens, request_slice)
+    seq_lens_cpu = _slice_optional(attn_metadata.seq_lens_cpu, request_slice)
 
     if splits_last_request:
         tokens_skipped = query_start_loc_cpu[-1] - token_slice.stop
         query_start_loc[-1] -= tokens_skipped
         query_start_loc_cpu[-1] -= tokens_skipped
 
-        seq_lens = seq_lens.clone()
-        seq_lens_cpu = seq_lens_cpu.clone()
-        seq_lens[-1] -= tokens_skipped
-        seq_lens_cpu[-1] -= tokens_skipped
+        if seq_lens is not None:
+            seq_lens = seq_lens.clone()
+            seq_lens[-1] -= tokens_skipped
+        if seq_lens_cpu is not None:
+            seq_lens_cpu = seq_lens_cpu.clone()
+            seq_lens_cpu[-1] -= tokens_skipped
 
-    num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[
-        request_slice]
+    num_computed_tokens_cpu = _slice_optional(attn_metadata.num_computed_tokens_cpu, request_slice)
 
     num_requests = request_slice.stop - request_slice.start
     num_actual_tokens = token_slice.stop - token_slice.start
-    max_query_len = int(
-        torch.max(torch.abs(query_start_loc_cpu[1:] -
-                            query_start_loc_cpu[:-1])).item())
+    max_query_len = int(torch.max(torch.abs(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])).item())
 
     if max_query_len == 0:
         max_query_len = attn_metadata.max_query_len
@@ -568,14 +561,11 @@ def _make_metadata_with_slice(
 
     num_input_tokens = token_slice.stop - token_slice.start
     positions = slice_positions_by_token(attn_metadata.positions, token_slice)
-    attn_state = attn_metadata.attn_state
-    attn_mask = getattr(attn_metadata, "attn_mask", None)
-    spec_attn_mask = getattr(attn_metadata, "spec_attn_mask", None)
 
     if len(attn_metadata.actual_seq_lengths_q) > 0:
         actual_seq_lengths_q = list(
-            range(attn_metadata.decode_token_per_req, max_num_tokens + 1,
-                  attn_metadata.decode_token_per_req))
+            range(attn_metadata.decode_token_per_req, num_actual_tokens + 1, attn_metadata.decode_token_per_req)
+        )
     else:
         actual_seq_lengths_q = []
 
@@ -585,7 +575,9 @@ def _make_metadata_with_slice(
     else:
         _seq_lens_cpu_sliced = None
 
-    return AscendCommonAttentionMetadata(
+    from vllm_ascend.worker.inplace_split_utils import replace_split_metadata
+
+    overrides = dict(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
@@ -597,18 +589,28 @@ def _make_metadata_with_slice(
         actual_seq_lengths_q=actual_seq_lengths_q,
         num_computed_tokens_cpu=num_computed_tokens_cpu,
         max_query_len=max_query_len,
-        max_seq_len=attn_metadata.max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         positions=positions,
-        attn_mask=attn_mask,
-        spec_attn_mask=spec_attn_mask,
-        attn_state=attn_state,
-        graph_pad_size=attn_metadata.graph_pad_size,
-        decode_token_per_req=attn_metadata.decode_token_per_req,
-        prefill_context_parallel_metadata=getattr(attn_metadata, "prefill_context_parallel_metadata", None),
-        causal=getattr(attn_metadata, "causal", True),
     )
+    per_request_fields = (
+        "seq_lens_cpu_upper_bound",
+        "is_prefilling",
+    )
+    per_token_fields = ("slot_mapping_cpu", "positions_cpu")
+    dataclass_fields = getattr(attn_metadata, "__dataclass_fields__", {})
+    for field_name in per_request_fields:
+        if field_name in dataclass_fields:
+            overrides[field_name] = _slice_optional(getattr(attn_metadata, field_name, None), request_slice)
+    for field_name in per_token_fields:
+        if field_name in dataclass_fields:
+            value = getattr(attn_metadata, field_name, None)
+            overrides[field_name] = (
+                slice_positions_by_token(value, token_slice)
+                if field_name == "positions_cpu" and value is not None
+                else _slice_optional(value, token_slice)
+            )
+    return replace_split_metadata(attn_metadata, **overrides)
 
 
 def split_attn_metadata(
@@ -623,9 +625,7 @@ def split_attn_metadata(
 
     results = []
     for idx, ubatch_slice in enumerate(ubatch_slices):
-        metadata = _make_metadata_with_slice(ubatch_slice,
-                                             common_attn_metadata,
-                                             max_num_tokens)
+        metadata = _make_metadata_with_slice(ubatch_slice, common_attn_metadata, max_num_tokens)
         results.append(metadata)
         if split_debug_enabled():
             split_debug_log_event(
@@ -633,10 +633,8 @@ def split_attn_metadata(
                 {
                     "idx": idx,
                     "source": "split_attn_metadata",
-                    "request_slice":
-                    split_debug_slice_info(ubatch_slice.request_slice),
-                    "token_slice":
-                    split_debug_slice_info(ubatch_slice.token_slice),
+                    "request_slice": split_debug_slice_info(ubatch_slice.request_slice),
+                    "token_slice": split_debug_slice_info(ubatch_slice.token_slice),
                     "num_tokens": int(metadata.num_actual_tokens),
                     "padded_num_tokens": int(max_num_tokens),
                     "num_reqs": int(metadata.num_reqs),

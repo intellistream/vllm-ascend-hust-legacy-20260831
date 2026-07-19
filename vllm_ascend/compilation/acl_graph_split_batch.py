@@ -15,10 +15,7 @@ from vllm_ascend.compilation.acl_graph_diagnostics import SPLIT_INPLACE_DEBUG
 if TYPE_CHECKING:
     pass
 
-_ACLGRAPH_REPLAY_GLOBAL_SYNC = (
-    os.environ.get("VLLM_ASCEND_ACLGRAPH_REPLAY_GLOBAL_SYNC", "0")
-    in ("1", "true", "True")
-)
+_ACLGRAPH_REPLAY_GLOBAL_SYNC = os.environ.get("VLLM_ASCEND_ACLGRAPH_REPLAY_GLOBAL_SYNC", "0") in ("1", "true", "True")
 
 
 def is_allowed_inplace_lazy_capture(
@@ -72,8 +69,7 @@ def refresh_block_table_in_place(
     dst_block_table: Any,
     src_block_table: Any,
 ) -> bool:
-    if (not isinstance(dst_block_table, torch.Tensor)
-            or not isinstance(src_block_table, torch.Tensor)):
+    if not isinstance(dst_block_table, torch.Tensor) or not isinstance(src_block_table, torch.Tensor):
         return False
 
     if dst_block_table.data_ptr() == src_block_table.data_ptr():
@@ -85,15 +81,13 @@ def refresh_block_table_in_place(
             cols = min(dst_block_table.shape[1], src_block_table.shape[1])
             if rows <= 0 or cols <= 0:
                 return False
-            dst_block_table[:rows, :cols].copy_(
-                src_block_table[:rows, :cols], non_blocking=False)
+            dst_block_table[:rows, :cols].copy_(src_block_table[:rows, :cols], non_blocking=False)
             return True
 
         count = min(dst_block_table.numel(), src_block_table.numel())
         if count <= 0:
             return False
-        dst_block_table.view(-1)[:count].copy_(
-            src_block_table.view(-1)[:count], non_blocking=False)
+        dst_block_table.view(-1)[:count].copy_(src_block_table.view(-1)[:count], non_blocking=False)
         return True
     except Exception:
         return False
@@ -101,8 +95,10 @@ def refresh_block_table_in_place(
 
 def should_template_fia_seq_lens(forward_context: Any) -> bool:
     batch_descriptor = getattr(forward_context, "batch_descriptor", None)
-    return (getattr(batch_descriptor, "capture_metadata_mode", "") == "template"
-            and getattr(batch_descriptor, "attention_backend", "") == "fia")
+    return (
+        getattr(batch_descriptor, "capture_metadata_mode", "") == "template"
+        and getattr(batch_descriptor, "attention_backend", "") == "fia"
+    )
 
 
 def _get_fia_key_t(key_tensor: Any, fallback: int) -> int:
@@ -171,10 +167,7 @@ def get_graph_param_key(
 
     start = desc.start_num_tokens
     has_descriptor_variant = (
-        start > 0
-        or bool(desc.graph_variant)
-        or bool(desc.attention_backend)
-        or bool(desc.capture_metadata_mode)
+        start > 0 or bool(desc.graph_variant) or bool(desc.attention_backend) or bool(desc.capture_metadata_mode)
     )
     if has_descriptor_variant:
         return desc
@@ -199,7 +192,7 @@ def ensure_graph_param_key(graph_params, key):
     graph_params.handles.setdefault(key, [])
     graph_params.attn_params.setdefault(key, [])
     graph_params.workspaces.setdefault(key, None)
-    if hasattr(graph_params, 'conv1d_params'):
+    if hasattr(graph_params, "conv1d_params"):
         graph_params.conv1d_params.setdefault(key, [])
         graph_params.conv1d_handles.setdefault(key, [])
         graph_params.conv1d_events.setdefault(key, [])
@@ -215,30 +208,27 @@ def require_graph_param_key(graph_params, key, *, op):
 
 
 def has_dual_stream_attention_metadata(forward_context) -> bool:
-    dual_metadata = getattr(forward_context,
-                            "dual_stream_attention_metadata", None)
+    dual_metadata = getattr(forward_context, "dual_stream_attention_metadata", None)
     return isinstance(dual_metadata, list) and len(dual_metadata) == 2
 
 
-def get_dual_attention_update_metadata(
-    forward_context: Any, dual_metadata: Any, split_idx: int,
-    key: Any) -> Any:
-    runtime_metadata = getattr(
-        forward_context, "macro_graph_dual_attention_update_metadata", None)
+def get_dual_attention_update_metadata(forward_context: Any, dual_metadata: Any, split_idx: int, key: Any) -> Any:
+    runtime_metadata = getattr(forward_context, "macro_graph_dual_attention_update_metadata", None)
     if runtime_metadata is not None:
         try:
             return runtime_metadata[split_idx][key]
         except (KeyError, IndexError, TypeError) as exc:
             raise KeyError(
-                "macro_graph_dual_attention_update_metadata is missing "
-                f"split={split_idx}, layer={key!r}") from exc
+                f"macro_graph_dual_attention_update_metadata is missing split={split_idx}, layer={key!r}"
+            ) from exc
     return dual_metadata[split_idx][key]
 
 
-def _update_attn_fia_params(update_stream, forward_context, runtime_shape,
-                            refresh_block_table: bool = False,
-                            in_parallel_streams: bool = False):
+def _update_attn_fia_params(
+    update_stream, forward_context, runtime_shape, refresh_block_table: bool = False, in_parallel_streams: bool = False
+):
     from vllm_ascend.compilation.acl_graph import get_graph_params
+
     graph_params = get_graph_params(in_parallel_streams)
     if graph_params is None:
         return
@@ -252,29 +242,43 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape,
 
     with torch.npu.stream(update_stream):
         for key, param, handle, event in zip(
-                forward_context.attn_metadata,
-                graph_params.attn_params[param_key],
-                graph_params.handles[param_key],
-                graph_params.events[param_key],
+            forward_context.attn_metadata,
+            graph_params.attn_params[param_key],
+            graph_params.handles[param_key],
+            graph_params.events[param_key],
         ):
-            (query, key_cache, value, block_tables, attn_mask, block_size,
-             seq_lens, actual_seq_lengths_q_capture, num_kv_heads, num_heads, scale,
-             attn_output, softmax_lse, *rest) = param
+            (
+                query,
+                key_cache,
+                value,
+                block_tables,
+                attn_mask,
+                block_size,
+                seq_lens,
+                actual_seq_lengths_q_capture,
+                num_kv_heads,
+                num_heads,
+                scale,
+                attn_output,
+                softmax_lse,
+                *rest,
+            ) = param
 
             metadata = forward_context.attn_metadata[key]
             seq_lens = maybe_template_fia_seq_lens(
-                forward_context, metadata.seq_lens_list,
+                forward_context,
+                metadata.seq_lens_list,
                 _get_fia_key_t(key_cache, block_size),
-                source=f"acl_graph_update:{key}")
+                source=f"acl_graph_update:{key}",
+            )
             actual_seq_lengths_q = metadata.actual_seq_lengths_q
 
-            metadata_block_table, metadata_block_source = extract_block_table_from_metadata(
-                metadata)
+            metadata_block_table, metadata_block_source = extract_block_table_from_metadata(metadata)
             if refresh_block_table:
-                block_table_refreshed = refresh_block_table_in_place(
-                    block_tables, metadata_block_table)
+                block_table_refreshed = refresh_block_table_in_place(block_tables, metadata_block_table)
                 if SPLIT_INPLACE_DEBUG:
                     from vllm_ascend.inplace_split_debug import log_event, tensor_info
+
                     log_event(
                         "fia_block_table_refresh",
                         {
@@ -289,6 +293,7 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape,
 
             if SPLIT_INPLACE_DEBUG:
                 from vllm_ascend.inplace_split_debug import log_event, tensor_info
+
                 log_event(
                     "fia_update_before_call",
                     {
@@ -333,10 +338,11 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape,
             event.record(update_stream)
 
 
-def _update_attn_pa_params(update_stream, forward_context, runtime_shape,
-                           refresh_block_table: bool = False,
-                           in_parallel_streams: bool = False):
+def _update_attn_pa_params(
+    update_stream, forward_context, runtime_shape, refresh_block_table: bool = False, in_parallel_streams: bool = False
+):
     from vllm_ascend.compilation.acl_graph import get_graph_params
+
     graph_params = get_graph_params(in_parallel_streams)
     if graph_params is None:
         return
@@ -350,10 +356,10 @@ def _update_attn_pa_params(update_stream, forward_context, runtime_shape,
 
     with torch.npu.stream(update_stream):
         for key, param, handle, event in zip(
-                forward_context.attn_metadata,
-                graph_params.attn_params[param_key],
-                graph_params.handles[param_key],
-                graph_params.events[param_key],
+            forward_context.attn_metadata,
+            graph_params.attn_params[param_key],
+            graph_params.handles[param_key],
+            graph_params.events[param_key],
         ):
             (
                 query,
@@ -369,11 +375,9 @@ def _update_attn_pa_params(update_stream, forward_context, runtime_shape,
             seq_lens = forward_context.attn_metadata[key].seq_lens
 
             metadata = forward_context.attn_metadata[key]
-            metadata_block_table, metadata_block_source = extract_block_table_from_metadata(
-                metadata)
+            metadata_block_table, metadata_block_source = extract_block_table_from_metadata(metadata)
             if refresh_block_table:
-                refresh_block_table_in_place(
-                    block_table, metadata_block_table)
+                refresh_block_table_in_place(block_table, metadata_block_table)
 
             workspace = torch_npu._npu_paged_attention_get_workspace(
                 query=query,
@@ -384,40 +388,40 @@ def _update_attn_pa_params(update_stream, forward_context, runtime_shape,
                 scale_value=scale,
                 block_table=block_table,
                 context_lens=seq_lens,
-                out=output)
+                out=output,
+            )
             torch.npu.graph_task_update_begin(update_stream, handle)
-            torch_npu._npu_paged_attention(query=query,
-                                           key_cache=key_cache,
-                                           value_cache=value_cache,
-                                           num_kv_heads=num_kv_heads,
-                                           num_heads=num_heads,
-                                           scale_value=scale,
-                                           block_table=block_table,
-                                           context_lens=seq_lens,
-                                           out=output,
-                                           workspace=workspace)
+            torch_npu._npu_paged_attention(
+                query=query,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                num_kv_heads=num_kv_heads,
+                num_heads=num_heads,
+                scale_value=scale,
+                block_table=block_table,
+                context_lens=seq_lens,
+                out=output,
+                workspace=workspace,
+            )
             torch.npu.graph_task_update_end(update_stream)
 
             event.record(update_stream)
 
 
-def update_attn_params(update_stream, forward_context, runtime_shape,
-                       vllm_config, in_parallel_streams: bool = False):
+def update_attn_params(update_stream, forward_context, runtime_shape, vllm_config, in_parallel_streams: bool = False):
     if has_dual_stream_attention_metadata(forward_context):
-        _update_attn_dual_fia_params(update_stream, forward_context,
-                                     runtime_shape,
-                                     in_parallel_streams=in_parallel_streams)
+        _update_attn_dual_fia_params(
+            update_stream, forward_context, runtime_shape, in_parallel_streams=in_parallel_streams
+        )
     elif using_paged_attention(runtime_shape, vllm_config):
-        _update_attn_pa_params(update_stream, forward_context, runtime_shape,
-                               in_parallel_streams=in_parallel_streams)
+        _update_attn_pa_params(update_stream, forward_context, runtime_shape, in_parallel_streams=in_parallel_streams)
     else:
-        _update_attn_fia_params(update_stream, forward_context, runtime_shape,
-                                in_parallel_streams=in_parallel_streams)
+        _update_attn_fia_params(update_stream, forward_context, runtime_shape, in_parallel_streams=in_parallel_streams)
 
 
-def update_attn_params_split(update_stream, forward_context,
-                             runtime_shape, vllm_config,
-                             in_parallel_streams: bool = False):
+def update_attn_params_split(
+    update_stream, forward_context, runtime_shape, vllm_config, in_parallel_streams: bool = False
+):
     if has_dual_stream_attention_metadata(forward_context):
         _update_attn_dual_fia_params(
             update_stream,
@@ -444,31 +448,31 @@ def update_attn_params_split(update_stream, forward_context,
         )
 
 
-def _update_attn_dual_fia_params(update_stream, forward_context,
-                                 runtime_shape,
-                                 refresh_block_table: bool = True,
-                                 in_parallel_streams: bool = False):
+def _update_attn_dual_fia_params(
+    update_stream, forward_context, runtime_shape, refresh_block_table: bool = True, in_parallel_streams: bool = False
+):
     from vllm_ascend.compilation.acl_graph import get_graph_params
+
     graph_params = get_graph_params(in_parallel_streams)
     if graph_params is None:
         return
     param_key = get_graph_param_key(forward_context, runtime_shape)
     if param_key not in graph_params.attn_params:
         return
-    require_graph_param_key(graph_params, param_key,
-                            op="_update_attn_dual_fia_params")
-    dual_metadata = getattr(forward_context,
-                            "dual_stream_attention_metadata", None)
+    require_graph_param_key(graph_params, param_key, op="_update_attn_dual_fia_params")
+    dual_metadata = getattr(forward_context, "dual_stream_attention_metadata", None)
     if not isinstance(dual_metadata, list) or len(dual_metadata) != 2:
         return
 
     with torch.npu.stream(update_stream):
-        attn_items = list(zip(
+        attn_items = list(
+            zip(
                 forward_context.attn_metadata,
                 graph_params.attn_params[param_key],
                 graph_params.handles[param_key],
                 graph_params.events[param_key],
-        ))
+            )
+        )
         for layer_idx, (key, param, handles, events) in enumerate(attn_items):
             if not isinstance(param, tuple) or len(param) < 2:
                 continue
@@ -493,44 +497,56 @@ def _update_attn_dual_fia_params(update_stream, forward_context,
 
                 split_update_params = []
                 for split_idx, split_param in enumerate(split_params):
-                    (query_view, key_cache, value, block_tables, attn_mask,
-                     block_size, seq_lens, query_start_loc, num_kv_heads,
-                     num_heads, scale, attn_output_view, softmax_lse,
-                     workspace_key) = split_param
+                    (
+                        query_view,
+                        key_cache,
+                        value,
+                        block_tables,
+                        attn_mask,
+                        block_size,
+                        seq_lens,
+                        query_start_loc,
+                        num_kv_heads,
+                        num_heads,
+                        scale,
+                        attn_output_view,
+                        softmax_lse,
+                        workspace_key,
+                    ) = split_param
 
                     metadata = dual_metadata[split_idx][key]
                     runtime_metadata = get_dual_attention_update_metadata(
-                        forward_context, dual_metadata, split_idx, key)
+                        forward_context, dual_metadata, split_idx, key
+                    )
                     seq_lens = maybe_template_fia_seq_lens(
                         forward_context,
-                        getattr(runtime_metadata, "seq_lens_list",
-                                metadata.seq_lens_list),
+                        getattr(runtime_metadata, "seq_lens_list", metadata.seq_lens_list),
                         _get_fia_key_t(key_cache, block_size),
-                        source=f"acl_graph_update_dual:{key}:{split_idx}")
+                        source=f"acl_graph_update_dual:{key}:{split_idx}",
+                    )
                     actual_seq_lengths_q = getattr(
-                        runtime_metadata, "actual_seq_lengths_q",
-                        metadata.actual_seq_lengths_q)
-                    metadata_block_table, _ = (
-                        extract_block_table_from_metadata(runtime_metadata))
+                        runtime_metadata, "actual_seq_lengths_q", metadata.actual_seq_lengths_q
+                    )
+                    metadata_block_table, _ = extract_block_table_from_metadata(runtime_metadata)
                     if refresh_block_table:
-                        refresh_block_table_in_place(
-                            block_tables, metadata_block_table)
+                        refresh_block_table_in_place(block_tables, metadata_block_table)
 
-                    split_update_params.append({
-                        "key_cache": key_cache,
-                        "value": value,
-                        "block_tables": block_tables,
-                        "attn_mask": attn_mask,
-                        "block_size": block_size,
-                        "seq_lens": seq_lens,
-                        "actual_seq_lengths_q": actual_seq_lengths_q,
-                        "num_kv_heads": num_kv_heads,
-                        "num_heads": num_heads,
-                        "scale": scale,
-                        "softmax_lse": softmax_lse,
-                        "workspace":
-                        graph_params.workspaces.get(workspace_key),
-                    })
+                    split_update_params.append(
+                        {
+                            "key_cache": key_cache,
+                            "value": value,
+                            "block_tables": block_tables,
+                            "attn_mask": attn_mask,
+                            "block_size": block_size,
+                            "seq_lens": seq_lens,
+                            "actual_seq_lengths_q": actual_seq_lengths_q,
+                            "num_kv_heads": num_kv_heads,
+                            "num_heads": num_heads,
+                            "scale": scale,
+                            "softmax_lse": softmax_lse,
+                            "workspace": graph_params.workspaces.get(workspace_key),
+                        }
+                    )
 
                 split0, split1 = split_update_params
                 split_start_0, split_graph_tokens_0 = split_ranges[0]
@@ -579,25 +595,37 @@ def _update_attn_dual_fia_params(update_stream, forward_context,
                     continue
 
                 for split_idx, split_param in enumerate(split_params):
-                    (query, key_cache, value, block_tables, attn_mask, block_size,
-                     seq_lens, query_start_loc, num_kv_heads, num_heads, scale,
-                     attn_output, softmax_lse, workspace_key) = split_param
+                    (
+                        query,
+                        key_cache,
+                        value,
+                        block_tables,
+                        attn_mask,
+                        block_size,
+                        seq_lens,
+                        query_start_loc,
+                        num_kv_heads,
+                        num_heads,
+                        scale,
+                        attn_output,
+                        softmax_lse,
+                        workspace_key,
+                    ) = split_param
 
                     metadata = dual_metadata[split_idx][key]
                     seq_lens = maybe_template_fia_seq_lens(
                         forward_context,
                         metadata.seq_lens_list,
                         _get_fia_key_t(key_cache, block_size),
-                        source=f"acl_graph_update_dual:{key}:{split_idx}")
+                        source=f"acl_graph_update_dual:{key}:{split_idx}",
+                    )
                     actual_seq_lengths_q = metadata.actual_seq_lengths_q
 
                     metadata_block_table, _ = extract_block_table_from_metadata(metadata)
                     if refresh_block_table:
-                        refresh_block_table_in_place(
-                            block_tables, metadata_block_table)
+                        refresh_block_table_in_place(block_tables, metadata_block_table)
 
-                    torch.npu.graph_task_update_begin(update_stream,
-                                                      handles[split_idx])
+                    torch.npu.graph_task_update_begin(update_stream, handles[split_idx])
                     torch_npu.npu_fused_infer_attention_score.out(
                         query=query,
                         key=key_cache,
@@ -619,29 +647,23 @@ def _update_attn_dual_fia_params(update_stream, forward_context,
                     events[split_idx].record(update_stream)
 
 
-def dual_stream_attention_plan_to_slices(
-    plan: Any,
-    query_len: int) -> tuple[list[Any], list[Any]]:
+def dual_stream_attention_plan_to_slices(plan: Any, query_len: int) -> tuple[list[Any], list[Any]]:
     from vllm.v1.worker.ubatch_utils import UBatchSlice
 
     from vllm_ascend.worker.inplace_split_utils import SplitBatchSlice
+
     query_len = int(query_len)
     if query_len <= 0:
-        raise RuntimeError(
-            "dual_stream_attention_config requires positive query_len")
+        raise RuntimeError("dual_stream_attention_config requires positive query_len")
     split_batch_slices: list[Any] = []
     for split_idx in range(2):
         token_start = int(plan.split_start_tokens[split_idx])
         actual_tokens = int(plan.split_actual_tokens[split_idx])
         graph_tokens = int(plan.split_graph_tokens[split_idx])
         if token_start % query_len != 0:
-            raise RuntimeError(
-                "dual_stream_attention_config split_start_tokens must be "
-                "request-aligned")
+            raise RuntimeError("dual_stream_attention_config split_start_tokens must be request-aligned")
         if actual_tokens % query_len != 0 or graph_tokens % query_len != 0:
-            raise RuntimeError(
-                "dual_stream_attention_config split tokens must be "
-                "request-aligned")
+            raise RuntimeError("dual_stream_attention_config split tokens must be request-aligned")
         request_start = token_start // query_len
         request_stop = request_start + actual_tokens // query_len
         split_batch_slices.append(
@@ -650,9 +672,7 @@ def dual_stream_attention_plan_to_slices(
                 token_slice=slice(token_start, token_start + actual_tokens),
                 padded_num_tokens=graph_tokens,
                 start_num_tokens=token_start,
-            ))
-    ubatch_slices = [
-        UBatchSlice(s.request_slice, s.token_slice)
-        for s in split_batch_slices
-    ]
+            )
+        )
+    ubatch_slices = [UBatchSlice(s.request_slice, s.token_slice) for s in split_batch_slices]
     return split_batch_slices, ubatch_slices

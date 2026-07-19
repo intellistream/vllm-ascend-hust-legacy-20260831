@@ -69,20 +69,18 @@ def collect_tensor_arg_infos(
         if ptr is None:
             ptr = -1
         addresses.append(ptr)
-        tensor_infos.append({
-            "tensor_index": len(addresses) - 1,
-            "arg_index": arg_index,
-            "arg_name": (
-                arg_names[arg_index]
-                if arg_names is not None and arg_index < len(arg_names)
-                else None
-            ),
-            "shape": safe_tensor_shape(arg),
-            "dtype": str(arg.dtype),
-            "device": str(arg.device),
-            "stride": list(arg.stride()),
-            "is_contiguous": bool(arg.is_contiguous()),
-        })
+        tensor_infos.append(
+            {
+                "tensor_index": len(addresses) - 1,
+                "arg_index": arg_index,
+                "arg_name": (arg_names[arg_index] if arg_names is not None and arg_index < len(arg_names) else None),
+                "shape": safe_tensor_shape(arg),
+                "dtype": str(arg.dtype),
+                "device": str(arg.device),
+                "stride": list(arg.stride()),
+                "is_contiguous": bool(arg.is_contiguous()),
+            }
+        )
     return addresses, tensor_infos
 
 
@@ -104,16 +102,18 @@ def collect_attn_metadata_tensor_infos(
             if ptr is None:
                 ptr = -1
             addresses.append(ptr)
-            tensor_infos.append({
-                "tensor_index": len(addresses) - 1,
-                "path": path,
-                "shape": safe_tensor_shape(value),
-                "dtype": str(value.dtype),
-                "device": str(value.device),
-                "stride": list(value.stride()),
-                "is_contiguous": bool(value.is_contiguous()),
-                "storage_offset": int(value.storage_offset()),
-            })
+            tensor_infos.append(
+                {
+                    "tensor_index": len(addresses) - 1,
+                    "path": path,
+                    "shape": safe_tensor_shape(value),
+                    "dtype": str(value.dtype),
+                    "device": str(value.device),
+                    "stride": list(value.stride()),
+                    "is_contiguous": bool(value.is_contiguous()),
+                    "storage_offset": int(value.storage_offset()),
+                }
+            )
             return
 
         if value is None or isinstance(value, (str, bytes, int, float, bool)):
@@ -133,8 +133,7 @@ def collect_attn_metadata_tensor_infos(
             return
         if dataclasses.is_dataclass(value):
             for fld in dataclasses.fields(value):
-                visit(getattr(value, fld.name, None),
-                      f"{path}.{fld.name}", depth + 1)
+                visit(getattr(value, fld.name, None), f"{path}.{fld.name}", depth + 1)
             return
 
         attrs = getattr(value, "__dict__", None)
@@ -149,8 +148,7 @@ def collect_attn_metadata_tensor_infos(
 
 
 def should_validate_inplace_metadata_ptrs(forward_context: Any) -> bool:
-    return bool(getattr(forward_context, "validate_inplace_metadata_ptrs",
-                        False))
+    return bool(getattr(forward_context, "validate_inplace_metadata_ptrs", False))
 
 
 def validate_input_addresses(
@@ -162,14 +160,12 @@ def validate_input_addresses(
         return
     new_input_addresses = [x.data_ptr() for x in current_args if isinstance(x, torch.Tensor)]
     if new_input_addresses != entry_input_addresses:
-        assert entry_input_addresses is not None, (
-            "input_addresses not recorded during capture")
+        assert entry_input_addresses is not None, "input_addresses not recorded during capture"
         assert len(new_input_addresses) == len(entry_input_addresses), (
-            f"Input address count mismatch: expected "
-            f"{len(entry_input_addresses)}, got {len(new_input_addresses)}")
-        for i, (new_addr, cached_addr) in enumerate(
-                zip(new_input_addresses, entry_input_addresses)):
+            f"Input address count mismatch: expected {len(entry_input_addresses)}, got {len(new_input_addresses)}"
+        )
+        for i, (new_addr, cached_addr) in enumerate(zip(new_input_addresses, entry_input_addresses)):
             if new_addr != cached_addr:
                 raise AssertionError(
-                    f"Input address mismatch at index {i}: "
-                    f"expected {cached_addr:#x}, got {new_addr:#x}")
+                    f"Input address mismatch at index {i}: expected {cached_addr:#x}, got {new_addr:#x}"
+                )

@@ -167,6 +167,7 @@ from vllm_ascend.worker.inplace_split_ops import (
     clone_attn_metadata_block_tables,
 )
 from vllm_ascend.worker.inplace_split_runner import InplaceSplitRunner
+from vllm_ascend.worker.inplace_split_utils import should_stabilize_inplace_metadata
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
@@ -2208,7 +2209,7 @@ class NPUModelRunner(GPUModelRunner):
                     "DUAL_INPLACE check: enabled=%s, mode=%s, cudagraph_mode=%s",
                     split_batch_config.enabled, split_batch_config.mode, cudagraph_mode,
                 )
-                if split_batch_config.enabled and cudagraph_mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
+                if split_batch_config.enabled:
                     is_mla = self.model_config.use_mla
                     is_mrope = getattr(self.model_config.hf_text_config, "rope_scaling", None) is not None and getattr(
                         self.model_config.hf_text_config, "rope_type", ""
@@ -2231,6 +2232,14 @@ class NPUModelRunner(GPUModelRunner):
                         is_mrope=is_mrope,
                         spec_decode_enabled=use_spec_decode,
                         cudagraph_capture_sizes=capture_sizes,
+                        dp_world_size=self.parallel_config.data_parallel_size,
+                        has_gdn_or_hybrid=(
+                            self._has_gdn
+                            or self.cache_config.mamba_cache_mode != "none"
+                        ),
+                        sp_enabled=enable_sp(self.vllm_config),
+                        context_parallel_enabled=self.pcp_size * self.dcp_size > 1,
+                        tensor_parallel_size=self.parallel_config.tensor_parallel_size,
                     )
                 ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
                     should_ubatch,
@@ -3426,10 +3435,12 @@ class NPUModelRunner(GPUModelRunner):
 
                 common_attn_metadata_list = split_attn_metadata(
                     split_ubatch_slices_for_metadata, cm, self.max_num_tokens)
-                common_attn_metadata_list = self._inplace_split_runner._stabilize_inplace_common_attn_metadata_list(
-                    common_attn_metadata_list,
-                    split_mode=split_mode or "",
-                    inplace_split_plan=inplace_split_plan)
+                if should_stabilize_inplace_metadata(inplace_split_plan):
+                    assert self._inplace_split_runner is not None
+                    common_attn_metadata_list = self._inplace_split_runner._stabilize_inplace_common_attn_metadata_list(
+                        common_attn_metadata_list,
+                        split_mode=split_mode or "",
+                        inplace_split_plan=inplace_split_plan)
                 for ubid, cm_i in enumerate(common_attn_metadata_list):
 
                     if self._has_gdn:

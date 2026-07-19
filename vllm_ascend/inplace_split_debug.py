@@ -65,6 +65,7 @@ def log_event(
 
 def tensor_info(tensor: Any) -> dict[str, Any] | None:
     import torch
+
     if not isinstance(tensor, torch.Tensor):
         return None
     return {

@@ -21,6 +21,7 @@ from typing import Any
 import torch
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend.utils import enable_sp
 
@@ -48,8 +49,7 @@ def clone_attn_metadata_block_tables(attn_metadata: Any) -> Any:
         return {k: _clone_single(v) for k, v in attn_metadata.items()}
     if isinstance(attn_metadata, list):
         return [
-            {k: _clone_single(v) for k, v in d.items()}
-            if isinstance(d, dict) else _clone_single(d)
+            {k: _clone_single(v) for k, v in d.items()} if isinstance(d, dict) else _clone_single(d)
             for d in attn_metadata
         ]
     return _clone_single(attn_metadata)
@@ -69,7 +69,6 @@ def dual_stream_attention_config(split_cfg: Any) -> Any:
     if split_cfg is None:
         return None
     return getattr(split_cfg, "dual_stream_attention_config", None)
-
 
 
 def slice_split_batch_inputs(
@@ -96,7 +95,6 @@ def slice_split_batch_inputs(
     else:
         sliced_intermediate_tensors = None
     return sliced_input_ids, sliced_positions, sliced_inputs_embeds, sliced_intermediate_tensors
-
 
 
 def expand_tensor_view_for_graph_slice(
@@ -128,14 +126,15 @@ def expand_tensor_view_for_graph_slice(
             storage_offset=tensor.storage_offset(),
         )
     except RuntimeError:
-        if (isinstance(backing_tensor, torch.Tensor)
-                and int(backing_tensor.shape[dim])
-                >= int(backing_start) + graph_size):
+        if (
+            isinstance(backing_tensor, torch.Tensor)
+            and int(backing_tensor.shape[dim]) >= int(backing_start) + graph_size
+        ):
             stop = int(backing_start) + graph_size
             if dim == 0:
-                return backing_tensor[int(backing_start):stop]
+                return backing_tensor[int(backing_start) : stop]
             if dim == 1:
-                return backing_tensor[:, int(backing_start):stop]
+                return backing_tensor[:, int(backing_start) : stop]
             raise ValueError(f"Unsupported dim={dim} for {name}")
         if allow_copy:
             expanded = tensor.new_zeros(tuple(shape))
@@ -149,7 +148,8 @@ def expand_tensor_view_for_graph_slice(
             f"tensor_shape={tuple(tensor.shape)}, "
             f"tensor_storage_offset={int(tensor.storage_offset())}, "
             f"backing_start={int(backing_start)}, "
-            f"backing_shape={(None if backing_tensor is None else tuple(backing_tensor.shape))}")
+            f"backing_shape={(None if backing_tensor is None else tuple(backing_tensor.shape))}"
+        )
 
 
 def fill_tensor_local_tail(
@@ -169,11 +169,15 @@ def fill_tensor_local_tail(
         raise RuntimeError(
             f"Inplace offset padded local tail for {name} exceeds tensor "
             f"shape: tail_stop={stop}, shape={tuple(tensor.shape)}, "
-            f"dim={dim}")
+            f"dim={dim}"
+        )
+    from vllm_ascend.worker.inplace_split_utils import padding_fill_value
+
+    fill_value = padding_fill_value(name, pad_slot_id=PAD_SLOT_ID)
     if dim == 0:
-        tensor[start:stop].fill_(0)
+        tensor[start:stop].fill_(fill_value)
     elif dim == 1:
-        tensor[:, start:stop].fill_(0)
+        tensor[:, start:stop].fill_(fill_value)
     else:
         raise ValueError(f"Unsupported dim={dim} for {name}")
     return True
@@ -187,7 +191,10 @@ def pad_query_start_loc_for_graph(
     if not isinstance(tensor, torch.Tensor) or pad_reqs <= 0:
         return tensor
     increments = torch.arange(
-        1, pad_reqs + 1, dtype=tensor.dtype, device=tensor.device,
+        1,
+        pad_reqs + 1,
+        dtype=tensor.dtype,
+        device=tensor.device,
     ) * int(query_len)
     return torch.cat([tensor, tensor[-1] + increments], dim=0)
 
@@ -232,8 +239,7 @@ def stabilize_inplace_common_attn_metadata(
     if split_slice is not None and split_slice.start_num_tokens > 0:
         actual_tokens = int(split_slice.num_tokens)
         graph_tokens = int(split_slice.graph_num_tokens)
-        query_len = int(getattr(common, "decode_token_per_req", 0)
-                       or uniform_decode_query_len or 1)
+        query_len = int(getattr(common, "decode_token_per_req", 0) or uniform_decode_query_len or 1)
         if query_len <= 0:
             query_len = 1
         actual_reqs = int(common.num_reqs)
@@ -241,65 +247,96 @@ def stabilize_inplace_common_attn_metadata(
         pad_reqs = graph_reqs - actual_reqs
 
         padded_common = copy(common)
-        padded_common.query_start_loc = pad_query_start_loc_for_graph(
-            common.query_start_loc, pad_reqs, query_len)
+        padded_common.query_start_loc = pad_query_start_loc_for_graph(common.query_start_loc, pad_reqs, query_len)
         padded_common.query_start_loc_cpu = pad_query_start_loc_for_graph(
-            common.query_start_loc_cpu, pad_reqs, query_len)
+            common.query_start_loc_cpu, pad_reqs, query_len
+        )
 
-        padded_common.seq_lens = expand_tensor_view_for_graph_slice(
-            common.seq_lens, graph_reqs, name="seq_lens")
+        padded_common.seq_lens = expand_tensor_view_for_graph_slice(common.seq_lens, graph_reqs, name="seq_lens")
         padded_common.seq_lens_cpu = expand_tensor_view_for_graph_slice(
-            common.seq_lens_cpu, graph_reqs, name="seq_lens_cpu")
+            common.seq_lens_cpu, graph_reqs, name="seq_lens_cpu"
+        )
         _seq_lens_cpu = getattr(common, "_seq_lens_cpu", None)
         if _seq_lens_cpu is not None:
             padded_common._seq_lens_cpu = expand_tensor_view_for_graph_slice(
-                _seq_lens_cpu, graph_reqs, name="_seq_lens_cpu")
+                _seq_lens_cpu, graph_reqs, name="_seq_lens_cpu"
+            )
         padded_common.num_computed_tokens_cpu = expand_tensor_view_for_graph_slice(
-            common.num_computed_tokens_cpu, graph_reqs,
-            name="num_computed_tokens_cpu")
+            common.num_computed_tokens_cpu, graph_reqs, name="num_computed_tokens_cpu"
+        )
         padded_common.block_table_tensor = expand_tensor_view_for_graph_slice(
-            common.block_table_tensor, graph_reqs,
-            name="block_table_tensor")
+            common.block_table_tensor, graph_reqs, name="block_table_tensor"
+        )
         padded_common.slot_mapping = expand_tensor_view_for_graph_slice(
-            common.slot_mapping, graph_tokens, name="slot_mapping")
+            common.slot_mapping, graph_tokens, name="slot_mapping"
+        )
+        for field_name in ("seq_lens_cpu_upper_bound", "is_prefilling"):
+            field_value = getattr(common, field_name, None)
+            if field_value is not None:
+                setattr(
+                    padded_common,
+                    field_name,
+                    expand_tensor_view_for_graph_slice(field_value, graph_reqs, name=field_name),
+                )
+        slot_mapping_cpu = getattr(common, "slot_mapping_cpu", None)
+        if slot_mapping_cpu is not None:
+            padded_common.slot_mapping_cpu = expand_tensor_view_for_graph_slice(
+                slot_mapping_cpu, graph_tokens, name="slot_mapping_cpu"
+            )
+        positions_cpu = getattr(common, "positions_cpu", None)
+        positions_cpu_dim = 1 if isinstance(positions_cpu, torch.Tensor) and positions_cpu.ndim == 2 else 0
+        if positions_cpu is not None:
+            padded_common.positions_cpu = expand_tensor_view_for_graph_slice(
+                positions_cpu,
+                graph_tokens,
+                name="positions_cpu",
+                dim=positions_cpu_dim,
+            )
         padded_common.positions = metadata_positions_for_graph_slice(
-            common.positions, split_slice,
-            mrope_positions_gpu=mrope_positions_gpu,
-            positions_gpu=positions_gpu)
+            common.positions, split_slice, mrope_positions_gpu=mrope_positions_gpu, positions_gpu=positions_gpu
+        )
 
         if fill_padding:
-            fill_tensor_local_tail(
-                padded_common.seq_lens, actual_reqs, graph_reqs,
-                name="seq_lens")
-            fill_tensor_local_tail(
-                padded_common.seq_lens_cpu, actual_reqs, graph_reqs,
-                name="seq_lens_cpu")
+            fill_tensor_local_tail(padded_common.seq_lens, actual_reqs, graph_reqs, name="seq_lens")
+            fill_tensor_local_tail(padded_common.seq_lens_cpu, actual_reqs, graph_reqs, name="seq_lens_cpu")
             if getattr(padded_common, "_seq_lens_cpu", None) is not None:
+                fill_tensor_local_tail(padded_common._seq_lens_cpu, actual_reqs, graph_reqs, name="_seq_lens_cpu")
+            fill_tensor_local_tail(
+                padded_common.num_computed_tokens_cpu, actual_reqs, graph_reqs, name="num_computed_tokens_cpu"
+            )
+            fill_tensor_local_tail(padded_common.block_table_tensor, actual_reqs, graph_reqs, name="block_table_tensor")
+            fill_tensor_local_tail(padded_common.slot_mapping, actual_tokens, graph_tokens, name="slot_mapping")
+            for field_name in ("seq_lens_cpu_upper_bound", "is_prefilling"):
+                field_value = getattr(padded_common, field_name, None)
+                if field_value is not None:
+                    fill_tensor_local_tail(field_value, actual_reqs, graph_reqs, name=field_name)
+            if getattr(padded_common, "slot_mapping_cpu", None) is not None:
                 fill_tensor_local_tail(
-                    padded_common._seq_lens_cpu, actual_reqs, graph_reqs,
-                    name="_seq_lens_cpu")
+                    padded_common.slot_mapping_cpu,
+                    actual_tokens,
+                    graph_tokens,
+                    name="slot_mapping",
+                )
+            if getattr(padded_common, "positions_cpu", None) is not None:
+                fill_tensor_local_tail(
+                    padded_common.positions_cpu,
+                    actual_tokens,
+                    graph_tokens,
+                    name="positions_cpu",
+                    dim=positions_cpu_dim,
+                )
+            positions_dim = (
+                1 if (isinstance(padded_common.positions, torch.Tensor) and padded_common.positions.ndim == 2) else 0
+            )
             fill_tensor_local_tail(
-                padded_common.num_computed_tokens_cpu, actual_reqs,
-                graph_reqs, name="num_computed_tokens_cpu")
-            fill_tensor_local_tail(
-                padded_common.block_table_tensor, actual_reqs,
-                graph_reqs, name="block_table_tensor")
-            fill_tensor_local_tail(
-                padded_common.slot_mapping, actual_tokens, graph_tokens,
-                name="slot_mapping")
-            positions_dim = 1 if (
-                isinstance(padded_common.positions, torch.Tensor)
-                and padded_common.positions.ndim == 2) else 0
-            fill_tensor_local_tail(
-                padded_common.positions, actual_tokens, graph_tokens,
-                name="positions", dim=positions_dim)
+                padded_common.positions, actual_tokens, graph_tokens, name="positions", dim=positions_dim
+            )
 
         padded_common.num_reqs = graph_reqs
         padded_common.num_actual_tokens = graph_tokens
         padded_common.num_input_tokens = graph_tokens
         padded_common.max_query_len = max(int(common.max_query_len), query_len)
-        padded_common.actual_seq_lengths_q = list(
-            range(query_len, graph_tokens + 1, query_len))
+        padded_common.actual_seq_lengths_q = list(range(query_len, graph_tokens + 1, query_len))
         padded_common.graph_pad_size = graph_reqs
         return padded_common
     return common
@@ -326,7 +363,9 @@ def stabilize_inplace_common_attn_metadata_list(
                 split_slice=split_slice,
                 uniform_decode_query_len=uniform_decode_query_len,
                 mrope_positions_gpu=mrope_positions_gpu,
-                positions_gpu=positions_gpu))
+                positions_gpu=positions_gpu,
+            )
+        )
     return stabilized
 
 
@@ -365,10 +404,7 @@ def merge_split_outputs(outputs: list[Any]) -> Any:
     if isinstance(first, (list, tuple)):
         if any(len(output) != len(first) for output in outputs):
             raise RuntimeError("Cannot merge split outputs with different container lengths")
-        merged = [
-            merge_split_outputs([output[idx] for output in outputs])
-            for idx in range(len(first))
-        ]
+        merged = [merge_split_outputs([output[idx] for output in outputs]) for idx in range(len(first))]
         return type(first)(merged)
     return first
 
@@ -406,7 +442,8 @@ def fill_tensor_token_tail(
         raise RuntimeError(
             f"Inplace offset padded tail for {name} exceeds tensor "
             f"shape: tail_stop={tail_slice.stop}, "
-            f"shape={tuple(tensor.shape)}, token_dim={token_dim}")
+            f"shape={tuple(tensor.shape)}, token_dim={token_dim}"
+        )
     if token_dim == 0:
         tensor[tail_slice].fill_(0)
     elif token_dim == 1:
@@ -433,13 +470,15 @@ def maybe_expand_tensor_for_graph_slice(
             f"Inplace offset graph requires input backing buffer: "
             f"name={name}, graph_stop={int(graph_stop)}, "
             f"tensor_shape={tuple(tensor.shape)}, token_dim={token_dim}, "
-            f"backing_shape=None")
+            f"backing_shape=None"
+        )
     if graph_stop > int(backing_tensor.shape[token_dim]):
         raise RuntimeError(
             f"Inplace offset graph input backing buffer is too small: "
             f"name={name}, graph_stop={int(graph_stop)}, "
             f"tensor_shape={tuple(tensor.shape)}, token_dim={token_dim}, "
-            f"backing_shape={tuple(backing_tensor.shape)}")
+            f"backing_shape={tuple(backing_tensor.shape)}"
+        )
     if token_dim == 0:
         return backing_tensor[:graph_stop]
     if token_dim == 1:
@@ -455,7 +494,5 @@ def tokens_slice_for_inplace_execution(split_slice: Any) -> slice:
 
 def context_ubatch_slices_for_inplace(split_batch_slices) -> list:
     from vllm.v1.worker.ubatch_utils import UBatchSlice
-    return [
-        UBatchSlice(s.request_slice, tokens_slice_for_inplace_execution(s))
-        for s in split_batch_slices
-    ]
+
+    return [UBatchSlice(s.request_slice, tokens_slice_for_inplace_execution(s)) for s in split_batch_slices]

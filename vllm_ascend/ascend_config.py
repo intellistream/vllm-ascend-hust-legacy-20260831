@@ -111,9 +111,7 @@ class AscendConfig:
                 "utility_preempt_weight": additional_config.get(
                     "utility_preempt_weight", ascend_envs.VLLM_ASCEND_UTILITY_PREEMPT_WEIGHT
                 ),
-                "utility_kv_gate": additional_config.get(
-                    "utility_kv_gate", ascend_envs.VLLM_ASCEND_UTILITY_KV_GATE
-                ),
+                "utility_kv_gate": additional_config.get("utility_kv_gate", ascend_envs.VLLM_ASCEND_UTILITY_KV_GATE),
                 "utility_cooldown_s": additional_config.get(
                     "utility_cooldown_s", ascend_envs.VLLM_ASCEND_UTILITY_COOLDOWN_S
                 ),
@@ -130,9 +128,7 @@ class AscendConfig:
                     "utility_snapshot_history_size",
                     ascend_envs.VLLM_ASCEND_UTILITY_SNAPSHOT_HISTORY_SIZE,
                 ),
-                "utility_epsilon": additional_config.get(
-                    "utility_epsilon", default_utility_cfg.utility_epsilon
-                ),
+                "utility_epsilon": additional_config.get("utility_epsilon", default_utility_cfg.utility_epsilon),
                 "utility_default_max_tokens": additional_config.get(
                     "utility_default_max_tokens",
                     default_utility_cfg.utility_default_max_tokens,
@@ -978,14 +974,10 @@ class SplitBatchConfig:
         if split_batch_config is None:
             split_batch_config = {}
         self.enabled: bool = bool(split_batch_config.get("enabled", False))
-        self.enable_parallel_streams: bool = bool(
-            split_batch_config.get("enable_parallel_streams", False)
-        )
+        self.enable_parallel_streams: bool = bool(split_batch_config.get("enable_parallel_streams", False))
         self.mode: str = str(split_batch_config.get("mode", "parallel_buffer"))
         self.num_splits: int = int(split_batch_config.get("num_splits", 2))
-        self.min_batch_size_for_split: int = int(
-            split_batch_config.get("min_batch_size_for_split", 4)
-        )
+        self.min_batch_size_for_split: int = int(split_batch_config.get("min_batch_size_for_split", 4))
 
         raw_parallel_sizes = split_batch_config.get("parallel_capture_sizes")
         if raw_parallel_sizes is not None:
@@ -993,9 +985,7 @@ class SplitBatchConfig:
         else:
             self.parallel_capture_sizes = None
 
-        self.enable_inplace_lazy_capture: bool = bool(
-            split_batch_config.get("enable_inplace_lazy_capture", True)
-        )
+        self.enable_inplace_lazy_capture: bool = bool(split_batch_config.get("enable_inplace_lazy_capture", True))
 
         self.inplace_parallel_replay_policy: str = str(
             split_batch_config.get("inplace_parallel_replay_policy", "full_graph_parallel")
@@ -1004,34 +994,24 @@ class SplitBatchConfig:
         self.inplace_validate_metadata_ptrs: bool = bool(
             split_batch_config.get("inplace_validate_metadata_ptrs", False)
         )
-        self.inplace_force_pa_for_offset: bool = bool(
-            split_batch_config.get("inplace_force_pa_for_offset", False)
-        )
-        self.enable_inplace_spec_decode: bool = bool(
-            split_batch_config.get("enable_inplace_spec_decode", False)
-        )
-        self.enable_inplace_mrope: bool = bool(
-            split_batch_config.get("enable_inplace_mrope", False)
-        )
+        self.inplace_force_pa_for_offset: bool = bool(split_batch_config.get("inplace_force_pa_for_offset", False))
+        self.enable_inplace_spec_decode: bool = bool(split_batch_config.get("enable_inplace_spec_decode", False))
+        self.enable_inplace_mrope: bool = bool(split_batch_config.get("enable_inplace_mrope", False))
         self.inplace_split_planner_policy: str = str(
-            split_batch_config.get("inplace_split_planner_policy",
-                                   split_batch_config.get("inplace_split_first_tokens_policy", "largest_lower"))
+            split_batch_config.get(
+                "inplace_split_planner_policy",
+                split_batch_config.get("inplace_split_first_tokens_policy", "largest_lower"),
+            )
         )
-        self.inplace_offset_match_policy: str = str(
-            split_batch_config.get("inplace_offset_match_policy", "exact")
-        )
+        self.inplace_offset_match_policy: str = str(split_batch_config.get("inplace_offset_match_policy", "exact"))
 
         raw_offset_capture_sizes = split_batch_config.get("inplace_offset_capture_sizes")
         if raw_offset_capture_sizes is not None:
-            self.inplace_offset_capture_sizes: list[int] | None = sorted(
-                int(s) for s in raw_offset_capture_sizes
-            )
+            self.inplace_offset_capture_sizes: list[int] | None = sorted(int(s) for s in raw_offset_capture_sizes)
         else:
             self.inplace_offset_capture_sizes = None
 
-        self.inplace_offset_min_graph_tokens: int = int(
-            split_batch_config.get("inplace_offset_min_graph_tokens", 1)
-        )
+        self.inplace_offset_min_graph_tokens: int = int(split_batch_config.get("inplace_offset_min_graph_tokens", 1))
 
         raw_max_pad_tokens = split_batch_config.get("inplace_offset_max_padding_tokens")
         self.inplace_offset_max_padding_tokens: int | None = (
@@ -1069,13 +1049,22 @@ class SplitBatchConfig:
     def _validate(self):
         valid_modes = ("parallel_buffer", "inplace_serial", "inplace_parallel")
         if self.mode not in valid_modes:
-            raise ValueError(
-                f"split_batch_config.mode must be one of {valid_modes}, got '{self.mode}'"
-            )
+            raise ValueError(f"split_batch_config.mode must be one of {valid_modes}, got '{self.mode}'")
         if self.mode in ("inplace_serial", "inplace_parallel") and self.num_splits != 2:
-            raise ValueError(
-                f"split_batch_config.num_splits must be 2 for inplace modes, got {self.num_splits}"
-            )
+            raise ValueError(f"split_batch_config.num_splits must be 2 for inplace modes, got {self.num_splits}")
+        from vllm_ascend.worker.inplace_split_utils import (
+            validate_inplace_split_config_values,
+        )
+
+        validate_inplace_split_config_values(
+            enabled=self.enabled,
+            mode=self.mode,
+            num_splits=self.num_splits,
+            enable_parallel_streams=self.enable_parallel_streams,
+            enable_inplace_spec_decode=self.enable_inplace_spec_decode,
+            enable_inplace_mrope=self.enable_inplace_mrope,
+            replay_policy=self.inplace_parallel_replay_policy,
+        )
         valid_offset_policies = ("exact", "bucket")
         if self.inplace_offset_match_policy not in valid_offset_policies:
             raise ValueError(
@@ -1089,15 +1078,9 @@ class SplitBatchConfig:
                 f"{valid_replay_policies}, got '{self.inplace_parallel_replay_policy}'"
             )
 
-        if (self.inplace_parallel_replay_policy == "piecewise_attention_parallel"
-                and self.mode == "inplace_parallel"):
-            logger.info(
-                "piecewise_attention_parallel enabled; ensure cudagraph_mode "
-                "is set to PIECEWISE at runtime")
         valid_planner_policies = ("largest_lower", "balanced")
         if self.inplace_split_planner_policy not in valid_planner_policies:
             raise ValueError(
                 f"split_batch_config.inplace_split_planner_policy must be one of "
                 f"{valid_planner_policies}, got '{self.inplace_split_planner_policy}'"
             )
-
