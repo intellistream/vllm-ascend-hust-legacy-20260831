@@ -240,13 +240,11 @@ jobs:
     needs: lint-and-select-tests
     if: ${{ needs.lint-and-select-tests.outputs.packaging_changed == 'true' && contains(github.event.pull_request.labels.*.name, 'e2e') }}
     runs-on: linux-aarch64-a2b3-1
-    timeout-minutes: 30
+    timeout-minutes: 45
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
       env:
         UV_INDEX_URL: https://pypi.org/simple
-        UV_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        UV_INDEX_STRATEGY: unsafe-best-match
         UV_HTTP_TIMEOUT: 120
         UV_NO_CACHE: 1
     steps:
@@ -269,7 +267,10 @@ jobs:
             --python .venv-dual-editable/bin/python \
             -e ./vllm-hust \
             --torch-backend=auto
-          COMPILE_CUSTOM_KERNELS=0 uv pip install \
+          COMPILE_CUSTOM_KERNELS=0 \
+          UV_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi \
+          UV_INDEX_STRATEGY=unsafe-best-match \
+            uv pip install \
             --python .venv-dual-editable/bin/python \
             -e .
           .venv-dual-editable/bin/python -m pytest --noconftest \
