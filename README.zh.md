@@ -116,23 +116,30 @@ git rev-list --left-right --count origin/main...upstream/main
 cd /path/to/vllm-hust
 uv venv --python 3.12
 source .venv/bin/activate
-VLLM_TARGET_DEVICE=empty uv pip install -e . --torch-backend=auto
+uv pip install \
+  -r requirements/common.txt \
+  -r /path/to/vllm-ascend-hust/requirements.txt \
+  -r requirements/build/empty.txt \
+  --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+  --index-strategy unsafe-best-match
+VLLM_TARGET_DEVICE=empty uv pip install -e . \
+  --no-build-isolation --no-deps
 ```
 
-`VLLM_TARGET_DEVICE=empty` 只安装核心 Python 包，不选择 CUDA 预编译 wheel；
-运行时平台由 Ascend 插件提供。
+第一条命令在同一环境中安装 core 通用运行时依赖、Ascend 选定的 Torch/NPU
+运行时，以及 `empty` 目标所需且不含 Torch 的构建工具。随后安装 core editable
+包时可直接复用这些依赖，不会选择 CUDA wheel，也不会触发通用 PEP 517 中的
+Torch 2.11 构建依赖。
 
 再安装 Ascend 插件：
 
 ```bash
 cd /path/to/vllm-ascend-hust
-COMPILE_CUSTOM_KERNELS=0 uv pip install -e . \
-  --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-  --index-strategy unsafe-best-match
+COMPILE_CUSTOM_KERNELS=0 uv pip install -e . --no-deps
 ```
 
-可信的 Ascend 软件源提供 `torch-npu` 和 `triton-ascend`；该索引策略允许 `uv`
-在 PyPI 与 Ascend 软件源之间选择兼容版本。
+插件仍使用正常的隔离构建。由于上一步已经统一解析并安装目标运行时依赖，
+这里使用 `--no-deps` 不会遗漏运行时包。
 
 在 HUST 本地机器上，优先使用仓库自带安装脚本：
 

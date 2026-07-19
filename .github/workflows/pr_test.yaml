@@ -255,8 +255,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: vLLM-HUST/vllm-hust
-          # Paired aarch64 build-requirement fix: vLLM-HUST/vllm-hust#136.
-          ref: 7713d59fc0aa07fcce5959b8e37ab7dd103c0e3f
+          ref: main
           path: vllm-hust
 
       - name: Create clean Python environment
@@ -264,11 +263,15 @@ jobs:
           python3 -m pip install uv
           uv venv --python 3.12 .venv-dual-editable
 
-      - name: Install paired vllm-hust runtime dependencies
+      - name: Install Ascend target runtime and core build dependencies
         run: |
-          uv pip install \
+          UV_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi \
+          UV_INDEX_STRATEGY=unsafe-best-match \
+            uv pip install \
             --python .venv-dual-editable/bin/python \
-            -r ./vllm-hust/requirements/cpu.txt \
+            -r ./vllm-hust/requirements/common.txt \
+            -r ./requirements.txt \
+            -r ./vllm-hust/requirements/build/empty.txt \
             --verbose
 
       - name: Install paired vllm-hust editable
@@ -276,6 +279,7 @@ jobs:
           VLLM_TARGET_DEVICE=empty uv pip install \
             --python .venv-dual-editable/bin/python \
             -e ./vllm-hust \
+            --no-build-isolation \
             --no-deps \
             --verbose
 
@@ -283,11 +287,10 @@ jobs:
         run: |
           COMPILE_CUSTOM_KERNELS=0 \
           SOC_VERSION=ascend910b1 \
-          UV_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi \
-          UV_INDEX_STRATEGY=unsafe-best-match \
             uv pip install \
             --python .venv-dual-editable/bin/python \
             -e . \
+            --no-deps \
             --verbose
 
       - name: Validate metadata, imports, and dependencies

@@ -119,23 +119,31 @@ system `python3` or bare `pip`.
 cd /path/to/vllm-hust
 uv venv --python 3.12
 source .venv/bin/activate
-VLLM_TARGET_DEVICE=empty uv pip install -e . --torch-backend=auto
+uv pip install \
+  -r requirements/common.txt \
+  -r /path/to/vllm-ascend-hust/requirements.txt \
+  -r requirements/build/empty.txt \
+  --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+  --index-strategy unsafe-best-match
+VLLM_TARGET_DEVICE=empty uv pip install -e . \
+  --no-build-isolation --no-deps
 ```
 
-`VLLM_TARGET_DEVICE=empty` installs the core Python package without selecting a
-CUDA precompiled wheel. The Ascend plugin supplies the runtime platform.
+The first command installs the core common runtime, the Ascend-selected
+Torch/NPU runtime, and the Torch-free build tools for the `empty` target into
+one environment. The core editable install can then reuse those packages
+without selecting a CUDA wheel or invoking the generic PEP 517 Torch 2.11
+requirement.
 
 Then install this plugin:
 
 ```bash
 cd /path/to/vllm-ascend-hust
-COMPILE_CUSTOM_KERNELS=0 uv pip install -e . \
-  --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-  --index-strategy unsafe-best-match
+COMPILE_CUSTOM_KERNELS=0 uv pip install -e . --no-deps
 ```
 
-The trusted Ascend index provides `torch-npu` and `triton-ascend`. The index
-strategy lets `uv` select compatible versions across PyPI and that index.
+The plugin keeps its normal isolated build. `--no-deps` is safe here because
+the target runtime requirements were installed and resolved together above.
 
 On HUST local hosts, prefer the repository install helper:
 
