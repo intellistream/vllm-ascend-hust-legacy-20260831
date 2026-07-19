@@ -3799,7 +3799,7 @@ class NPUModelRunner(GPUModelRunner):
                 has_sinks = self._has_sinks,
                 input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
-                in_parallel_streams=in_parallel_streams,
+                is_secondary_stream=in_parallel_streams,
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds

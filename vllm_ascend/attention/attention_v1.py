@@ -469,7 +469,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 else:
                     graph_params = get_draft_graph_params()
             else:
-                in_parallel_streams = bool(getattr(forward_context, "in_parallel_streams", False))
+                in_parallel_streams = forward_context.is_secondary_stream
                 graph_params = get_graph_params(in_parallel_streams)
             with torch.npu.stream(update_stream):
                 for key, param, handle, event in zip(
@@ -529,7 +529,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 ]
                 attn_keys = [key for _, key in draft_attn_key_steps]
             else:
-                in_parallel_streams = bool(getattr(forward_context, "in_parallel_streams", False))
+                in_parallel_streams = forward_context.is_secondary_stream
                 graph_params = get_graph_params(in_parallel_streams)
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
@@ -635,7 +635,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 ]
                 attn_keys = [key for _, key in draft_attn_key_steps]
             else:
-                in_parallel_streams = bool(getattr(forward_context, "in_parallel_streams", False))
+                in_parallel_streams = forward_context.is_secondary_stream
                 graph_params = get_graph_params(in_parallel_streams)
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
@@ -830,7 +830,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             else:
                 graph_params = get_draft_graph_params()
         else:
-            in_parallel_streams = bool(getattr(get_forward_context(), "in_parallel_streams", False))
+            in_parallel_streams = get_forward_context().is_secondary_stream
             graph_params = get_graph_params(in_parallel_streams)
         from vllm_ascend.compilation.acl_graph_split_batch import get_graph_param_key
 
@@ -1003,7 +1003,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if _EXTRA_CTX.is_draft_model:
             graph_params = get_draft_graph_params()
         else:
-            in_parallel_streams = bool(getattr(get_forward_context(), "in_parallel_streams", False))
+            in_parallel_streams = get_forward_context().is_secondary_stream
             graph_params = get_graph_params(in_parallel_streams)
 
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
@@ -1122,7 +1122,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor | None = None,
     ):
-        in_parallel_streams = bool(getattr(get_forward_context(), "in_parallel_streams", False))
+        in_parallel_streams = get_forward_context().is_secondary_stream
         graph_params = get_graph_params(in_parallel_streams)
         num_tokens = query.shape[0]
         if _EXTRA_CTX.capturing:
@@ -1240,11 +1240,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
+        runtime_metadata = batch_descriptor.runtime_metadata if batch_descriptor is not None else None
         if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            and batch_descriptor is not None
-            and getattr(batch_descriptor, "capture_metadata_mode", "") == "template"
-            and getattr(batch_descriptor, "attention_backend", "") == "fia"
+            and runtime_metadata is not None
+            and runtime_metadata.metadata_mode == "template"
+            and runtime_metadata.backend_tag == "fia"
         ):
             from vllm_ascend.compilation.acl_graph_split_batch import _get_fia_key_t, maybe_template_fia_seq_lens
 

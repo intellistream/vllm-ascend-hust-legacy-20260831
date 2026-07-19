@@ -88,8 +88,9 @@ def batch_descriptor_info(batch_descriptor: Any) -> Any:
         "uniform": getattr(batch_descriptor, "uniform", None),
         "has_lora": getattr(batch_descriptor, "has_lora", None),
     }
-    for attr in ("start_num_tokens", "graph_variant", "attention_backend", "capture_metadata_mode"):
-        val = getattr(batch_descriptor, attr, None)
+    runtime_metadata = getattr(batch_descriptor, "runtime_metadata", None)
+    for attr in ("token_offset", "variant", "backend_tag", "metadata_mode"):
+        val = getattr(runtime_metadata, attr, None)
         if val is not None and val != "" and val != 0:
             info[attr] = val
     return info

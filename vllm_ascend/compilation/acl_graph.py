@@ -41,7 +41,7 @@ from vllm_ascend.compilation.acl_graph_diagnostics import (
     validate_input_addresses,
 )
 from vllm_ascend.compilation.acl_graph_split_batch import (
-    is_allowed_inplace_lazy_capture,
+    is_allowed_runtime_graph_capture,
 )
 
 from ..utils import weak_ref_tensors
@@ -195,7 +195,7 @@ class ACLGraphWrapper:
         if aclgraph_runtime_mode == CUDAGraphMode.NONE or aclgraph_runtime_mode != self.runtime_mode:
             return self.runnable(*args, **kwargs)
 
-        in_parallel_streams = bool(getattr(forward_context, "in_parallel_streams", False))
+        in_parallel_streams = forward_context.is_secondary_stream
         entries = self.concrete_aclgraph_entries2 if in_parallel_streams else self.concrete_aclgraph_entries
         graph_pool = self.graph_pool_parallel_streams if in_parallel_streams else self.graph_pool
 
@@ -205,8 +205,9 @@ class ACLGraphWrapper:
         entry = entries[batch_descriptor]
 
         if entry.aclgraph is None:
-            start_num_tokens = batch_descriptor.start_num_tokens
-            is_inplace_lazy_capture = is_allowed_inplace_lazy_capture(
+            runtime_metadata = batch_descriptor.runtime_metadata
+            start_num_tokens = runtime_metadata.token_offset if runtime_metadata is not None else 0
+            is_inplace_lazy_capture = is_allowed_runtime_graph_capture(
                 forward_context, batch_descriptor, aclgraph_runtime_mode
             )
 

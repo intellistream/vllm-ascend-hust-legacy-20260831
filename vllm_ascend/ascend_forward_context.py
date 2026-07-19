@@ -73,8 +73,8 @@ def set_ascend_forward_context(
     input_ids=None,
     eplb_heat_collection_status: bool = False,
     split_inplace_mode: str | None = None,
-    in_parallel_streams: bool = False,
-    allow_inplace_lazy_capture: bool = False,
+    is_secondary_stream: bool = False,
+    allow_runtime_graph_capture: bool = False,
     validate_inplace_metadata_ptrs: bool = False,
     cos_sin_slot_id: int = 0,
     ubatch_num: int = 0,
@@ -94,12 +94,12 @@ def set_ascend_forward_context(
         "cudagraph_runtime_mode": aclgraph_runtime_mode,
         "batch_descriptor": batch_descriptor,
         "skip_compiled": skip_compiled,
-        "split_inplace_mode": split_inplace_mode,
-        "in_parallel_streams": in_parallel_streams,
-        "allow_inplace_lazy_capture": allow_inplace_lazy_capture,
+        "is_secondary_stream": is_secondary_stream,
+        "allow_runtime_graph_capture": allow_runtime_graph_capture,
     }
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
+        forward_context.split_inplace_mode = split_inplace_mode
         forward_context.draft_attn_metadatas = draft_attn_metadatas
 
         forward_context.input_ids = input_ids
@@ -225,7 +225,8 @@ def create_ascend_forward_context(
     ubatch_slices: Any = None,
     ubatch_num: int = 0,
     positions: Any = None,
-    in_parallel_streams: bool = False,
+    is_secondary_stream: bool = False,
+    allow_runtime_graph_capture: bool = False,
     cos_sin_slot_id: int = 0,
 ) -> Any:
     from vllm.forward_context import ForwardContext
@@ -238,7 +239,8 @@ def create_ascend_forward_context(
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
-        in_parallel_streams=in_parallel_streams,
+        is_secondary_stream=is_secondary_stream,
+        allow_runtime_graph_capture=allow_runtime_graph_capture,
     )
 
     if attn_metadata is not None:

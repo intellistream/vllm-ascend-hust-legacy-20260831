@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch_npu
 from vllm.config import CUDAGraphMode
-from vllm.forward_context import BatchDescriptor
+from vllm.forward_context import BatchDescriptor, CUDAGraphRuntimeMetadata
 
 from vllm_ascend.attention.utils import using_paged_attention
 from vllm_ascend.compilation.acl_graph_diagnostics import SPLIT_INPLACE_DEBUG
@@ -18,29 +18,23 @@ if TYPE_CHECKING:
 _ACLGRAPH_REPLAY_GLOBAL_SYNC = os.environ.get("VLLM_ASCEND_ACLGRAPH_REPLAY_GLOBAL_SYNC", "0") in ("1", "true", "True")
 
 
-def is_allowed_inplace_lazy_capture(
+def is_allowed_runtime_graph_capture(
     forward_context: Any,
     batch_descriptor: BatchDescriptor,
     aclgraph_runtime_mode: CUDAGraphMode,
 ) -> bool:
-    start = int(getattr(batch_descriptor, "start_num_tokens", 0) or 0)
-    if start <= 0:
+    runtime_metadata = batch_descriptor.runtime_metadata
+    if not isinstance(runtime_metadata, CUDAGraphRuntimeMetadata) or not runtime_metadata.is_valid():
         return False
-    if aclgraph_runtime_mode not in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
+    if aclgraph_runtime_mode != CUDAGraphMode.FULL:
         return False
-    if not bool(getattr(forward_context, "allow_inplace_lazy_capture", False)):
+    if not forward_context.allow_runtime_graph_capture:
         return False
-    if getattr(forward_context, "split_inplace_mode", None) not in (
-        "inplace_serial",
-        "inplace_parallel",
-    ):
+    if getattr(forward_context, "split_inplace_mode", None) != "inplace_parallel":
         return False
-    if getattr(batch_descriptor, "graph_variant", "") not in (
-        "inplace_serial",
-        "inplace_parallel",
-    ):
+    if runtime_metadata.variant != "inplace_parallel":
         return False
-    return getattr(batch_descriptor, "attention_backend", "") in ("fia", "pa")
+    return runtime_metadata.backend_tag in ("fia", "pa")
 
 
 def extract_block_table_from_metadata(metadata: Any):
@@ -95,9 +89,11 @@ def refresh_block_table_in_place(
 
 def should_template_fia_seq_lens(forward_context: Any) -> bool:
     batch_descriptor = getattr(forward_context, "batch_descriptor", None)
+    runtime_metadata = batch_descriptor.runtime_metadata if isinstance(batch_descriptor, BatchDescriptor) else None
     return (
-        getattr(batch_descriptor, "capture_metadata_mode", "") == "template"
-        and getattr(batch_descriptor, "attention_backend", "") == "fia"
+        runtime_metadata is not None
+        and runtime_metadata.metadata_mode == "template"
+        and runtime_metadata.backend_tag == "fia"
     )
 
 
@@ -165,11 +161,7 @@ def get_graph_param_key(
     if not isinstance(desc, BatchDescriptor):
         return runtime_shape
 
-    start = desc.start_num_tokens
-    has_descriptor_variant = (
-        start > 0 or bool(desc.graph_variant) or bool(desc.attention_backend) or bool(desc.capture_metadata_mode)
-    )
-    if has_descriptor_variant:
+    if desc.runtime_metadata is not None:
         return desc
     return runtime_shape
 

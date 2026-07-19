@@ -301,7 +301,7 @@ class InplaceSplitRunner:
         batch_descriptor = getattr(forward_context, "batch_descriptor", None)
         if batch_descriptor is None:
             return False
-        in_parallel_streams = forward_context.in_parallel_streams
+        in_parallel_streams = forward_context.is_secondary_stream
         if isinstance(self.model, ACLGraphWrapper):
             return self.model.has_graph(batch_descriptor, in_parallel_streams)
         return False
@@ -404,18 +404,17 @@ class InplaceSplitRunner:
         if batch_descriptor is None:
             return False
         cg_mode = getattr(context, "cudagraph_runtime_mode", CUDAGraphMode.NONE)
-        start_nt = int(getattr(batch_descriptor, "start_num_tokens", 0) or 0)
-        allow_lazy = bool(getattr(context, "allow_inplace_lazy_capture", False))
+        runtime_metadata = batch_descriptor.runtime_metadata
+        start_nt = runtime_metadata.token_offset if runtime_metadata is not None else 0
+        allow_lazy = context.allow_runtime_graph_capture
         has_graph = self._has_aclgraph_for_context(context)
-        result = (
-            cg_mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE) and start_nt > 0 and allow_lazy and not has_graph
-        )
+        result = cg_mode == CUDAGraphMode.FULL and start_nt > 0 and allow_lazy and not has_graph
 
         from vllm_ascend.inplace_split_debug import is_enabled as _is_enabled
         from vllm_ascend.inplace_split_debug import log_event as _log_event
 
         if _is_enabled():
-            in_parallel_streams = bool(getattr(context, "in_parallel_streams", False))
+            in_parallel_streams = context.is_secondary_stream
             _log_event(
                 "needs_offset_capture_check",
                 {
@@ -767,7 +766,7 @@ class InplaceSplitRunner:
         aclgraph_runtime_mode,
         inplace_attention_backend,
     ):
-        from vllm.forward_context import get_forward_context
+        from vllm.forward_context import CUDAGraphRuntimeMetadata, get_forward_context
 
         from vllm_ascend.ascend_forward_context import create_ascend_forward_context
 
@@ -830,23 +829,32 @@ class InplaceSplitRunner:
                 else:
                     ubatch_attn_metadata = attn_metadata
 
+            runtime_metadata = (
+                CUDAGraphRuntimeMetadata(
+                    token_offset=split_slice.start_num_tokens,
+                    variant="inplace_parallel",
+                    backend_tag=split_attention_backend,
+                    metadata_mode=capture_metadata_mode,
+                )
+                if split_slice.start_num_tokens > 0
+                else None
+            )
             ubatch_cudagraph_mode, ubatch_batch_descriptor = self.cudagraph_dispatcher.dispatch(
                 num_tokens=split_slice.graph_num_tokens,
                 uniform_decode=True,
                 has_lora=batch_descriptor.has_lora,
-                start_num_tokens=split_slice.start_num_tokens,
-                allow_inplace_lazy_key=(allow_lazy and split_slice.start_num_tokens > 0),
-                graph_variant=("inplace_parallel" if split_slice.start_num_tokens > 0 else ""),
-                attention_backend=(split_attention_backend if split_slice.start_num_tokens > 0 else ""),
-                capture_metadata_mode=capture_metadata_mode,
+                runtime_metadata=runtime_metadata,
+                allow_runtime_key_registration=(allow_lazy and runtime_metadata is not None),
             )
 
-            allow_inplace_lazy_capture = bool(
+            descriptor_metadata = ubatch_batch_descriptor.runtime_metadata
+            allow_runtime_graph_capture = bool(
                 allow_lazy
                 and split_slice.start_num_tokens > 0
-                and ubatch_cudagraph_mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE)
-                and getattr(ubatch_batch_descriptor, "graph_variant", "") == "inplace_parallel"
-                and getattr(ubatch_batch_descriptor, "attention_backend", "") in ("fia", "pa")
+                and ubatch_cudagraph_mode == CUDAGraphMode.FULL
+                and descriptor_metadata is not None
+                and descriptor_metadata.variant == "inplace_parallel"
+                and descriptor_metadata.backend_tag in ("fia", "pa")
             )
 
             validate_inplace_ptrs = bool(
@@ -873,7 +881,7 @@ class InplaceSplitRunner:
                         "in_parallel_streams": in_parallel_streams,
                         "graph_params_pool": ("parallel" if in_parallel_streams else "main"),
                         "graph_entry_pool": ("parallel" if in_parallel_streams else "main"),
-                        "allow_inplace_lazy_capture": allow_inplace_lazy_capture,
+                        "allow_runtime_graph_capture": allow_runtime_graph_capture,
                         "validate_inplace_ptrs": validate_inplace_ptrs,
                         "forced_attention_backend": split_attention_backend,
                         "force_pa_for_offset": force_pa_for_offset,
@@ -884,7 +892,8 @@ class InplaceSplitRunner:
                 split_slice.start_num_tokens > 0
                 and split_attention_backend == "fia"
                 and ubatch_attn_metadata is not None
-                and ubatch_batch_descriptor.capture_metadata_mode == "template"
+                and descriptor_metadata is not None
+                and descriptor_metadata.metadata_mode == "template"
             ):
                 from vllm_ascend.compilation.acl_graph_split_batch import template_fia_seq_lens_list
 
@@ -902,12 +911,12 @@ class InplaceSplitRunner:
                     cudagraph_runtime_mode=ubatch_cudagraph_mode,
                     ubatch_num=i,
                     positions=prepared_split_inputs[i]["positions"],
-                    in_parallel_streams=in_parallel_streams,
+                    is_secondary_stream=in_parallel_streams,
+                    allow_runtime_graph_capture=allow_runtime_graph_capture,
                     cos_sin_slot_id=i,
                 )
             split_forward_context.split_inplace_mode = "inplace_parallel"
             split_forward_context.forced_attention_backend = split_attention_backend
-            split_forward_context.allow_inplace_lazy_capture = allow_inplace_lazy_capture
             split_forward_context.split_actual_num_tokens = int(split_slice.num_tokens)
             split_forward_context.split_graph_num_tokens = int(split_slice.graph_num_tokens)
             split_forward_context.validate_inplace_metadata_ptrs = validate_inplace_ptrs
@@ -1063,8 +1072,14 @@ class InplaceSplitRunner:
                             parallel_streams=parallel_streams,
                         )
                     else:
+                        runtime_metadata = (
+                            metadata.context.batch_descriptor.runtime_metadata
+                            if metadata.context.batch_descriptor is not None
+                            else None
+                        )
                         if (
-                            int(getattr(metadata.context.batch_descriptor, "start_num_tokens", 0) or 0) > 0
+                            runtime_metadata is not None
+                            and runtime_metadata.token_offset > 0
                             and metadata.context.cudagraph_runtime_mode == CUDAGraphMode.FULL
                             and not self._has_aclgraph_for_context(metadata.context)
                         ):

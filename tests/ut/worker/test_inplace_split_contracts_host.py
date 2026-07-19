@@ -126,6 +126,27 @@ class InplaceSplitContractsHostTest(unittest.TestCase):
         self.assertFalse(utils.should_stabilize_inplace_metadata(None))
         self.assertTrue(utils.should_stabilize_inplace_metadata(object()))
 
+    def test_runtime_graph_integration_uses_final_core_schema_only(self):
+        root = Path(__file__).parents[3]
+        runner_source = (root / "vllm_ascend/worker/inplace_split_runner.py").read_text()
+        context_source = (root / "vllm_ascend/ascend_forward_context.py").read_text()
+
+        for required in (
+            "CUDAGraphRuntimeMetadata(",
+            "runtime_metadata=runtime_metadata",
+            "allow_runtime_key_registration=",
+            "is_secondary_stream=",
+            "allow_runtime_graph_capture=",
+        ):
+            self.assertIn(required, runner_source + context_source)
+        for removed in (
+            "allow_inplace_lazy_key=",
+            "graph_variant=(",
+            "attention_backend=(split_attention_backend",
+            "capture_metadata_mode=capture_metadata_mode",
+        ):
+            self.assertNotIn(removed, runner_source)
+
 
 if __name__ == "__main__":
     unittest.main()
