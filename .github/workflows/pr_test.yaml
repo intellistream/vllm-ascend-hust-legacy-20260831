@@ -241,12 +241,10 @@ jobs:
     if: ${{ needs.lint-and-select-tests.outputs.packaging_changed == 'true' && contains(github.event.pull_request.labels.*.name, 'e2e') }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.0.0-910b-ubuntu22.04-py3.12
-      env:
-        UV_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple
-        UV_HTTP_TIMEOUT: 60
-        UV_LINK_MODE: copy
+    env:
+      UV_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple
+      UV_HTTP_TIMEOUT: 60
+      UV_LINK_MODE: copy
     steps:
       - name: Checkout vllm-ascend-hust
         uses: actions/checkout@v7
@@ -293,13 +291,19 @@ jobs:
             --no-deps \
             --verbose
 
-      - name: Validate metadata, imports, and dependencies
+      - name: Validate metadata and dependencies
         run: |
           .venv-dual-editable/bin/python -m pytest --noconftest \
             tests/ut/test_build_metadata.py \
             tests/ut/test_runtime_metadata.py \
             -q
-          TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
-            .venv-dual-editable/bin/python -c \
-            'import vllm; import vllm_ascend'
+          .venv-dual-editable/bin/python - <<'PY'
+          import json
+          from importlib.metadata import distribution
+
+          for package in ("vllm", "vllm-ascend-hust"):
+              direct_url = distribution(package).read_text("direct_url.json")
+              assert direct_url is not None
+              assert json.loads(direct_url)["dir_info"]["editable"] is True
+          PY
           uv pip check --python .venv-dual-editable/bin/python

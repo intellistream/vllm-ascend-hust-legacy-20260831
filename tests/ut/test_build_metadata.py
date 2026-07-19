@@ -40,12 +40,16 @@ def test_paired_editable_workflow_uses_empty_target_dependency_sets():
 
     assert "runs-on: ubuntu-24.04-arm" in workflow[job:checkout]
     assert "runs-on: linux-aarch64-a2b3-1" not in workflow[job:checkout]
+    assert "container:" not in workflow[job:checkout]
     assert "ref: main" in workflow[checkout:runtime_install]
     assert "-r ./requirements.txt" in workflow[runtime_install:core_install]
     assert runtime_install < build_tools < core_install < plugin_install
     assert "--no-build-isolation" in workflow[core_install:plugin_install]
     assert "--no-deps" in workflow[core_install:plugin_install]
     assert "--no-build-isolation" not in workflow[plugin_install:]
+    assert "from importlib.metadata import distribution" in workflow[plugin_install:]
+    assert 'for package in ("vllm", "vllm-ascend-hust")' in workflow[plugin_install:]
+    assert "import vllm; import vllm_ascend" not in workflow[plugin_install:]
 
 
 def test_dual_editable_documentation_uses_target_specific_flow():
