@@ -23,10 +23,8 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, get_forward_context, override_forward_context
 from vllm.logger import logger
-from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
+from vllm_ascend.attention.utils import using_paged_attention
 from vllm_ascend.worker.inplace_split_ops import (
     AscendUbatchMetadata,
     clone_split_output,
@@ -41,7 +39,6 @@ from vllm_ascend.worker.inplace_split_ops import (
     tokens_slice_for_inplace_execution,
     trim_split_output,
 )
-from vllm_ascend.worker.inplace_split_utils import SplitBatchSlice
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -160,7 +157,9 @@ class InplaceSplitRunner:
             return NO_SPLIT_MODE_NOT_INPLACE
         if mode == "inplace_parallel" and not split_batch_config.enable_parallel_streams:
             return NO_SPLIT_PARALLEL_STREAMS_DISABLED
-        if not uniform_decode and not getattr(split_batch_config, "enable_mixed_request_split", False) and not getattr(split_batch_config, "enable_inplace_spec_decode", False):
+        mixed_request_split_enabled = getattr(split_batch_config, "enable_mixed_request_split", False)
+        inplace_spec_decode_enabled = getattr(split_batch_config, "enable_inplace_spec_decode", False)
+        if not uniform_decode and not mixed_request_split_enabled and not inplace_spec_decode_enabled:
             return NO_SPLIT_NON_UNIFORM_DECODE
         if uniform_decode and cudagraph_mode not in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
             return NO_SPLIT_CUDAGRAPH_MODE_NOT_FULL
@@ -200,11 +199,9 @@ class InplaceSplitRunner:
             set_current_step_id,
         )
         from vllm_ascend.worker.inplace_split_utils import (
-            INPLACE_SPLIT_DRY_RUN,
             NO_SPLIT_ATTENTION_BACKEND_MISMATCH,
             create_inplace_split_batch_slices,
             inplace_split_first_graph_matches_attention_backend,
-            select_inplace_attention_backend,
         )
         precheck_reason = self.inplace_split_precheck_reason(
             split_batch_config=split_batch_config,
@@ -479,11 +476,19 @@ class InplaceSplitRunner:
         from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 
         from vllm_ascend.inplace_split_debug import (
-            is_enabled as _is_enabled,
-            log_event as _log_event,
             batch_descriptor_info as _bd_info,
-            tensor_info as _tensor_info,
+        )
+        from vllm_ascend.inplace_split_debug import (
+            is_enabled as _is_enabled,
+        )
+        from vllm_ascend.inplace_split_debug import (
+            log_event as _log_event,
+        )
+        from vllm_ascend.inplace_split_debug import (
             metadata_tensor_info as _mti,
+        )
+        from vllm_ascend.inplace_split_debug import (
+            tensor_info as _tensor_info,
         )
 
         split_cfg = self.ascend_config.split_batch_config
@@ -682,7 +687,8 @@ class InplaceSplitRunner:
                 "for inplace split attn param update; skipping.")
             return
 
-        update_stream = getattr(self._runner, 'update_stream_main', None) or getattr(self._runner, 'update_stream', None)
+        update_stream = getattr(self._runner, 'update_stream_main', None) or getattr(
+            self._runner, 'update_stream', None)
         if update_stream is None:
             update_stream = torch.npu.current_stream()
         update_attn_params(
@@ -719,7 +725,8 @@ class InplaceSplitRunner:
             if update_stream is None:
                 update_stream = torch.npu.current_stream()
         else:
-            update_stream = getattr(self._runner, 'update_stream_main', None) or getattr(self._runner, 'update_stream', None)
+            update_stream = getattr(self._runner, 'update_stream_main', None) or getattr(
+                self._runner, 'update_stream', None)
             if update_stream is None:
                 update_stream = torch.npu.current_stream()
         update_attn_params_split(
@@ -755,11 +762,19 @@ class InplaceSplitRunner:
         force_pa_for_offset = bool(split_cfg is not None and getattr(split_cfg, "inplace_force_pa_for_offset", False))
 
         from vllm_ascend.inplace_split_debug import (
-            is_enabled as _split_debug_enabled,
-            log_event as _log_event,
             batch_descriptor_info as _bd_info,
-            tensor_view_info as _tvi,
+        )
+        from vllm_ascend.inplace_split_debug import (
+            is_enabled as _split_debug_enabled,
+        )
+        from vllm_ascend.inplace_split_debug import (
+            log_event as _log_event,
+        )
+        from vllm_ascend.inplace_split_debug import (
             metadata_tensor_info as _mti,
+        )
+        from vllm_ascend.inplace_split_debug import (
+            tensor_view_info as _tvi,
         )
 
         def _stream_for_split(split_idx: int):
@@ -886,20 +901,13 @@ class InplaceSplitRunner:
                     in_parallel_streams=in_parallel_streams,
                     cos_sin_slot_id=i,
                 )
-            setattr(split_forward_context, "split_inplace_mode",
-                    "inplace_parallel")
-            setattr(split_forward_context, "forced_attention_backend",
-                    split_attention_backend)
-            setattr(split_forward_context, "allow_inplace_lazy_capture",
-                    allow_inplace_lazy_capture)
-            setattr(split_forward_context, "split_actual_num_tokens",
-                    int(split_slice.num_tokens))
-            setattr(split_forward_context, "split_graph_num_tokens",
-                    int(split_slice.graph_num_tokens))
-            setattr(split_forward_context, "validate_inplace_metadata_ptrs",
-                    validate_inplace_ptrs)
-            setattr(split_forward_context, "validate_inplace_input_ptrs",
-                    validate_inplace_ptrs)
+            split_forward_context.split_inplace_mode = "inplace_parallel"
+            split_forward_context.forced_attention_backend = split_attention_backend
+            split_forward_context.allow_inplace_lazy_capture = allow_inplace_lazy_capture
+            split_forward_context.split_actual_num_tokens = int(split_slice.num_tokens)
+            split_forward_context.split_graph_num_tokens = int(split_slice.graph_num_tokens)
+            split_forward_context.validate_inplace_metadata_ptrs = validate_inplace_ptrs
+            split_forward_context.validate_inplace_input_ptrs = validate_inplace_ptrs
 
             if _cached_dual_stream_metadata is not None:
                 split_forward_context.dual_stream_attention_metadata = (
@@ -982,8 +990,6 @@ class InplaceSplitRunner:
 
         from vllm_ascend.inplace_split_debug import is_enabled as _split_debug_enabled
         from vllm_ascend.inplace_split_debug import log_event as _split_debug_log_event
-
-        split_cfg = getattr(self.ascend_config, "split_batch_config", None)
 
         split_slices = split_plan.split_slices
         original_forward_context = get_forward_context()
@@ -1078,9 +1084,10 @@ class InplaceSplitRunner:
                                 "Missing inplace parallel offset ACL graph "
                                 "before normal replay path: "
                                 f"{metadata.context.batch_descriptor!r}")
-                        with torch.npu.stream(target_stream):
-
-                            with override_forward_context(metadata.context):
+                        with (
+                            torch.npu.stream(target_stream),
+                            override_forward_context(metadata.context),
+                        ):
                                 if (metadata.context.cudagraph_runtime_mode
                                         == CUDAGraphMode.FULL):
                                     if split_slice.start_num_tokens > 0:

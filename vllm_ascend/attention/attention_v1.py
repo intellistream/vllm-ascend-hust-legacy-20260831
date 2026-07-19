@@ -1249,7 +1249,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 and batch_descriptor is not None
                 and getattr(batch_descriptor, 'capture_metadata_mode', '') == "template"
                 and getattr(batch_descriptor, 'attention_backend', '') == "fia"):
-            from vllm_ascend.compilation.acl_graph_split_batch import maybe_template_fia_seq_lens, _get_fia_key_t
+            from vllm_ascend.compilation.acl_graph_split_batch import _get_fia_key_t, maybe_template_fia_seq_lens
             actual_seq_lengths_kv = maybe_template_fia_seq_lens(
                 forward_context, actual_seq_lengths_kv,
                 _get_fia_key_t(key, block_size),

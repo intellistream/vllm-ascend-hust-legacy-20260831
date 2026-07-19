@@ -987,7 +987,7 @@ class SplitBatchConfig:
             split_batch_config.get("min_batch_size_for_split", 4)
         )
 
-        raw_parallel_sizes = split_batch_config.get("parallel_capture_sizes", None)
+        raw_parallel_sizes = split_batch_config.get("parallel_capture_sizes")
         if raw_parallel_sizes is not None:
             self.parallel_capture_sizes: list[int] = sorted(int(s) for s in raw_parallel_sizes)
         else:
@@ -1021,7 +1021,7 @@ class SplitBatchConfig:
             split_batch_config.get("inplace_offset_match_policy", "exact")
         )
 
-        raw_offset_capture_sizes = split_batch_config.get("inplace_offset_capture_sizes", None)
+        raw_offset_capture_sizes = split_batch_config.get("inplace_offset_capture_sizes")
         if raw_offset_capture_sizes is not None:
             self.inplace_offset_capture_sizes: list[int] | None = sorted(
                 int(s) for s in raw_offset_capture_sizes
@@ -1033,19 +1033,17 @@ class SplitBatchConfig:
             split_batch_config.get("inplace_offset_min_graph_tokens", 1)
         )
 
-        raw_max_pad_tokens = split_batch_config.get("inplace_offset_max_padding_tokens", None)
+        raw_max_pad_tokens = split_batch_config.get("inplace_offset_max_padding_tokens")
         self.inplace_offset_max_padding_tokens: int | None = (
             int(raw_max_pad_tokens) if raw_max_pad_tokens is not None else None
         )
 
-        raw_max_pad_ratio = split_batch_config.get("inplace_offset_max_padding_ratio", None)
+        raw_max_pad_ratio = split_batch_config.get("inplace_offset_max_padding_ratio")
         self.inplace_offset_max_padding_ratio: float | None = (
             float(raw_max_pad_ratio) if raw_max_pad_ratio is not None else None
         )
 
-        raw_max_graph_by_start = split_batch_config.get(
-            "inplace_offset_max_graph_tokens_by_start", None
-        )
+        raw_max_graph_by_start = split_batch_config.get("inplace_offset_max_graph_tokens_by_start")
         if raw_max_graph_by_start is not None:
             self.inplace_offset_max_graph_tokens_by_start: dict[int, int] | None = {
                 int(k): int(v) for k, v in raw_max_graph_by_start.items()
@@ -1053,9 +1051,7 @@ class SplitBatchConfig:
         else:
             self.inplace_offset_max_graph_tokens_by_start = None
 
-        raw_allowed_by_start = split_batch_config.get(
-            "inplace_offset_allowed_graph_tokens_by_start", None
-        )
+        raw_allowed_by_start = split_batch_config.get("inplace_offset_allowed_graph_tokens_by_start")
         if raw_allowed_by_start is not None:
             self.inplace_offset_allowed_graph_tokens_by_start: dict[int, list[int]] | None = {
                 int(k): [int(v) for v in vs] for k, vs in raw_allowed_by_start.items()
@@ -1063,7 +1059,7 @@ class SplitBatchConfig:
         else:
             self.inplace_offset_allowed_graph_tokens_by_start = None
 
-        raw_max_remainder = split_batch_config.get("inplace_max_remainder_tokens", None)
+        raw_max_remainder = split_batch_config.get("inplace_max_remainder_tokens")
         self.inplace_max_remainder_tokens: int | None = (
             int(raw_max_remainder) if raw_max_remainder is not None else None
         )

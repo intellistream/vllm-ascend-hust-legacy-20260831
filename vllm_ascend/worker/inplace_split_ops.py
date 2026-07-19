@@ -22,7 +22,6 @@ import torch
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.utils import enable_sp
 
 
@@ -237,7 +236,6 @@ def stabilize_inplace_common_attn_metadata(
                        or uniform_decode_query_len or 1)
         if query_len <= 0:
             query_len = 1
-        pad_tokens = graph_tokens - actual_tokens
         actual_reqs = int(common.num_reqs)
         graph_reqs = graph_tokens // query_len
         pad_reqs = graph_reqs - actual_reqs

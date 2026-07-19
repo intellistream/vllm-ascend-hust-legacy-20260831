@@ -296,7 +296,7 @@ def create_ascend_forward_context(
     else:
         new_forward_context.max_tokens_across_dp = num_tokens
 
-    from vllm_ascend.ops.rotary_embedding import update_cos_sin, get_cos_and_sin_slice, get_cos_and_sin_mla
+    from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla, get_cos_and_sin_slice, update_cos_sin
     if ubatch_slices and ubatch_slices[ubatch_num]:
         from vllm_ascend.attention.utils import slice_positions_by_token
         token_slice = ubatch_slices[ubatch_num].token_slice

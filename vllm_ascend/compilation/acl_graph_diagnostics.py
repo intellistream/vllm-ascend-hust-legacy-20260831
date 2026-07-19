@@ -4,7 +4,7 @@
 import dataclasses
 import inspect
 import os
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -19,28 +19,29 @@ def diag_log(msg: str):
         return
     if _diag_log_file is None:
         try:
-            _diag_log_file = open(_DIAG_LOG_PATH, "a")
+            # Intentionally cached for the lifetime of the debug session.
+            _diag_log_file = open(_DIAG_LOG_PATH, "a")  # noqa: SIM115
         except Exception:
             return
     _diag_log_file.write(msg + "\n")
     _diag_log_file.flush()
 
 
-def safe_tensor_ptr(t: torch.Tensor) -> Optional[int]:
+def safe_tensor_ptr(t: torch.Tensor) -> int | None:
     try:
         return t.data_ptr()
     except Exception:
         return None
 
 
-def safe_tensor_shape(t: torch.Tensor) -> Optional[list[int]]:
+def safe_tensor_shape(t: torch.Tensor) -> list[int] | None:
     try:
         return list(t.shape)
     except Exception:
         return None
 
 
-def resolve_callable_arg_names(runnable) -> Optional[list[str]]:
+def resolve_callable_arg_names(runnable) -> list[str] | None:
     try:
         return list(inspect.signature(runnable).parameters.keys())
     except Exception:
@@ -49,15 +50,15 @@ def resolve_callable_arg_names(runnable) -> Optional[list[str]]:
 
 def resolve_callable_name(runnable) -> str:
     if hasattr(runnable, "__qualname__"):
-        return str(getattr(runnable, "__qualname__"))
+        return str(runnable.__qualname__)
     if hasattr(runnable, "__name__"):
-        return str(getattr(runnable, "__name__"))
+        return str(runnable.__name__)
     return type(runnable).__name__
 
 
 def collect_tensor_arg_infos(
     args: tuple[Any, ...],
-    arg_names: Optional[list[str]] = None,
+    arg_names: list[str] | None = None,
 ) -> tuple[list[int], list[dict[str, Any]]]:
     addresses: list[int] = []
     tensor_infos: list[dict[str, Any]] = []

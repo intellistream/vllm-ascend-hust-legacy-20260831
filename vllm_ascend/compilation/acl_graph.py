@@ -6,39 +6,46 @@ import weakref
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar
 from unittest.mock import patch
 
 import torch
 import torch_npu
 import vllm.envs as envs
+from vllm.compilation import monitor as compilation_monitor
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
-from vllm.compilation import monitor as compilation_monitor
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
-
-from ..utils import weak_ref_tensors
-from vllm.distributed.device_communicators.pynccl_allocator import \
-    set_graph_pool_id
-
 from vllm_ascend.compilation.acl_graph_diagnostics import (
     collect_attn_metadata_tensor_infos as _collect_attn_metadata_tensor_infos,
+)
+from vllm_ascend.compilation.acl_graph_diagnostics import (
     collect_tensor_arg_infos as _collect_tensor_arg_infos,
+)
+from vllm_ascend.compilation.acl_graph_diagnostics import (
     resolve_callable_arg_names as _resolve_callable_arg_names,
+)
+from vllm_ascend.compilation.acl_graph_diagnostics import (
     resolve_callable_name as _resolve_callable_name,
+)
+from vllm_ascend.compilation.acl_graph_diagnostics import (
     should_validate_inplace_metadata_ptrs as _should_validate_inplace_metadata_ptrs,
+)
+from vllm_ascend.compilation.acl_graph_diagnostics import (
     validate_input_addresses,
 )
-
 from vllm_ascend.compilation.acl_graph_split_batch import (
     is_allowed_inplace_lazy_capture,
 )
+
+from ..utils import weak_ref_tensors
+
 _ACLGRAPH_REPLAY_GLOBAL_SYNC = (
     os.environ.get("VLLM_ASCEND_ACLGRAPH_REPLAY_GLOBAL_SYNC", "0")
     in ("1", "true", "True")

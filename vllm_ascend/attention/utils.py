@@ -504,9 +504,6 @@ def _make_metadata_with_slice(
         ubatch_slice,
         attn_metadata: AscendCommonAttentionMetadata,
         max_num_tokens: int = 0) -> AscendCommonAttentionMetadata:
-    from vllm.v1.worker.ubatch_utils import UBatchSlice
-    from vllm_ascend.inplace_split_debug import is_enabled as split_debug_enabled
-    from vllm_ascend.inplace_split_debug import log_event as split_debug_log_event
 
     assert not ubatch_slice.is_empty(), (
         f"Ubatch slice {ubatch_slice} is empty")
@@ -621,8 +618,8 @@ def split_attn_metadata(
 ) -> list[AscendCommonAttentionMetadata]:
     from vllm_ascend.inplace_split_debug import is_enabled as split_debug_enabled
     from vllm_ascend.inplace_split_debug import log_event as split_debug_log_event
-    from vllm_ascend.inplace_split_debug import slice_info as split_debug_slice_info
     from vllm_ascend.inplace_split_debug import metadata_tensor_info as split_debug_metadata_tensor_info
+    from vllm_ascend.inplace_split_debug import slice_info as split_debug_slice_info
 
     results = []
     for idx, ubatch_slice in enumerate(ubatch_slices):

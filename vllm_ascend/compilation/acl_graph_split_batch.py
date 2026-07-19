@@ -2,19 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch_npu
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor
-from vllm.logger import logger
 
 from vllm_ascend.attention.utils import using_paged_attention
 from vllm_ascend.compilation.acl_graph_diagnostics import SPLIT_INPLACE_DEBUG
 
 if TYPE_CHECKING:
-    from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, ACLGraphEntry, GraphParams
+    pass
 
 _ACLGRAPH_REPLAY_GLOBAL_SYNC = (
     os.environ.get("VLLM_ASCEND_ACLGRAPH_REPLAY_GLOBAL_SYNC", "0")
@@ -44,9 +43,7 @@ def is_allowed_inplace_lazy_capture(
         "inplace_parallel",
     ):
         return False
-    if getattr(batch_descriptor, "attention_backend", "") not in ("fia", "pa"):
-        return False
-    return True
+    return getattr(batch_descriptor, "attention_backend", "") in ("fia", "pa")
 
 
 def extract_block_table_from_metadata(metadata: Any):
@@ -156,7 +153,7 @@ def template_fia_seq_lens_list(attn_metadata: Any, target_t: int) -> int:
             continue
         templated = list(seq_lens_list)
         templated[-1] = int(target_t)
-        setattr(metadata_obj, "seq_lens_list", templated)
+        metadata_obj.seq_lens_list = templated
         updated += 1
     return updated
 
@@ -626,6 +623,7 @@ def dual_stream_attention_plan_to_slices(
     plan: Any,
     query_len: int) -> tuple[list[Any], list[Any]]:
     from vllm.v1.worker.ubatch_utils import UBatchSlice
+
     from vllm_ascend.worker.inplace_split_utils import SplitBatchSlice
     query_len = int(query_len)
     if query_len <= 0:

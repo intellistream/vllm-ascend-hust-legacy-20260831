@@ -110,17 +110,6 @@ from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBui
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_attn_metadata, using_paged_attention
-from vllm_ascend.worker.inplace_split_ops import (
-    AscendUbatchMetadata,
-    clone_attn_metadata_block_tables,
-    context_ubatch_slices_for_inplace,
-    dual_stream_attention_config,
-    merge_split_outputs,
-    stabilize_inplace_common_attn_metadata_list,
-    trim_split_output,
-)
-from vllm_ascend.worker.inplace_split_runner import InplaceSplitRunner
-from vllm_ascend.worker.inplace_split_utils import SplitBatchSlice
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -174,6 +163,10 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
+from vllm_ascend.worker.inplace_split_ops import (
+    clone_attn_metadata_block_tables,
+)
+from vllm_ascend.worker.inplace_split_runner import InplaceSplitRunner
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
@@ -194,6 +187,7 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+
     from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
@@ -2207,7 +2201,6 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
 
-                from vllm_ascend.worker.inplace_split_utils import INPLACE_SPLIT_DRY_RUN
                 split_batch_config = self.ascend_config.split_batch_config
                 inplace_split_plan = None
                 inplace_split_reason = ""
@@ -2222,7 +2215,11 @@ class NPUModelRunner(GPUModelRunner):
                     ) == "mrope"
                     has_lora = len(self.input_batch.lora_id_to_lora_request) > 0
                     use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
-                    capture_sizes = list(self.compilation_config.cudagraph_capture_sizes) if self.compilation_config.cudagraph_capture_sizes else []
+                    capture_sizes = (
+                        list(self.compilation_config.cudagraph_capture_sizes)
+                        if self.compilation_config.cudagraph_capture_sizes
+                        else []
+                    )
                     inplace_split_plan, inplace_split_reason = self._inplace_split_runner.should_split(
                         split_batch_config=split_batch_config,
                         cudagraph_mode=cudagraph_mode,
