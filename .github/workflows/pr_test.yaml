@@ -138,10 +138,7 @@ jobs:
               - 'vllm_ascend/**'
             test_selection:
               - 'vllm_ascend/**'
-              - 'setup.py'
               - 'csrc/**'
-              - 'requirements.txt'
-              - 'pyproject.toml'
               - 'cmake/**'
               - 'tests/**'
               - '!tests/ut/test_build_metadata.py'
