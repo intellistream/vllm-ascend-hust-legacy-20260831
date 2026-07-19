@@ -136,14 +136,17 @@ jobs:
               - 'tests/ut/test_runtime_metadata.py'
             python_src:
               - 'vllm_ascend/**'
+
+      - uses: dorny/paths-filter@v4
+        id: selection-filter
+        with:
+          predicate-quantifier: every
+          filters: |
             test_selection:
-              - 'vllm_ascend/**'
-              - 'csrc/**'
-              - 'cmake/**'
-              - 'tests/**'
+              - '{vllm_ascend,csrc,cmake,tests,tools}/**'
               - '!tests/ut/test_build_metadata.py'
               - '!tests/ut/test_runtime_metadata.py'
-              - 'tools/**'
+            root_cmake:
               - 'CMakeLists.txt'
 
       - name: Install vllm-ascend dev (conditional)
@@ -193,14 +196,14 @@ jobs:
           done
 
       - name: Validate test coverage config
-        if: steps.filter.outputs.test_selection == 'true'
+        if: steps.selection-filter.outputs.test_selection == 'true' || steps.selection-filter.outputs.root_cmake == 'true'
         run: |
           pip install pyyaml
           python3 .github/workflows/scripts/coverage.py
 
       - name: Select tests based on changed files
         id: scope
-        if: steps.filter.outputs.test_selection == 'true'
+        if: steps.selection-filter.outputs.test_selection == 'true' || steps.selection-filter.outputs.root_cmake == 'true'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git fetch origin ${{ github.base_ref }}
@@ -210,7 +213,7 @@ jobs:
 
       - name: Set no-tests output when source paths unchanged
         id: noop
-        if: steps.filter.outputs.test_selection != 'true'
+        if: steps.selection-filter.outputs.test_selection != 'true' && steps.selection-filter.outputs.root_cmake != 'true'
         run: |
           {
             echo "has_tests=false"
