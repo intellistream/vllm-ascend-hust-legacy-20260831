@@ -246,6 +246,7 @@ jobs:
       env:
         UV_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple
         UV_HTTP_TIMEOUT: 60
+        UV_LINK_MODE: copy
     steps:
       - name: Checkout vllm-ascend-hust
         uses: actions/checkout@v7
@@ -263,16 +264,25 @@ jobs:
           python3 -m pip install uv
           uv venv --python 3.12 .venv-dual-editable
 
+      - name: Install paired vllm-hust runtime dependencies
+        run: |
+          uv pip install \
+            --python .venv-dual-editable/bin/python \
+            -r ./vllm-hust/requirements/cpu.txt \
+            --verbose
+
       - name: Install paired vllm-hust editable
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install \
             --python .venv-dual-editable/bin/python \
             -e ./vllm-hust \
+            --no-deps \
             --verbose
 
       - name: Install vllm-ascend-hust editable
         run: |
           COMPILE_CUSTOM_KERNELS=0 \
+          SOC_VERSION=ascend910b1 \
           UV_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi \
           UV_INDEX_STRATEGY=unsafe-best-match \
             uv pip install \
