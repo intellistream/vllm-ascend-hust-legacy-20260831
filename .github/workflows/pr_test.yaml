@@ -136,7 +136,7 @@ jobs:
               - 'tests/ut/test_runtime_metadata.py'
             python_src:
               - 'vllm_ascend/**'
-            src:
+            test_selection:
               - 'vllm_ascend/**'
               - 'setup.py'
               - 'csrc/**'
@@ -144,6 +144,8 @@ jobs:
               - 'pyproject.toml'
               - 'cmake/**'
               - 'tests/**'
+              - '!tests/ut/test_build_metadata.py'
+              - '!tests/ut/test_runtime_metadata.py'
               - 'tools/**'
               - 'CMakeLists.txt'
 
@@ -194,14 +196,14 @@ jobs:
           done
 
       - name: Validate test coverage config
-        if: steps.filter.outputs.src == 'true'
+        if: steps.filter.outputs.test_selection == 'true'
         run: |
           pip install pyyaml
           python3 .github/workflows/scripts/coverage.py
 
       - name: Select tests based on changed files
         id: scope
-        if: steps.filter.outputs.src == 'true'
+        if: steps.filter.outputs.test_selection == 'true'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git fetch origin ${{ github.base_ref }}
@@ -211,7 +213,7 @@ jobs:
 
       - name: Set no-tests output when source paths unchanged
         id: noop
-        if: steps.filter.outputs.src != 'true'
+        if: steps.filter.outputs.test_selection != 'true'
         run: |
           {
             echo "has_tests=false"
@@ -270,6 +272,10 @@ jobs:
           COMPILE_CUSTOM_KERNELS=0 uv pip install \
             --python .venv-dual-editable/bin/python \
             -e .
+          .venv-dual-editable/bin/python -m pytest --noconftest \
+            tests/ut/test_build_metadata.py \
+            tests/ut/test_runtime_metadata.py \
+            -q
           TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
             .venv-dual-editable/bin/python -c \
             'import vllm; import vllm_ascend'
