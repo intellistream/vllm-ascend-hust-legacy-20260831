@@ -321,8 +321,9 @@ def _split_decode_prefill_boundary_host(
 
     if not treat_short_extends_as_decodes:
         assert is_prefilling is not None
-        short_extend_prefills = is_prefilling[:num_reqs].tolist()
-        short_extend_prefills.extend([False] * (num_reqs - len(short_extend_prefills)))
+        num_query_lens = len(query_lens_values)
+        short_extend_prefills = is_prefilling[:num_query_lens].tolist()
+        short_extend_prefills.extend([False] * (num_query_lens - len(short_extend_prefills)))
         prefill_mask = [
             is_prefill or is_short_extend
             for is_prefill, is_short_extend in zip(prefill_mask, short_extend_prefills, strict=True)

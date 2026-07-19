@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -167,6 +168,22 @@ def test_split_decodes_and_prefills_empty_batch():
     assert num_prefill_tokens == 0
 
 
+def test_split_decodes_and_prefills_empty_pcp_batch():
+    common_attn_metadata = build_common_attention_metadata(
+        query_lens=[],
+        pcp_full_query_lens=[],
+        is_prefilling=[],
+    )
+
+    result = split_decodes_and_prefills(
+        common_attn_metadata,
+        decode_threshold=1,
+        treat_short_extends_as_decodes=False,
+    )
+
+    assert result == (0, 0, 0, 0)
+
+
 def test_split_decodes_and_prefills_all_prefills():
     common_attn_metadata = build_common_attention_metadata(
         query_lens=[5, 6, 7],
@@ -247,6 +264,23 @@ def test_split_decodes_and_prefills_uses_pcp_full_query_lens():
     assert num_prefills == 2
     assert num_decode_tokens == 1
     assert num_prefill_tokens == 2
+
+
+@pytest.mark.parametrize("num_reqs", [256, 257])
+def test_split_decodes_and_prefills_pcp_full_lens_with_graph_padding(num_reqs):
+    common_attn_metadata = build_common_attention_metadata(
+        query_lens=[1, 5, *([0] * (num_reqs - 2))],
+        pcp_full_query_lens=[1, 5],
+        is_prefilling=[False, True, *([False] * (num_reqs - 2))],
+    )
+
+    result = split_decodes_and_prefills(
+        common_attn_metadata,
+        decode_threshold=1,
+        treat_short_extends_as_decodes=False,
+    )
+
+    assert result == (1, num_reqs - 1, 1, 5)
 
 
 def test_split_decodes_and_prefills_large_mixed_batch():
