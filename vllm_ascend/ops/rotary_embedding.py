@@ -163,7 +163,8 @@ def rope_forward_oot(
     query_shape, key_shape = query.shape, key.shape
     if offsets is not None:
         raise NotImplementedError("Batched rotary embedding is currently not supported on NPU.")
-    if HAS_TRITON:
+    use_triton_rope = HAS_TRITON and os.environ.get("VLLM_ASCEND_FORCE_NATIVE_ROPE", "0") == "0"
+    if use_triton_rope:
         num_tokens = query.shape[0]
         query, key = rope_forward_triton(
             query.view(num_tokens, -1, head_size),
@@ -245,7 +246,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
-        if self.force_native_qwen2_rope:
+        if self.force_native_qwen2_rope or self.rotary_dim < self.head_size:
             cos_sin_cache = self._match_cos_sin_cache_dtype(query)
             return RotaryEmbedding.forward_static(
                 positions,

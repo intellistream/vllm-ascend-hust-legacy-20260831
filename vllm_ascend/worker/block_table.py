@@ -236,6 +236,75 @@ class BlockTable:
         row_stride = self.max_num_blocks_per_req * self.blocks_per_phys_block
         return req_indices * row_stride + logical_block_idx
 
+    def compute_slot_mapping_cpu(
+        self,
+        req_indices: np.ndarray,
+        positions: np.ndarray,
+    ) -> None:
+        req_indices = req_indices.astype(np.int64, copy=False)
+        positions = positions.astype(np.int64, copy=False)
+        num_tokens = positions.shape[0]
+        max_num_tokens = min(self.max_num_batched_tokens, self.slot_mapping.np.shape[0])
+
+        if num_tokens == 0:
+            self.slot_mapping.np[:max_num_tokens] = PAD_SLOT_ID
+            self.slot_mapping.copy_to_gpu(max_num_tokens)
+            return
+
+        if req_indices.shape[0] != num_tokens:
+            raise ValueError(
+                f"req_indices and positions describe different token counts: {req_indices.shape[0]} != {num_tokens}"
+            )
+
+        if self.dcp_world_size * self.pcp_world_size > 1:
+            virtual_block_size = (
+                self.block_size * self.dcp_world_size * self.pcp_world_size
+            )
+            logical_block_idx = positions // virtual_block_size
+            block_table_indices = self._get_block_table_indices(
+                req_indices, logical_block_idx
+            )
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            virtual_block_offsets = positions % virtual_block_size
+            current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
+            mask = (
+                virtual_block_offsets
+                // self.cp_kv_cache_interleave_size
+                % (self.dcp_world_size * self.pcp_world_size)
+                == current_rank
+            )
+            block_offsets = (
+                virtual_block_offsets
+                // (
+                    self.dcp_world_size
+                    * self.pcp_world_size
+                    * self.cp_kv_cache_interleave_size
+                )
+                * self.cp_kv_cache_interleave_size
+                + virtual_block_offsets % self.cp_kv_cache_interleave_size
+            )
+            slot_mapping = block_numbers * self.block_size + block_offsets
+            self.slot_mapping.np[:num_tokens] = np.where(
+                mask, slot_mapping, PAD_SLOT_ID
+            )
+        else:
+            logical_block_idx = positions // self.block_size
+            block_table_indices = self._get_block_table_indices(
+                req_indices, logical_block_idx
+            )
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            block_offsets = positions % self.block_size
+            np.add(
+                block_numbers * self.block_size,
+                block_offsets,
+                out=self.slot_mapping.np[:num_tokens],
+            )
+
+        if num_tokens < max_num_tokens:
+            self.slot_mapping.np[num_tokens:max_num_tokens] = PAD_SLOT_ID
+
+        self.slot_mapping.copy_to_gpu(max_num_tokens)
+
     @staticmethod
     def _to_numpy(value) -> np.ndarray:
         if isinstance(value, np.ndarray):
@@ -490,6 +559,12 @@ class MultiGroupBlockTable:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
             else:
                 block_table.compute_slot_mapping_draft(req_indices, positions)
+
+    def compute_slot_mapping_cpu(
+        self, req_indices: np.ndarray, positions: np.ndarray
+    ) -> None:
+        for block_table in self.block_tables:
+            block_table.compute_slot_mapping_cpu(req_indices, positions)
 
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:

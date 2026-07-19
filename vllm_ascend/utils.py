@@ -844,7 +844,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             }
         )
         if is_moe_model:
-            from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
+            from vllm_ascend._310p.fused_moe.fused_moe import (
+                AscendFusedMoE310,
+                AscendSharedFusedMoE310,
+            )
 
             REGISTERED_ASCEND_OPS.update(
                 {
