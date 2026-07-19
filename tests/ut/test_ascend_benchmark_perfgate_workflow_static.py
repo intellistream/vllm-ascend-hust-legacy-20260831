@@ -94,12 +94,17 @@ def test_main_perfgate_producer_uses_shared_pr_spec_without_changing_formal_defa
     assert "cleanup_ascend_ci_processes.sh" in producer
     assert '--explicit-perfgate-spec-file ""' in workflow
     assert "vllm_hust_benchmark.perfgate_specs resolve" in producer
-    assert (
-        'SAME_SPEC_SPEC_FILE="${VLLM_HUST_BENCHMARK_REPO}/${perfgate_spec_file}"'
-        in producer
-    )
+    assert 'SAME_SPEC_SPEC_FILE="${perfgate_spec_file}"' in producer
+    assert '${VLLM_HUST_BENCHMARK_REPO}/${perfgate_spec_file}' not in producer
     assert "PERFGATE_BASELINE_SCENARIO: random-online" in workflow
     assert "Qwen/Qwen2.5-14B-Instruct" in workflow
+
+    store_job = workflow[workflow.index("  store-main-perfgate-baseline:") :]
+    assert 'same_spec_spec_file="${perfgate_spec_file}"' in store_job
+    assert (
+        '${GITHUB_WORKSPACE}/vllm-hust-benchmark/${perfgate_spec_file}'
+        not in store_job
+    )
 
 
 def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
