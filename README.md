@@ -119,8 +119,11 @@ system `python3` or bare `pip`.
 cd /path/to/vllm-hust
 uv venv --python 3.12
 source .venv/bin/activate
-VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
+VLLM_TARGET_DEVICE=empty uv pip install -e . --torch-backend=auto
 ```
+
+`VLLM_TARGET_DEVICE=empty` installs the core Python package without selecting a
+CUDA precompiled wheel. The Ascend plugin supplies the runtime platform.
 
 Then install this plugin:
 

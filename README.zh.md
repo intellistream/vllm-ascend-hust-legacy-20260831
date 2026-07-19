@@ -116,8 +116,11 @@ git rev-list --left-right --count origin/main...upstream/main
 cd /path/to/vllm-hust
 uv venv --python 3.12
 source .venv/bin/activate
-VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
+VLLM_TARGET_DEVICE=empty uv pip install -e . --torch-backend=auto
 ```
+
+`VLLM_TARGET_DEVICE=empty` 只安装核心 Python 包，不选择 CUDA 预编译 wheel；
+运行时平台由 Ascend 插件提供。
 
 再安装 Ascend 插件：
 
