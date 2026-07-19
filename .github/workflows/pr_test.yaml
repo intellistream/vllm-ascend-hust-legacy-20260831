@@ -134,6 +134,8 @@ jobs:
               - 'README.zh.md'
               - 'tests/ut/test_build_metadata.py'
               - 'tests/ut/test_runtime_metadata.py'
+            python_src:
+              - 'vllm_ascend/**'
             src:
               - 'vllm_ascend/**'
               - 'setup.py'
@@ -180,7 +182,7 @@ jobs:
           pre-commit run --files "${changed_files[@]}" --hook-stage manual --show-diff-on-failure
 
       - name: Run mypy
-        if: steps.filter.outputs.src == 'true'
+        if: steps.filter.outputs.python_src == 'true'
         run: |
           PYTHONPATH="$PYTHONPATH:$(pwd)/vllm-empty"
           export PYTHONPATH
