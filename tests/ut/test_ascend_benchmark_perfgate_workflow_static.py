@@ -13,6 +13,7 @@
 # This file is a part of the vllm-ascend project.
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -42,6 +43,23 @@ def test_perfgate_scripts_are_present() -> None:
         "resolve_perfgate_spec_file.py",
     ):
         assert (SCRIPT_DIR / script_name).is_file()
+
+
+def test_benchmark_artifacts_never_capture_raw_environment() -> None:
+    sources = [WORKFLOW, *sorted(SCRIPT_DIR.glob("*.py")), *sorted(SCRIPT_DIR.glob("*.sh"))]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in sources)
+
+    forbidden_patterns = {
+        "shell environment dump": r"(?m)^\s*(?:env|printenv)(?:\s*\|\s*sort)?\s*(?:>|>>|\|\s*tee)\b",
+        "Python environment iteration": r"os\.environ\.items\(\)",
+        "Python environment copy": r"dict\(os\.environ\)",
+        "proc environment copy": r"(?m)^\s*(?:cat|cp|tee)\s+[^\n]*/proc/[^\n]*/environ\b",
+        "proc environment redirect": r"/proc/[^\n]*/environ[^\n]*(?:>|>>|\|\s*tee)\b",
+    }
+    for description, pattern in forbidden_patterns.items():
+        assert re.search(pattern, combined) is None, description
+
+    assert "env.txt" not in combined
 
 
 def test_main_push_reaches_benchmark_and_baseline_store_jobs() -> None:
@@ -513,7 +531,11 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
     assert 'python -m pip install -e "$VLLM_HUST_BENCHMARK_REPO[publish]" jsonschema' not in prepare_step
     assert 'python -m pip install "huggingface_hub>=0.20"' not in prepare_step
     assert 'python -m pip install "numpy<2.0.0" scipy attrs decorator psutil' not in prepare_step
-    assert 'python -m pip install -c "$torch_constraints" -r "$VLLM_HUST_REPO/requirements/common.txt"' not in prepare_step
+    assert (
+        'python -m pip install -c "$torch_constraints" '
+        '-r "$VLLM_HUST_REPO/requirements/common.txt"'
+        not in prepare_step
+    )
     assert "VLLM_HUST_PYTHON_BIN" in prepare_step
 
 
@@ -630,7 +652,11 @@ def test_dev_hub_install_wrapper_centralizes_custom_kernel_policy() -> None:
     assert "ASCEND_BENCHMARK_TRITON_ASCEND_INDEX_URL" in install_script
     assert "https://mirrors.huaweicloud.com/ascend/repos/pypi" in install_script
     assert "ensure_triton_ascend()" in install_script
-    assert 'run_env_pip install --no-deps --index-url "$ASCEND_BENCHMARK_TRITON_ASCEND_INDEX_URL" "$triton_ascend_spec"' in install_script
+    assert (
+        'run_env_pip install --no-deps --index-url '
+        '"$ASCEND_BENCHMARK_TRITON_ASCEND_INDEX_URL" "$triton_ascend_spec"'
+        in install_script
+    )
     assert "Preinstall these packages on the self-hosted runner" not in install_script
     assert "ascend_custom_kernel_build_prereqs_present()" in install_script
     assert 'if [[ "$cann_major" == "9" ]] && ascend_custom_kernel_build_prereqs_present; then' in install_script
