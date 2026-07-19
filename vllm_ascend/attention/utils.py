@@ -287,10 +287,53 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
         )
 
 
-def _first_true_index(mask: torch.Tensor) -> torch.Tensor:
-    """Return the first true index, or len(mask) when the mask is all false."""
-    prefix_counts = torch.cumsum(mask.to(torch.int64), dim=0)
-    return torch.searchsorted(prefix_counts, prefix_counts.new_tensor(1))
+_HOST_BOUNDARY_SCAN_MAX_REQUESTS = 256
+
+
+def _split_decode_prefill_boundary_host(
+    query_start_loc: torch.Tensor,
+    query_lens: torch.Tensor | None,
+    num_reqs: int,
+    num_tokens: int,
+    decode_threshold: int,
+    require_uniform: bool,
+    treat_short_extends_as_decodes: bool,
+    is_prefilling: torch.Tensor | None,
+) -> tuple[int, int, int, int]:
+    """Find the boundary from the CPU metadata with one batched transfer."""
+    query_start_loc_values = query_start_loc.tolist()
+    if query_lens is None:
+        query_lens_values = [
+            query_start_loc_values[index + 1] - query_start_loc_values[index] for index in range(num_reqs)
+        ]
+    else:
+        query_lens_values = query_lens.tolist()
+
+    if require_uniform:
+        first_query_len = query_lens_values[0]
+        if first_query_len > decode_threshold:
+            return 0, num_reqs, 0, num_tokens
+        if all(query_len in (0, first_query_len) for query_len in query_lens_values):
+            return num_reqs, 0, num_tokens, 0
+        prefill_mask = [query_len != first_query_len for query_len in query_lens_values]
+    else:
+        prefill_mask = [query_len > decode_threshold for query_len in query_lens_values]
+
+    if not treat_short_extends_as_decodes:
+        assert is_prefilling is not None
+        short_extend_prefills = is_prefilling[:num_reqs].tolist()
+        short_extend_prefills.extend([False] * (num_reqs - len(short_extend_prefills)))
+        prefill_mask = [
+            is_prefill or is_short_extend
+            for is_prefill, is_short_extend in zip(prefill_mask, short_extend_prefills, strict=True)
+        ]
+
+    try:
+        num_decodes = prefill_mask.index(True)
+    except ValueError:
+        num_decodes = num_reqs
+    num_decode_tokens = query_start_loc_values[num_decodes]
+    return num_decodes, num_reqs - num_decodes, num_decode_tokens, num_tokens - num_decode_tokens
 
 
 def _split_decode_prefill_boundary(
@@ -316,10 +359,37 @@ def _split_decode_prefill_boundary(
         return num_reqs, 0, num_tokens, 0
 
     query_start_loc = query_start_loc[: num_reqs + 1].contiguous()
+    query_lens = None if query_lens is None else query_lens[:num_reqs].contiguous()
+
+    # These are explicitly the CPU copies from CommonAttentionMetadata. For
+    # normal scheduler sizes, one tolist() plus a host scan is substantially
+    # cheaper than launching a chain of small tensor operations. Keep the
+    # tensor path for unusually large batches, where conversion cost dominates.
+    if num_reqs <= _HOST_BOUNDARY_SCAN_MAX_REQUESTS:
+        return _split_decode_prefill_boundary_host(
+            query_start_loc,
+            query_lens,
+            num_reqs,
+            num_tokens,
+            decode_threshold,
+            require_uniform,
+            treat_short_extends_as_decodes,
+            is_prefilling,
+        )
+
     if query_lens is None:
         query_lens = torch.diff(query_start_loc).contiguous()
-    else:
-        query_lens = query_lens[:num_reqs].contiguous()
+
+    # Match the previous tensor path for uncommon very large batches. This
+    # avoids making the tail case pay for the more general uniform/extend mask
+    # construction below.
+    if not require_uniform and treat_short_extends_as_decodes:
+        is_prefill = query_lens > decode_threshold
+        if not torch.any(is_prefill):
+            return num_reqs, 0, num_tokens, 0
+        num_decodes = is_prefill.int().argmax(dim=-1).item()
+        num_decode_tokens = query_start_loc[num_decodes].item()
+        return num_decodes, num_reqs - num_decodes, num_decode_tokens, num_tokens - num_decode_tokens
 
     force_all_decode = torch.tensor(False, device=query_start_loc.device)
     if require_uniform:
@@ -358,23 +428,13 @@ def _split_decode_prefill_boundary(
         )
         is_prefill |= short_extend_prefills
 
-    first_prefill = _first_true_index(is_prefill)
-    num_reqs_t = first_prefill.new_tensor(num_reqs)
-    num_decodes = first_prefill
-    num_prefills = num_reqs_t - num_decodes
-    num_decode_tokens = query_start_loc[first_prefill].to(torch.int64)
-    num_prefill_tokens = first_prefill.new_tensor(num_tokens) - num_decode_tokens
+    prefill_indices = torch.nonzero(is_prefill, as_tuple=False)
+    if prefill_indices.numel() == 0:
+        return num_reqs, 0, num_tokens, 0
 
-    result = torch.stack(
-        [
-            num_decodes.to(torch.int64),
-            num_prefills.to(torch.int64),
-            num_decode_tokens,
-            num_prefill_tokens,
-        ]
-    )
-    result_list = result.tolist()
-    return result_list[0], result_list[1], result_list[2], result_list[3]
+    num_decodes = prefill_indices[0, 0].item()
+    num_decode_tokens = query_start_loc[num_decodes].item()
+    return num_decodes, num_reqs - num_decodes, num_decode_tokens, num_tokens - num_decode_tokens
 
 
 def filter_chunked_req_indices(

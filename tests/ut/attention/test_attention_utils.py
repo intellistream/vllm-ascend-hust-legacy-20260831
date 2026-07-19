@@ -264,3 +264,37 @@ def test_split_decodes_and_prefills_large_mixed_batch():
     assert num_prefills == 32
     assert num_decode_tokens == 128
     assert num_prefill_tokens == 160
+
+
+def test_split_decodes_and_prefills_large_batch_uses_tensor_path():
+    query_lens = [1] * 513 + [5] * 128
+    common_attn_metadata = build_common_attention_metadata(
+        query_lens=query_lens,
+    )
+
+    num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
+        common_attn_metadata,
+        decode_threshold=1,
+    )
+
+    assert num_decodes == 513
+    assert num_prefills == 128
+    assert num_decode_tokens == 513
+    assert num_prefill_tokens == 640
+
+
+def test_split_decodes_and_prefills_require_uniform_all_prefill():
+    common_attn_metadata = build_common_attention_metadata(
+        query_lens=[5, 5, 5],
+    )
+
+    num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
+        common_attn_metadata,
+        decode_threshold=4,
+        require_uniform=True,
+    )
+
+    assert num_decodes == 0
+    assert num_prefills == 3
+    assert num_decode_tokens == 0
+    assert num_prefill_tokens == 15
