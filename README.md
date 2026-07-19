@@ -129,8 +129,13 @@ Then install this plugin:
 
 ```bash
 cd /path/to/vllm-ascend-hust
-COMPILE_CUSTOM_KERNELS=0 uv pip install -e . --no-deps
+COMPILE_CUSTOM_KERNELS=0 uv pip install -e . \
+  --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+  --index-strategy unsafe-best-match
 ```
+
+The trusted Ascend index provides `torch-npu` and `triton-ascend`. The index
+strategy lets `uv` select compatible versions across PyPI and that index.
 
 On HUST local hosts, prefer the repository install helper:
 

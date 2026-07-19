@@ -126,8 +126,13 @@ VLLM_TARGET_DEVICE=empty uv pip install -e . --torch-backend=auto
 
 ```bash
 cd /path/to/vllm-ascend-hust
-COMPILE_CUSTOM_KERNELS=0 uv pip install -e . --no-deps
+COMPILE_CUSTOM_KERNELS=0 uv pip install -e . \
+  --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+  --index-strategy unsafe-best-match
 ```
+
+可信的 Ascend 软件源提供 `torch-npu` 和 `triton-ascend`；该索引策略允许 `uv`
+在 PyPI 与 Ascend 软件源之间选择兼容版本。
 
 在 HUST 本地机器上，优先使用仓库自带安装脚本：
 
