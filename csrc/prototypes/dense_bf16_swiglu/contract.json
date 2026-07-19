@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "protocol_sha256": "56093c4fd765c1bc0b8b17d8e7196f86e62d50505c644479e52a26fe34af3e73",
+  "status": "stage0-static-prototype-not-cann-compiled",
+  "dtype": "bfloat16",
+  "accumulator_dtype": "float32",
+  "operation": "down(silu(gate(x)) * up(x))",
+  "weight_layouts": {
+    "gate": "row-major [intermediate, hidden]",
+    "up": "row-major [intermediate, hidden]",
+    "down": "row-major [hidden, intermediate]"
+  },
+  "models": [
+    {"name": "Qwen2.5-7B", "hidden": 3584, "intermediate": 18944},
+    {"name": "Qwen2.5-14B", "hidden": 5120, "intermediate": 13824}
+  ],
+  "natural_m": [1, 4, 8, 16, 32],
+  "schedule_space": {
+    "block_m": [1, 4, 8, 16, 32],
+    "block_n": [64, 128],
+    "block_k": [64, 128],
+    "candidate_count": 20
+  },
+  "abi": ["x", "gate_weight", "up_weight", "down_weight", "y", "workspace", "tiling"],
+  "offline_only": true,
+  "npu_execution_authorized": false,
+  "cann_compile_verified": false
+}
