@@ -41,6 +41,7 @@ def test_paired_editable_workflow_uses_empty_target_dependency_sets():
     assert "runs-on: ubuntu-24.04-arm" in workflow[job:checkout]
     assert "runs-on: linux-aarch64-a2b3-1" not in workflow[job:checkout]
     assert "container:" not in workflow[job:checkout]
+    assert "TORCH_DEVICE_BACKEND_AUTOLOAD: 0" in workflow[job:checkout]
     assert "ref: main" in workflow[checkout:runtime_install]
     assert "-r ./requirements.txt" in workflow[runtime_install:core_install]
     assert runtime_install < build_tools < core_install < plugin_install

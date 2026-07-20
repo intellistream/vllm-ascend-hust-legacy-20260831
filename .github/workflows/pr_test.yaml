@@ -245,6 +245,7 @@ jobs:
       UV_INDEX_URL: https://repo.huaweicloud.com/repository/pypi/simple
       UV_HTTP_TIMEOUT: 60
       UV_LINK_MODE: copy
+      TORCH_DEVICE_BACKEND_AUTOLOAD: 0
     steps:
       - name: Checkout vllm-ascend-hust
         uses: actions/checkout@v7
