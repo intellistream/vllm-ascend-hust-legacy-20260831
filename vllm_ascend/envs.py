@@ -214,6 +214,40 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_SIMLLM_MAX_DEFERRALS": lambda: int(
         os.getenv("VLLM_ASCEND_SIMLLM_MAX_DEFERRALS", "3")
     ),
+
+    # -- Inplace Parallel Split Batch ---------------------------------------
+    # Synchronization policy for merging split-batch results in inplace_parallel
+    # mode. "event_wait" (default) uses lightweight NPU events; "host_sync"
+    # performs full device synchronization.
+    "VLLM_ASCEND_INPLACE_PARALLEL_MERGE_SYNC_POLICY": lambda: os.getenv(
+        "VLLM_ASCEND_INPLACE_PARALLEL_MERGE_SYNC_POLICY", "event_wait"
+    ).strip().lower(),
+
+    # Controls whether split outputs are cloned before merging.
+    # "auto": skip clone when event_wait + FULL decode + 2 splits (default);
+    # "clone": always clone; "direct": never clone.
+    "VLLM_ASCEND_INPLACE_PARALLEL_SPLIT_OUTPUT_MODE": lambda: os.getenv(
+        "VLLM_ASCEND_INPLACE_PARALLEL_SPLIT_OUTPUT_MODE", "auto"
+    ).strip().lower(),
+
+    # Whether to reuse split-0 cos/sin in split-1 for rotary embedding.
+    # "1" (default) enables reuse, "0" disables.
+    "VLLM_ASCEND_INPLACE_PARALLEL_REUSE_SPLIT0_COS_SIN": lambda: os.getenv(
+        "VLLM_ASCEND_INPLACE_PARALLEL_REUSE_SPLIT0_COS_SIN", "1"
+    ) not in ("0", "false", "False"),
+
+    # Replay stream cube/vector limits for inplace parallel.
+    # Format: "main_cube,main_vector:parallel_cube,parallel_vector"
+    # Example: "8,16:8,16"
+    "VLLM_ASCEND_INPLACE_PARALLEL_REPLAY_STREAM_LIMITS": lambda: os.getenv(
+        "VLLM_ASCEND_INPLACE_PARALLEL_REPLAY_STREAM_LIMITS", None
+    ),
+
+    # Update stream cube/vector limits for inplace parallel.
+    # Same format as REPLAY_STREAM_LIMITS.
+    "VLLM_ASCEND_INPLACE_PARALLEL_UPDATE_STREAM_LIMITS": lambda: os.getenv(
+        "VLLM_ASCEND_INPLACE_PARALLEL_UPDATE_STREAM_LIMITS", None
+    ),
 }
 
 # end-env-vars-definition

@@ -296,12 +296,7 @@ class ACLGraphWrapper:
                 entry.input_addresses, args, self.runnable_name)
 
         logger.info_once("Replaying aclgraph")
-        is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
-        if not in_parallel_streams:
-            need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
-            if not self.enable_enpu and need_sync:
-                torch.npu.current_stream().synchronize()
-        elif _ACLGRAPH_REPLAY_GLOBAL_SYNC:
+        if _ACLGRAPH_REPLAY_GLOBAL_SYNC and not in_parallel_streams:
             torch.npu.synchronize()
         set_graph_pool_id(graph_pool)
         entry.aclgraph.replay()

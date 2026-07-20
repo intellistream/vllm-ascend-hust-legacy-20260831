@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import threading
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
@@ -47,6 +48,149 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
+_INPLACE_PARALLEL_MERGE_SYNC_POLICY = os.environ.get(
+    "VLLM_ASCEND_INPLACE_PARALLEL_MERGE_SYNC_POLICY", "event_wait").strip(
+    ).lower()
+if _INPLACE_PARALLEL_MERGE_SYNC_POLICY not in ("event_wait", "host_sync"):
+    logger.warning(
+        "Unknown VLLM_ASCEND_INPLACE_PARALLEL_MERGE_SYNC_POLICY=%r; "
+        "falling back to event_wait",
+        _INPLACE_PARALLEL_MERGE_SYNC_POLICY,
+    )
+    _INPLACE_PARALLEL_MERGE_SYNC_POLICY = "event_wait"
+
+
+def _parse_inplace_parallel_split_output_mode() -> str:
+    mode = os.environ.get("VLLM_ASCEND_INPLACE_PARALLEL_SPLIT_OUTPUT_MODE")
+    if mode is None:
+        legacy_clone = os.environ.get(
+            "VLLM_ASCEND_INPLACE_PARALLEL_CLONE_SPLIT_OUTPUTS")
+        if legacy_clone is None:
+            return "auto"
+        return ("direct" if legacy_clone in ("0", "false", "False") else
+                "clone")
+    mode = mode.strip().lower()
+    if mode in ("auto", "clone", "direct"):
+        return mode
+    if mode in ("0", "false"):
+        return "direct"
+    if mode in ("1", "true"):
+        return "clone"
+    logger.warning(
+        "Unknown VLLM_ASCEND_INPLACE_PARALLEL_SPLIT_OUTPUT_MODE=%r; "
+        "falling back to auto",
+        mode,
+    )
+    return "auto"
+
+
+_INPLACE_PARALLEL_SPLIT_OUTPUT_MODE = (
+    _parse_inplace_parallel_split_output_mode())
+
+
+def _parse_stream_limit_pair(value: str, env_name: str) -> tuple[int, int] | None:
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 2:
+        logger.warning(
+            "Ignoring %s=%r: expected cube,vector",
+            env_name,
+            value,
+        )
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        logger.warning(
+            "Ignoring %s=%r: cube/vector must be integers",
+            env_name,
+            value,
+        )
+        return None
+
+
+def _parse_stream_limit_spec(
+        env_name: str) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return None
+    parts = [part.strip() for part in raw.split(";")]
+    if len(parts) == 1:
+        limit = _parse_stream_limit_pair(parts[0], env_name)
+        if limit is None:
+            return None
+        return limit, limit
+    if len(parts) == 2:
+        main_limit = _parse_stream_limit_pair(parts[0], env_name)
+        parallel_limit = _parse_stream_limit_pair(parts[1], env_name)
+        if main_limit is None or parallel_limit is None:
+            return None
+        return main_limit, parallel_limit
+    logger.warning(
+        "Ignoring %s=%r: expected cube,vector or "
+        "main_cube,main_vector;parallel_cube,parallel_vector",
+        env_name,
+        raw,
+    )
+    return None
+
+
+_INPLACE_PARALLEL_REPLAY_STREAM_LIMITS = _parse_stream_limit_spec(
+    "VLLM_ASCEND_INPLACE_PARALLEL_REPLAY_STREAM_LIMITS")
+_INPLACE_PARALLEL_UPDATE_STREAM_LIMITS = _parse_stream_limit_spec(
+    "VLLM_ASCEND_INPLACE_PARALLEL_UPDATE_STREAM_LIMITS")
+
+_INPLACE_PARALLEL_REUSE_SPLIT0_COS_SIN = os.environ.get(
+    "VLLM_ASCEND_INPLACE_PARALLEL_REUSE_SPLIT0_COS_SIN", "1") not in (
+        "0", "false", "False")
+
+
+def _inplace_parallel_clone_split_outputs(
+        *,
+        allow_auto_direct_outputs: bool,
+        split_cfg: Any,
+        split_batch_slices: list[Any],
+        aclgraph_runtime_mode: CUDAGraphMode,
+        merge_sync_policy: str) -> bool:
+    if _INPLACE_PARALLEL_SPLIT_OUTPUT_MODE == "clone":
+        return True
+    if _INPLACE_PARALLEL_SPLIT_OUTPUT_MODE == "direct":
+        return False
+    if not allow_auto_direct_outputs:
+        return True
+    if aclgraph_runtime_mode != CUDAGraphMode.FULL:
+        return True
+    if merge_sync_policy != "event_wait":
+        return True
+    if split_cfg is None:
+        return True
+    if getattr(split_cfg, "mode", "") != "inplace_parallel":
+        return True
+    if not bool(getattr(split_cfg, "enable_parallel_streams", False)):
+        return True
+    return len(split_batch_slices) != 2
+
+
+def _record_stream_tree_for_npugraph_ex(value: Any, stream: Any) -> None:
+    if isinstance(value, torch.Tensor):
+        try:
+            if value.device.type == "npu":
+                value.record_stream(stream)
+        except Exception:
+            return
+        return
+    if isinstance(value, IntermediateTensors):
+        for tensor in value.tensors.values():
+            _record_stream_tree_for_npugraph_ex(tensor, stream)
+        return
+    if isinstance(value, dict):
+        for child in value.values():
+            _record_stream_tree_for_npugraph_ex(child, stream)
+        return
+    if isinstance(value, (list, tuple)):
+        for child in value:
+            _record_stream_tree_for_npugraph_ex(child, stream)
+
+
 class InplaceSplitRunner:
     """Orchestrates inplace split-batch execution.
 
@@ -55,6 +199,8 @@ class InplaceSplitRunner:
 
     def __init__(self, runner: "NPUModelRunner"):
         self._runner = runner
+        self._inplace_parallel_output_release_events: list[
+            torch.npu.Event | None] = []
 
     @property
     def device(self) -> torch.device:
@@ -107,6 +253,64 @@ class InplaceSplitRunner:
     @property
     def model(self):
         return self._runner.model
+
+    def _record_replay_stream_event(
+            self, stream: torch.npu.Stream) -> torch.npu.Event:
+        event = torch.npu.Event()
+        event.record(stream)
+        return event
+
+    def _wait_replay_stream_events(
+            self, stream: torch.npu.Stream,
+            events: list[torch.npu.Event | None]) -> None:
+        for event in events:
+            if event is not None:
+                stream.wait_event(event)
+
+    def _wait_inplace_parallel_output_release_events(
+            self, streams: list[torch.npu.Stream]) -> int:
+        events = getattr(self, "_inplace_parallel_output_release_events", [])
+        if not events:
+            return 0
+        self._inplace_parallel_output_release_events = []
+        for stream in streams:
+            self._wait_replay_stream_events(stream, events)
+        return len(events)
+
+    def _record_inplace_parallel_output_release_event(
+            self) -> torch.npu.Event:
+        event = self._record_replay_stream_event(self.stream_main)
+        self._inplace_parallel_output_release_events = [event]
+        return event
+
+    def _set_stream_limit(self, stream: torch.npu.Stream,
+                          limit: tuple[int, int], label: str) -> None:
+        cube_num, vector_num = limit
+        try:
+            torch.npu.set_stream_limit(stream,
+                                       cube_num=cube_num,
+                                       vector_num=vector_num)
+            logger.info_once(
+                "Applied inplace_parallel stream limit for %s: "
+                "cube_num=%s vector_num=%s",
+                label,
+                cube_num,
+                vector_num,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to apply inplace_parallel stream limit for %s: %s",
+                label,
+                exc,
+            )
+
+    def _apply_inplace_parallel_replay_stream_limits(self) -> None:
+        limits = _INPLACE_PARALLEL_REPLAY_STREAM_LIMITS
+        if limits is None:
+            return
+        self._set_stream_limit(self.stream_main, limits[0], "replay_main")
+        self._set_stream_limit(self.stream_parallel, limits[1],
+                               "replay_parallel")
 
 
     def _stabilize_inplace_common_attn_metadata_list(
@@ -872,6 +1076,23 @@ class InplaceSplitRunner:
                 template_fia_seq_lens_list(ubatch_attn_metadata, self.block_size)
 
             ctx_stream = self.stream_parallel if in_parallel_streams else self.stream_main
+            clone_cos_sin = not (
+                _INPLACE_PARALLEL_REUSE_SPLIT0_COS_SIN
+                and aclgraph_runtime_mode == CUDAGraphMode.FULL
+                and split_cfg is not None
+                and getattr(split_cfg, "mode", "") == "inplace_parallel"
+                and bool(getattr(split_cfg, "enable_parallel_streams", False))
+                and len(split_batch_slices) == 2
+            )
+            reuse_cos_sin = (
+                _INPLACE_PARALLEL_REUSE_SPLIT0_COS_SIN
+                and i == 0
+                and aclgraph_runtime_mode == CUDAGraphMode.FULL
+                and split_cfg is not None
+                and getattr(split_cfg, "mode", "") == "inplace_parallel"
+                and bool(getattr(split_cfg, "enable_parallel_streams", False))
+                and len(split_batch_slices) == 2
+            )
             with torch.npu.stream(ctx_stream):
                 split_forward_context = create_ascend_forward_context(
                     cur_forward_context,
@@ -885,6 +1106,8 @@ class InplaceSplitRunner:
                     positions=prepared_split_inputs[i]["positions"],
                     in_parallel_streams=in_parallel_streams,
                     cos_sin_slot_id=i,
+                    reuse_existing_cos_sin=reuse_cos_sin,
+                    clone_cos_sin=clone_cos_sin,
                 )
             setattr(split_forward_context, "split_inplace_mode",
                     "inplace_parallel")
@@ -1007,6 +1230,8 @@ class InplaceSplitRunner:
         if self.stream_parallel is None:
             self._runner.stream_parallel = torch.npu.Stream(device=self.device)
 
+        self._apply_inplace_parallel_replay_stream_limits()
+
         from vllm.v1.worker.ubatch_utils import UBatchSlice
         split_ubatch_slices = [
             UBatchSlice(s.request_slice, s.token_slice)
@@ -1026,11 +1251,40 @@ class InplaceSplitRunner:
             inplace_attention_backend=inplace_attention_backend,
         )
 
+        clone_split_outputs = _inplace_parallel_clone_split_outputs(
+            allow_auto_direct_outputs=True,
+            split_cfg=split_cfg,
+            split_batch_slices=split_slices,
+            aclgraph_runtime_mode=cudagraph_mode,
+            merge_sync_policy=_INPLACE_PARALLEL_MERGE_SYNC_POLICY,
+        )
+
         results: list[Any | None] = [None] * num_splits
+        split_done_events: list[torch.npu.Event | None] = [None] * num_splits
         split_errors: list[tuple[int, Exception]] = []
         split_error_lock = threading.Lock()
 
         split_debug_active = _split_debug_enabled()
+
+        self._wait_inplace_parallel_output_release_events(
+            (self.stream_main, self.stream_parallel))
+
+        def _finish_inplace_parallel_split_result(
+                slice_idx: int,
+                split_result: Any,
+                *,
+                parallel_streams: bool,
+                target_stream: torch.npu.Stream) -> None:
+            split_slice = split_slices[slice_idx]
+            with torch.npu.stream(target_stream):
+                trimmed_result = trim_split_output(
+                    split_result, split_slice.num_tokens)
+                if clone_split_outputs:
+                    trimmed_result = clone_split_output(trimmed_result)
+                results[slice_idx] = trimmed_result
+                if parallel_streams:
+                    split_done_events[slice_idx] = (
+                        self._record_replay_stream_event(target_stream))
 
         def _run_inplace_parallel_worker(slice_idx: int) -> None:
             try:
@@ -1079,8 +1333,14 @@ class InplaceSplitRunner:
                                 "before normal replay path: "
                                 f"{metadata.context.batch_descriptor!r}")
                         with torch.npu.stream(target_stream):
-
                             with override_forward_context(metadata.context):
+                                split_result = self.model(
+                                    input_ids=metadata.input_ids,
+                                    positions=metadata.positions,
+                                    inputs_embeds=metadata.inputs_embeds,
+                                    intermediate_tensors=metadata.intermediate_tensors,
+                                    **model_kwargs,
+                                )
                                 if (metadata.context.cudagraph_runtime_mode
                                         == CUDAGraphMode.FULL):
                                     if split_slice.start_num_tokens > 0:
@@ -1092,18 +1352,12 @@ class InplaceSplitRunner:
                                         self._update_attn_params_for_wrapper(
                                             metadata.context,
                                             split_slice.graph_num_tokens)
-                                split_result = self.model(
-                                    input_ids=metadata.input_ids,
-                                    positions=metadata.positions,
-                                    inputs_embeds=metadata.inputs_embeds,
-                                    intermediate_tensors=metadata.intermediate_tensors,
-                                    **model_kwargs,
-                                )
 
-                    with torch.npu.stream(target_stream):
-                        results[slice_idx] = clone_split_output(
-                            trim_split_output(split_result,
-                                              split_slice.num_tokens))
+                    _finish_inplace_parallel_split_result(
+                        slice_idx,
+                        split_result,
+                        parallel_streams=parallel_streams,
+                        target_stream=target_stream)
             except Exception as e:
                 with split_error_lock:
                     split_errors.append((slice_idx, e))
@@ -1128,12 +1382,35 @@ class InplaceSplitRunner:
                 "inplace parallel replay worker failed at "
                 f"slice_idx={failed_slice_idx}: {first_error}") from first_error
 
-        self.stream_main.synchronize()
-        if num_splits > 1:
-            self.stream_parallel.synchronize()
+        merged_results: list[Any] = [
+            result for result in results if result is not None
+        ]
+        if len(merged_results) != num_splits:
+            raise RuntimeError(
+                "Missing inplace parallel split result: "
+                f"expected={num_splits}, got={len(merged_results)}")
 
-        with override_forward_context(original_forward_context):
-            return merge_split_outputs([r for r in results if r is not None])
+        if _INPLACE_PARALLEL_MERGE_SYNC_POLICY == "host_sync":
+            self.stream_main.synchronize()
+            if num_splits > 1:
+                self.stream_parallel.synchronize()
+            with override_forward_context(original_forward_context):
+                result = merge_split_outputs(merged_results)
+                if not clone_split_outputs:
+                    self._record_inplace_parallel_output_release_event()
+            return result
+
+        with torch.npu.stream(self.stream_main):
+            self._wait_replay_stream_events(self.stream_main,
+                                            split_done_events)
+            for merged_result in merged_results:
+                _record_stream_tree_for_npugraph_ex(merged_result,
+                                                    self.stream_main)
+            with override_forward_context(original_forward_context):
+                result = merge_split_outputs(merged_results)
+                if not clone_split_outputs:
+                    self._record_inplace_parallel_output_release_event()
+        return result
 
     def capture_parallel_stream_graphs(self) -> None:
         from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
