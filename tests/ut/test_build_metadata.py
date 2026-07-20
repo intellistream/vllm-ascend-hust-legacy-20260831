@@ -49,6 +49,8 @@ def test_paired_editable_workflow_uses_empty_target_dependency_sets():
     assert "--no-deps" in workflow[core_install:plugin_install]
     assert "--no-build-isolation" not in workflow[plugin_install:]
     assert "from importlib.metadata import distribution" in workflow[plugin_install:]
+    assert 'Path(path).name.startswith("__editable__.")' in workflow[plugin_install:]
+    assert "dist.locate_file(path).is_file()" in workflow[plugin_install:]
     assert 'for package in ("vllm", "vllm-ascend-hust")' in workflow[plugin_install:]
     assert "import vllm; import vllm_ascend" not in workflow[plugin_install:]
 

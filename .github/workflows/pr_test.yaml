@@ -301,10 +301,22 @@ jobs:
           .venv-dual-editable/bin/python - <<'PY'
           import json
           from importlib.metadata import distribution
+          from pathlib import Path
 
           for package in ("vllm", "vllm-ascend-hust"):
-              direct_url = distribution(package).read_text("direct_url.json")
-              assert direct_url is not None
-              assert json.loads(direct_url)["dir_info"]["editable"] is True
+              dist = distribution(package)
+              direct_url = dist.read_text("direct_url.json")
+              if direct_url is not None:
+                  assert json.loads(direct_url)["dir_info"]["editable"] is True, package
+                  continue
+
+              editable_paths = [
+                  path
+                  for path in (dist.files or ())
+                  if Path(path).name.startswith("__editable__.")
+                  and Path(path).suffix == ".pth"
+              ]
+              assert editable_paths, f"{package}: no editable-install metadata"
+              assert all(dist.locate_file(path).is_file() for path in editable_paths)
           PY
           uv pip check --python .venv-dual-editable/bin/python
