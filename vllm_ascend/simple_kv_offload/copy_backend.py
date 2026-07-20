@@ -20,6 +20,8 @@ from vllm_ascend.simple_kv_offload.npu_mem_ops import (
     copy_blocks,
 )
 
+_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
 
 class NPUDmaCopyBackend:
     """``aclrtMemcpyBatchAsync`` copy backend running on a worker thread.
@@ -39,7 +41,11 @@ class NPUDmaCopyBackend:
         self._device: torch.device | None = None
         self._queue: queue.SimpleQueue | None = None
         self._thread: threading.Thread | None = None
+        self._state_lock = threading.Lock()
+        self._shutdown_lock = threading.Lock()
+        self._background_error: Exception | None = None
         self._shutdown: bool = False
+        self._shutdown_complete: bool = False
 
     def init(
         self,
@@ -49,20 +55,29 @@ class NPUDmaCopyBackend:
         load_stream: torch.npu.Stream,
         store_stream: torch.npu.Stream,
     ) -> None:
-        self._load_stream = load_stream
-        self._store_stream = store_stream
-        self._device = device
         # Stores go NPU->CPU (D2H), loads go CPU->NPU (H2D).
-        self._store_params = build_params(npu_caches, cpu_caches, DIRECTION_D2H)
-        self._load_params = build_params(cpu_caches, npu_caches, DIRECTION_H2D)
-
-        self._queue = queue.SimpleQueue()
-        self._thread = threading.Thread(
+        store_params = build_params(npu_caches, cpu_caches, DIRECTION_D2H)
+        load_params = build_params(cpu_caches, npu_caches, DIRECTION_H2D)
+        copy_queue = queue.SimpleQueue()
+        copy_thread = threading.Thread(
             target=self._copy_loop,
             name="npu-kv-offload-copy",
             daemon=True,
         )
-        self._thread.start()
+
+        with self._state_lock:
+            if self._shutdown:
+                raise RuntimeError("NPU KV offload copy backend is shut down")
+            if self._thread is not None:
+                raise RuntimeError("NPU KV offload copy backend is already initialized")
+            self._load_stream = load_stream
+            self._store_stream = store_stream
+            self._device = device
+            self._store_params = store_params
+            self._load_params = load_params
+            self._queue = copy_queue
+            self._thread = copy_thread
+            copy_thread.start()
 
     def launch_copy(
         self,
@@ -73,58 +88,106 @@ class NPUDmaCopyBackend:
         events_list: list[tuple[int, torch.npu.Event]],
         wait_event: torch.npu.Event | None = None,
     ) -> None:
-        params = self._store_params if is_store else self._load_params
-        assert params is not None and self._queue is not None
-        self._queue.put(
-            (
-                src_blocks,
-                dst_blocks,
-                params,
-                is_store,
-                event_idx,
-                events_list,
-                wait_event,
+        with self._state_lock:
+            if self._shutdown:
+                raise RuntimeError("NPU KV offload copy backend is shut down")
+            self._raise_if_failed_locked()
+            params = self._store_params if is_store else self._load_params
+            copy_queue = self._queue
+            if params is None or copy_queue is None:
+                raise RuntimeError("NPU KV offload copy backend is not initialized")
+            copy_queue.put(
+                (
+                    src_blocks,
+                    dst_blocks,
+                    params,
+                    is_store,
+                    event_idx,
+                    events_list,
+                    wait_event,
+                )
             )
-        )
 
-    def shutdown(self) -> None:
-        if self._shutdown:
-            return
-        self._shutdown = True
-        if self._queue is not None:
-            self._queue.put(None)
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
+    def check_health(self) -> None:
+        with self._state_lock:
+            self._raise_if_failed_locked()
+
+    def shutdown(self, timeout: float = _SHUTDOWN_TIMEOUT_SECONDS) -> None:
+        with self._shutdown_lock:
+            with self._state_lock:
+                if self._shutdown_complete:
+                    self._raise_if_failed_locked()
+                    return
+                if not self._shutdown:
+                    self._shutdown = True
+                    if self._queue is not None:
+                        self._queue.put(None)
+                copy_thread = self._thread
+                streams = (self._load_stream, self._store_stream)
+
+            if copy_thread is not None:
+                copy_thread.join(timeout=timeout)
+                if copy_thread.is_alive():
+                    raise RuntimeError(f"NPU KV offload copy thread did not stop within {timeout:.1f} seconds")
+
+            sync_error: Exception | None = None
+            for stream in streams:
+                if stream is None:
+                    continue
+                try:
+                    stream.synchronize()
+                except Exception as exc:
+                    if sync_error is None:
+                        sync_error = exc
+
+            with self._state_lock:
+                background_error = self._background_error
+                if sync_error is None:
+                    self._shutdown_complete = True
+
+            if background_error is not None:
+                raise RuntimeError("NPU KV offload copy thread failed") from background_error
+            if sync_error is not None:
+                raise RuntimeError("Failed to synchronize NPU KV offload streams") from sync_error
 
     # ------------------------------------------------------------------
     # Worker thread main loop
     # ------------------------------------------------------------------
     def _copy_loop(self) -> None:
-        assert self._device is not None
-        assert self._queue is not None
-        assert self._load_stream is not None
-        assert self._store_stream is not None
-        torch.npu.set_device(self._device)
+        try:
+            assert self._device is not None
+            assert self._queue is not None
+            assert self._load_stream is not None
+            assert self._store_stream is not None
+            torch.npu.set_device(self._device)
 
-        while True:
-            item = self._queue.get()
-            if item is None:
-                return
-            (
-                src_blocks,
-                dst_blocks,
-                params,
-                is_store,
-                event_idx,
-                events_list,
-                wait_event,
-            ) = item
+            while True:
+                item = self._queue.get()
+                if item is None:
+                    return
+                (
+                    src_blocks,
+                    dst_blocks,
+                    params,
+                    is_store,
+                    event_idx,
+                    events_list,
+                    wait_event,
+                ) = item
 
-            stream = self._store_stream if is_store else self._load_stream
-            with torch.npu.stream(stream):
-                if wait_event is not None:
-                    stream.wait_event(wait_event)
-                copy_blocks(src_blocks, dst_blocks, params)
-                event = torch.npu.Event()
-                event.record(stream)
-            events_list.append((event_idx, event))
+                stream = self._store_stream if is_store else self._load_stream
+                with torch.npu.stream(stream):
+                    if wait_event is not None:
+                        stream.wait_event(wait_event)
+                    copy_blocks(src_blocks, dst_blocks, params)
+                    event = torch.npu.Event()
+                    event.record(stream)
+                events_list.append((event_idx, event))
+        except Exception as exc:
+            with self._state_lock:
+                if self._background_error is None:
+                    self._background_error = exc
+
+    def _raise_if_failed_locked(self) -> None:
+        if self._background_error is not None:
+            raise RuntimeError("NPU KV offload copy thread failed") from self._background_error

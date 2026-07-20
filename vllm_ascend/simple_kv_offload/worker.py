@@ -18,8 +18,8 @@ and only overrides what differs on NPU:
 All other handler entry points — ``bind_connector_metadata``,
 ``clear_connector_metadata``, ``start_load_kv``, ``wait_for_save``,
 ``get_finished``, ``build_connector_worker_meta``, ``handle_preemptions``,
-``_flush_and_sync_all``, ``_poll_stream_events`` — are inherited
-verbatim.
+and the transfer bookkeeping are inherited. Health checks and shutdown are
+overridden to surface copy-thread failures and drain the NPU backend.
 """
 
 from typing import TYPE_CHECKING
@@ -156,6 +156,20 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
             self.load_stream,
             self.store_stream,
         )
+
+    def _poll_stream_events(self, is_store: bool) -> int:
+        self._backend.check_health()
+        high_water_mark = super()._poll_stream_events(is_store)
+        self._backend.check_health()
+        return high_water_mark
+
+    def _flush_and_sync_all(self) -> None:
+        self._backend.check_health()
+        super()._flush_and_sync_all()
+        self._backend.check_health()
+
+    def shutdown(self) -> None:
+        self._backend.shutdown()
 
     @staticmethod
     def _build_block_views(

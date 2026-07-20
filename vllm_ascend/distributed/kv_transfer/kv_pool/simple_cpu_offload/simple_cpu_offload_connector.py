@@ -58,3 +58,7 @@ class AscendSimpleCPUOffloadConnector(SimpleCPUOffloadConnector):
                 "AscendSimpleCPUOffloadConnector: swapped CUDA worker for NPU worker (per_rank=%.2f GB)",
                 cpu_capacity / (1024**3),
             )
+
+    def shutdown(self) -> None:
+        if self.worker_handler is not None:
+            self.worker_handler.shutdown()

@@ -1,7 +1,6 @@
 """验证 NPU Simple CPU Offload worker 的 store 事件传递。
 
-测试配对的 vllm-hust 提交：
-53decfd3a41eba482031e9a7ac92f14585fb2d54。
+配对的 vllm-hust 精确提交记录在 PR 描述中。
 """
 
 from unittest.mock import MagicMock, patch
@@ -9,6 +8,9 @@ from unittest.mock import MagicMock, patch
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 
+from vllm_ascend.distributed.kv_transfer.kv_pool.simple_cpu_offload.simple_cpu_offload_connector import (
+    AscendSimpleCPUOffloadConnector,
+)
 from vllm_ascend.simple_kv_offload.copy_backend import NPUDmaCopyBackend
 from vllm_ascend.simple_kv_offload.worker import SimpleCPUOffloadNPUWorker
 
@@ -23,7 +25,6 @@ def test_npu_worker_store_records_and_forwards_compute_event() -> None:
         store_gpu_blocks=[3, 4],
         store_cpu_blocks=[11, 12],
     )
-    worker._store_compute_done = None
     worker._load_events = []
     worker._store_events = []
     worker._pending_load_event_indices = set()
@@ -53,3 +54,31 @@ def test_npu_worker_store_records_and_forwards_compute_event() -> None:
         events_list=worker._store_events,
         wait_event=compute_event,
     )
+
+
+def test_npu_worker_poll_checks_copy_thread_health() -> None:
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker._backend = MagicMock(spec=NPUDmaCopyBackend)
+    worker._store_events = []
+    worker._store_hwm = -1
+
+    assert worker._poll_stream_events(is_store=True) == -1
+    assert worker._backend.check_health.call_count == 2
+
+
+def test_npu_worker_shutdown_drains_backend() -> None:
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker._backend = MagicMock(spec=NPUDmaCopyBackend)
+
+    worker.shutdown()
+
+    worker._backend.shutdown.assert_called_once_with()
+
+
+def test_connector_shutdown_routes_to_npu_worker() -> None:
+    connector = AscendSimpleCPUOffloadConnector.__new__(AscendSimpleCPUOffloadConnector)
+    connector.worker_handler = MagicMock(spec=SimpleCPUOffloadNPUWorker)
+
+    connector.shutdown()
+
+    connector.worker_handler.shutdown.assert_called_once_with()
