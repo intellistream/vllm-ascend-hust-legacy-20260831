@@ -860,6 +860,141 @@ class TestNPUWorker(TestBase):
             self.assertEqual(call_order, ["step", "execute"])
             self.assertEqual(result, mock_model_output)
 
+    def test_pp_opt_non_overlap_waits_for_send_before_forward(self):
+        """A pending send must finish before its output buffer can be reused."""
+        from vllm.sequence import IntermediateTensors
+        from vllm.v1.outputs import ModelRunnerOutput
+
+        from vllm_ascend.worker.worker import NPUWorker
+
+        call_order = []
+
+        class PendingSend:
+            completed = False
+
+            def wait(self):
+                call_order.append("wait")
+                self.completed = True
+
+        pending_send = PendingSend()
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm_ascend.worker.worker.get_pp_group") as mock_get_pp_group,
+            patch("vllm_ascend.worker.worker.get_tp_group") as mock_get_tp_group,
+            patch("vllm_ascend.worker.worker.get_ascend_config") as mock_get_ascend_config,
+            patch("vllm_ascend.worker.worker.envs_vllm.VLLM_USE_PP_OPT_SCHEDULER", True),
+            patch("vllm_ascend.worker.worker.envs_vllm.VLLM_PP_OPT_OVERLAP_SENDS", False),
+        ):
+            mock_ascend_config = MagicMock()
+            mock_ascend_config.msmonitor_use_daemon = False
+            mock_get_ascend_config.return_value = mock_ascend_config
+
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.profiler = None
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
+            worker._pp_send_work = []
+            worker._pp_send_buffer_refs = []
+
+            mock_pp_group = MagicMock()
+            mock_pp_group.is_first_rank = True
+            mock_pp_group.is_last_rank = False
+            mock_pp_group.isend_tensor_dict.return_value = [pending_send]
+            mock_get_pp_group.return_value = mock_pp_group
+            mock_get_tp_group.return_value = MagicMock()
+
+            scheduler_output = MagicMock()
+            scheduler_output.total_num_scheduled_tokens = 1
+            model_output = MagicMock(spec=ModelRunnerOutput)
+            source = torch.tensor([1.0, 2.0])
+            intermediate_output = MagicMock(spec=IntermediateTensors)
+            intermediate_output.tensors = {"hidden": source}
+            intermediate_output.kv_connector_output = None
+            forward_count = 0
+
+            def reuse_output_buffer(*args):
+                nonlocal forward_count
+                forward_count += 1
+                if forward_count == 1:
+                    call_order.append("forward:1")
+                    return intermediate_output
+                self.assertTrue(pending_send.completed)
+                call_order.append("forward:2")
+                source.add_(1)
+                return model_output
+
+            worker.model_runner.execute_model.side_effect = reuse_output_buffer
+
+            first_result = worker.execute_model(scheduler_output)
+            self.assertIsNone(first_result)
+            self.assertEqual(worker._pp_send_work, [pending_send])
+
+            second_result = worker.execute_model(scheduler_output)
+
+            self.assertEqual(call_order, ["forward:1", "wait", "forward:2"])
+            self.assertEqual(worker._pp_send_work, [])
+            self.assertEqual(second_result, model_output)
+
+    def test_pp_opt_overlap_clones_and_retains_send_buffer(self):
+        """Overlap mode must send a clone retained until its work completes."""
+        from vllm.sequence import IntermediateTensors
+
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch("vllm_ascend.worker.worker.get_pp_group") as mock_get_pp_group,
+            patch("vllm_ascend.worker.worker.get_tp_group") as mock_get_tp_group,
+            patch("vllm_ascend.worker.worker.get_ascend_config") as mock_get_ascend_config,
+            patch("vllm_ascend.worker.worker.envs_vllm.VLLM_USE_PP_OPT_SCHEDULER", True),
+            patch("vllm_ascend.worker.worker.envs_vllm.VLLM_PP_OPT_OVERLAP_SENDS", True),
+        ):
+            mock_ascend_config = MagicMock()
+            mock_ascend_config.msmonitor_use_daemon = False
+            mock_get_ascend_config.return_value = mock_ascend_config
+
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.profiler = None
+            worker.parallel_config = MagicMock()
+            worker.parallel_config.pipeline_parallel_size = 2
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
+            worker._pp_send_work = []
+            worker._pp_send_buffer_refs = []
+
+            send_work = MagicMock()
+            mock_pp_group = MagicMock()
+            mock_pp_group.is_first_rank = True
+            mock_pp_group.is_last_rank = False
+            mock_pp_group.isend_tensor_dict.return_value = [send_work]
+            mock_get_pp_group.return_value = mock_pp_group
+            mock_tp_group = MagicMock()
+            mock_get_tp_group.return_value = mock_tp_group
+
+            source = torch.tensor([1.0, 2.0])
+            intermediate_output = MagicMock(spec=IntermediateTensors)
+            intermediate_output.tensors = {"hidden": source}
+            intermediate_output.kv_connector_output = None
+            worker.model_runner.execute_model.return_value = intermediate_output
+
+            scheduler_output = MagicMock()
+            scheduler_output.total_num_scheduled_tokens = 1
+
+            result = worker.execute_model(scheduler_output)
+
+            sent_tensors = mock_pp_group.isend_tensor_dict.call_args.args[0]
+            cloned = sent_tensors["hidden"]
+            self.assertIsNone(result)
+            mock_pp_group.isend_tensor_dict.assert_called_once_with(
+                sent_tensors,
+                all_gather_group=mock_tp_group,
+            )
+            self.assertTrue(torch.equal(cloned, source))
+            self.assertNotEqual(cloned.data_ptr(), source.data_ptr())
+            self.assertEqual(worker._pp_send_buffer_refs, [([send_work], sent_tensors)])
+
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     @patch("vllm_ascend.worker.worker.enable_sp", return_value=False)
     @patch("vllm_ascend.worker.worker.get_pp_group")

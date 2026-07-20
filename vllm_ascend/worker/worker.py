@@ -617,9 +617,7 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def _init_device(self):
-        selected_device = _maybe_auto_select_idle_ascend_device(
-            self.local_rank, self.parallel_config
-        )
+        selected_device = _maybe_auto_select_idle_ascend_device(self.local_rank, self.parallel_config)
         device_index = selected_device if selected_device is not None else self.local_rank
 
         device = torch.device(f"npu:{device_index}")
@@ -874,19 +872,19 @@ class NPUWorker(WorkerBase):
                     continue
                 active_send_refs.append((handles, tensor_dict))
             self._pp_send_buffer_refs = active_send_refs
-            max_retained_sends = max(
-                8, self.parallel_config.pipeline_parallel_size * 2
-            )
+            max_retained_sends = max(8, self.parallel_config.pipeline_parallel_size * 2)
             while len(self._pp_send_buffer_refs) >= max_retained_sends:
                 handles, _ = self._pp_send_buffer_refs.pop(0)
                 for handle in handles:
                     handle.wait()
 
-        if self._pp_send_work and not envs_vllm.VLLM_USE_PP_OPT_SCHEDULER:
+        # Non-overlapped sends use model-runner-owned output buffers. Complete
+        # the previous send before the next forward can reuse those buffers.
+        # PP overlap mode is handled separately above: it sends cloned tensors
+        # and retains them in ``_pp_send_buffer_refs`` until completion.
+        if self._pp_send_work:
             for handle in self._pp_send_work:
                 handle.wait()
-            self._pp_send_work = []
-        elif self._pp_send_work:
             self._pp_send_work = []
 
         intermediate_tensors = None
@@ -925,10 +923,7 @@ class NPUWorker(WorkerBase):
         else:
             all_gather_group = get_tp_group()
         send_tensors = output.tensors
-        if (
-            envs_vllm.VLLM_USE_PP_OPT_SCHEDULER
-            and envs_vllm.VLLM_PP_OPT_OVERLAP_SENDS
-        ):
+        if envs_vllm.VLLM_USE_PP_OPT_SCHEDULER and envs_vllm.VLLM_PP_OPT_OVERLAP_SENDS:
             send_tensors = {
                 key: value.clone() if isinstance(value, torch.Tensor) else value
                 for key, value in output.tensors.items()
@@ -937,13 +932,9 @@ class NPUWorker(WorkerBase):
             send_tensors,
             all_gather_group=all_gather_group,
         )
-        if (
-            envs_vllm.VLLM_USE_PP_OPT_SCHEDULER
-            and envs_vllm.VLLM_PP_OPT_OVERLAP_SENDS
-            and pp_send_work
-        ):
+        if envs_vllm.VLLM_USE_PP_OPT_SCHEDULER and envs_vllm.VLLM_PP_OPT_OVERLAP_SENDS and pp_send_work:
             self._pp_send_buffer_refs.append((pp_send_work, send_tensors))
-        elif not envs_vllm.VLLM_USE_PP_OPT_SCHEDULER:
+        else:
             self._pp_send_work = pp_send_work
 
         kv_connector_output = output.kv_connector_output
