@@ -230,6 +230,8 @@ def create_ascend_forward_context(
     positions: Any = None,
     in_parallel_streams: bool = False,
     cos_sin_slot_id: int = 0,
+    reuse_existing_cos_sin: bool = False,
+    clone_cos_sin: bool = True,
 ) -> Any:
     from vllm.forward_context import ForwardContext
 
@@ -313,11 +315,34 @@ def create_ascend_forward_context(
             decode_token_per_req,
             ubatch_slices[ubatch_num].request_slice.stop *
             decode_token_per_req)
-        if positions is not None:
-            update_cos_sin(positions, slot_id=cos_sin_slot_id)
+        cos_slice = None
+        sin_slice = None
+        if (reuse_existing_cos_sin and cos_sin_slot_id == 0
+                and token_slice.start == 0
+                and isinstance(positions, torch.Tensor)
+                and positions.ndim == 1):
+            cos_slice, sin_slice = get_cos_and_sin_slice(
+                slot_id=cos_sin_slot_id)
+            num_tokens = int(positions.size(0))
+            if (cos_slice is not None and sin_slice is not None
+                    and int(cos_slice.shape[1]) >= num_tokens
+                    and int(sin_slice.shape[1]) >= num_tokens):
+                cos_slice = cos_slice[:, :num_tokens]
+                sin_slice = sin_slice[:, :num_tokens]
+            else:
+                cos_slice = None
+                sin_slice = None
+        if cos_slice is None or sin_slice is None:
+            if positions is not None:
+                update_cos_sin(positions, slot_id=cos_sin_slot_id)
             cos_slice, sin_slice = get_cos_and_sin_slice(slot_id=cos_sin_slot_id)
+        if clone_cos_sin:
             new_forward_context.cos = cos_slice.clone()
             new_forward_context.sin = sin_slice.clone()
+        else:
+            new_forward_context.cos = cos_slice
+            new_forward_context.sin = sin_slice
+
         cos_mla, sin_mla = get_cos_and_sin_mla()
 
         new_forward_context.cos_mla = cos_mla[
@@ -328,8 +353,12 @@ def create_ascend_forward_context(
     elif positions is not None:
         update_cos_sin(positions, slot_id=cos_sin_slot_id)
         cos_slice, sin_slice = get_cos_and_sin_slice(slot_id=cos_sin_slot_id)
-        new_forward_context.cos = cos_slice.clone()
-        new_forward_context.sin = sin_slice.clone()
+        if clone_cos_sin:
+            new_forward_context.cos = cos_slice.clone()
+            new_forward_context.sin = sin_slice.clone()
+        else:
+            new_forward_context.cos = cos_slice
+            new_forward_context.sin = sin_slice
 
     return new_forward_context
 
