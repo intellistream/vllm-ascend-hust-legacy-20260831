@@ -13,6 +13,7 @@ verify the full 5-step Sim-LLM pipeline without requiring NPU hardware.
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -334,6 +335,253 @@ class TestStorePlan:
         )
 
         assert plan == [(1, 0)]
+
+
+class TestDecodeOnlyBatch:
+    """Decode steps must not run prefill-only SimLLM cache handling."""
+
+    def test_decode_only_batch_leaves_sandwich_slots_unchanged(
+        self, monkeypatch,
+    ):
+        from vllm_ascend.simllm.patch import patch_model_runner as patch_runner
+        from vllm_ascend.simllm.sandwich import SandwichConfig
+
+        runner = MagicMock()
+        runner._simllm_batch_req_ids = None
+        runner._simllm_match_results = {}
+        runner.input_batch.num_reqs = 2
+        runner.query_start_loc = torch.tensor([0, 1, 2])
+        runner.seq_lens = torch.tensor([1, 1])
+
+        slot_mapping = {
+            f"model.layers.{idx}.self_attn": torch.arange(2) + idx * 10
+            for idx in range(4)
+        }
+        original = {name: slots.clone() for name, slots in slot_mapping.items()}
+        forward_context = MagicMock(slot_mapping=slot_mapping)
+        monkeypatch.setattr(
+            patch_runner, "get_forward_context", lambda: forward_context,
+        )
+        monkeypatch.setattr(
+            patch_runner,
+            "_sandwich_config",
+            SandwichConfig(bottom_layers=1, top_layers=1, num_layers=4),
+        )
+
+        patch_runner._simllm_apply_sandwich_slots(runner)
+
+        for name, slots in slot_mapping.items():
+            torch.testing.assert_close(slots, original[name])
+
+    def test_decode_only_forward_skips_kv_extraction(self, monkeypatch):
+        from vllm_ascend.simllm.patch import patch_model_runner as patch_runner
+
+        runner = MagicMock()
+        runner._simllm_batch_req_ids = None
+        hidden_states = torch.randn(2, 4)
+        original_forward = MagicMock(return_value=hidden_states)
+        extract_kv = MagicMock()
+        monkeypatch.setattr(
+            patch_runner, "_simllm_config", MagicMock(enabled=True),
+        )
+        monkeypatch.setattr(
+            patch_runner, "_original_model_forward", original_forward,
+        )
+        monkeypatch.setattr(patch_runner, "_simllm_extract_kv", extract_kv)
+        monkeypatch.setattr(
+            patch_runner, "_simllm_apply_sandwich_slots", MagicMock(),
+        )
+
+        result = patch_runner._simllm_model_forward(runner, 2)
+
+        assert result is hidden_states
+        extract_kv.assert_not_called()
+
+
+class TestSchedulerRewrite:
+    """Matched prefills must shrink the worker's actual token workload."""
+
+    def test_rewrite_updates_per_request_and_total_scheduled_tokens(self):
+        from vllm_ascend.simllm.patch import patch_model_runner as patch_runner
+        from vllm_ascend.simllm.similarity import MatchResult
+
+        matched = SimpleNamespace(
+            req_id="matched",
+            prompt_token_ids=list(range(1024)),
+            num_computed_tokens=0,
+        )
+        unmatched = SimpleNamespace(
+            req_id="unmatched",
+            prompt_token_ids=list(range(16)),
+            num_computed_tokens=0,
+        )
+        scheduler_output = SimpleNamespace(
+            scheduled_new_reqs=[matched, unmatched],
+            num_scheduled_tokens={"matched": 1024, "unmatched": 16},
+            total_num_scheduled_tokens=1040,
+        )
+        runner = SimpleNamespace(
+            _simllm_match_results={
+                0: MatchResult(
+                    matched=True,
+                    source_task_id="cached",
+                    cached_k=torch.randn(1, 2, 1024, 8),
+                    cached_v=torch.randn(1, 2, 1024, 8),
+                    similarity_score=1.0,
+                )
+            }
+        )
+
+        patch_runner._simllm_rewrite_scheduler_output(
+            runner, scheduler_output,
+        )
+
+        assert matched.num_computed_tokens == 1023
+        assert scheduler_output.num_scheduled_tokens == {
+            "matched": 1,
+            "unmatched": 16,
+        }
+        assert scheduler_output.total_num_scheduled_tokens == 17
+
+    def test_prefill_forward_injects_cache_before_model(self, monkeypatch):
+        from vllm_ascend.simllm.patch import patch_model_runner as patch_runner
+
+        runner = SimpleNamespace(_simllm_batch_req_ids=["matched"])
+        calls = []
+
+        monkeypatch.setattr(
+            patch_runner, "_simllm_config", MagicMock(enabled=True),
+        )
+        monkeypatch.setattr(
+            patch_runner,
+            "_simllm_inject_kv",
+            lambda _runner: calls.append("inject"),
+        )
+        monkeypatch.setattr(
+            patch_runner,
+            "_simllm_apply_sandwich_slots",
+            lambda _runner: calls.append("sandwich"),
+        )
+        monkeypatch.setattr(
+            patch_runner,
+            "_simllm_extract_kv",
+            lambda _runner, _hidden: calls.append("extract"),
+        )
+        monkeypatch.setattr(
+            patch_runner,
+            "_original_model_forward",
+            lambda *_args, **_kwargs: calls.append("forward") or torch.ones(1),
+        )
+
+        patch_runner._simllm_model_forward(runner, 1)
+
+        assert calls == ["inject", "sandwich", "forward", "extract"]
+
+    def test_cache_is_prepopulated_for_every_attention_layer(self, monkeypatch):
+        from vllm_ascend.simllm.patch import patch_model_runner as patch_runner
+        from vllm_ascend.simllm.similarity import MatchResult
+
+        runner = _make_mock_runner(
+            num_reqs=1,
+            tokens_per_req=(5,),
+            num_kv_heads=2,
+            head_size=4,
+            num_layers=3,
+        )
+        cached_k = torch.randn(1, 2, 5, 4)
+        cached_v = torch.randn(1, 2, 5, 4)
+        runner._simllm_match_results = {
+            0: MatchResult(
+                matched=True,
+                source_task_id="cached",
+                cached_k=cached_k,
+                cached_v=cached_v,
+                similarity_score=1.0,
+            )
+        }
+        monkeypatch.setattr(
+            patch_runner,
+            "_kv_reuse_engine",
+            KVReuseEngine(block_size=16, num_kv_heads=2, head_size=4),
+        )
+
+        patch_runner._simllm_inject_kv(runner)
+
+        expected_k = cached_k[:, :, :4, :]
+        expected_v = cached_v[:, :, :4, :]
+        for k_cache, v_cache in runner.kv_caches:
+            actual_k = KVReuseEngine.gather_from_cache(k_cache, [0], 4, 16)
+            actual_v = KVReuseEngine.gather_from_cache(v_cache, [0], 4, 16)
+            torch.testing.assert_close(actual_k, expected_k)
+            torch.testing.assert_close(actual_v, expected_v)
+
+
+class TestKVExtractionStoreMode:
+    """The low-overhead cache format gathers unmatched KV once per tensor."""
+
+    @staticmethod
+    def _runner_for_extract():
+        runner = SimpleNamespace()
+        runner.input_batch = SimpleNamespace(
+            num_reqs=1,
+            req_ids=["req-0"],
+            block_table=[
+                SimpleNamespace(
+                    get_device_tensor=lambda: torch.tensor(
+                        [[0]], dtype=torch.long,
+                    ),
+                ),
+            ],
+        )
+        runner.seq_lens = torch.tensor([2], dtype=torch.long)
+        runner.query_start_loc = torch.tensor([0, 2], dtype=torch.long)
+        runner.kv_caches = [
+            (
+                torch.ones(1, 4, 1, 1) * layer_idx,
+                torch.ones(1, 4, 1, 1) * (layer_idx + 10),
+            )
+            for layer_idx in range(4)
+        ]
+        runner._simllm_batch_hashes = torch.tensor([123], dtype=torch.long)
+        runner._simllm_batch_req_ids = ["req-0"]
+        runner._simllm_batch_embeddings = torch.randn(1, 8)
+        runner._simllm_match_results = {}
+        return runner
+
+    def test_unmatched_top_store_gathers_top_layer_only(self, monkeypatch):
+        from vllm_ascend.simllm.config import SimLLMConfig
+        from vllm_ascend.simllm.kv_manager import KVManager
+        from vllm_ascend.simllm.patch import patch_model_runner as patch_runner
+        from vllm_ascend.simllm.sandwich import SandwichConfig
+
+        gather_calls = []
+
+        def fake_gather(kv_cache, block_ids, seq_len, block_size):
+            gather_calls.append(kv_cache)
+            return torch.ones(1, 1, seq_len, 1)
+
+        monkeypatch.setattr(patch_runner, "_kv_manager", KVManager())
+        monkeypatch.setattr(
+            patch_runner,
+            "_sandwich_config",
+            SandwichConfig(bottom_layers=1, top_layers=1, num_layers=4),
+        )
+        monkeypatch.setattr(
+            patch_runner,
+            "_simllm_config",
+            SimLLMConfig(enabled=True, unmatched_store_mode="top"),
+        )
+        monkeypatch.setattr(
+            patch_runner.KVReuseEngine,
+            "gather_from_cache",
+            staticmethod(fake_gather),
+        )
+
+        patch_runner._simllm_extract_kv(
+            self._runner_for_extract(), torch.randn(2, 8),
+        )
+
+        assert len(gather_calls) == 2
 
 
 class TestSchedulerEmbeddingReuse:
