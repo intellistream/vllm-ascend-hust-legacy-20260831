@@ -17,6 +17,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "_selected_tests.yaml"
+SMART_UT_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr_smart_ut.yaml"
 RUNNER_LABEL_PATH = REPO_ROOT / ".github" / "workflows" / "scripts" / "runner_label.json"
 
 
@@ -65,3 +66,19 @@ def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -
     ]
     assert 'if [ "${{ matrix.group.runner }}" != "linux-aarch64-a2b3-1" ]; then' in install_block
     assert "cache-service.nginx-pypi-cache.svc.cluster.local:8081" in install_block
+
+
+def test_smart_ut_uses_the_verified_vllm_main_commit() -> None:
+    workflow = SMART_UT_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert ".github/vllm-main-verified.commit" in workflow
+    assert "main_commit: ${{ steps.vllm.outputs.main_commit }}" in workflow
+    assert "vllm: ${{ needs.scope.outputs.main_commit }}" in workflow
+    assert "d886c26d4d4fef7d079696beb4ece1cfb4b008a8" not in workflow
+
+
+def test_package_builds_do_not_auto_load_the_torch_device_backend() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    container_env = workflow[workflow.index("      env:") : workflow.index("    steps:")]
+    assert "TORCH_DEVICE_BACKEND_AUTOLOAD: 0" in container_env
