@@ -636,9 +636,49 @@ class cmake_build_ext(build_ext):
                         shutil.copy(src_path, dst_path)
                         print(f"Copy: {src_path} -> {dst_path}")
 
-        # copy back _cann_ops_custom directory
+        # Copy the generated package into build_lib so wheel assembly sees it.
+        # A2/A3 builds advertise kv_cache_block_gather, so reject an incomplete
+        # payload rather than failing later during worker construction.
         src_cann_ops_custom = os.path.join(ROOT_DIR, "vllm_ascend", "_cann_ops_custom")
         dst_cann_ops_custom = os.path.join(self.build_lib, "vllm_ascend", "_cann_ops_custom")
+        if envs.SOC_VERSION.startswith(("ascend910b", "ascend910_93")):
+            vendor_dir = os.path.join(
+                src_cann_ops_custom,
+                "vendors",
+                "custom_transformer",
+            )
+            kernel_soc = (
+                "ascend910b"
+                if envs.SOC_VERSION.startswith("ascend910b")
+                else "ascend910_93"
+            )
+            required_gather_artifacts = [
+                os.path.join(vendor_dir, "op_api", "lib", "libcust_opapi.so"),
+                os.path.join(
+                    vendor_dir,
+                    "op_api",
+                    "include",
+                    "aclnnop",
+                    "aclnn_kv_cache_block_gather.h",
+                ),
+                os.path.join(
+                    vendor_dir,
+                    "op_impl",
+                    "ai_core",
+                    "tbe",
+                    "kernel",
+                    "config",
+                    kernel_soc,
+                    "kv_cache_block_gather.json",
+                ),
+            ]
+            missing = [path for path in required_gather_artifacts if not os.path.isfile(path)]
+            if missing:
+                raise RuntimeError(
+                    "Custom-op build did not produce the complete packaged "
+                    "kv_cache_block_gather capability; missing: " + ", ".join(missing)
+                )
+
         if os.path.exists(src_cann_ops_custom):
             import shutil
 
