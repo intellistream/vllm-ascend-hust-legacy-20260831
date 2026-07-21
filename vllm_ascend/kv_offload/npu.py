@@ -16,6 +16,9 @@ from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec as _CPUOffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandlers
+from vllm_ascend.kv_offload.experimental_mapped import (
+    MappedOffloadingSpec as _MappedOffloadingSpec,
+)
 
 try:
     from vllm.v1.kv_offload.tiering.spec import (
@@ -98,6 +101,18 @@ class NPUOffloadingSpec(_NPUHandlersMixin, _CPUOffloadingSpec):
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,
         )
+
+
+class MappedOffloadingSpec(_MappedOffloadingSpec):
+    """Experimental worker-local mapped-host CPU offloading spec.
+
+    Select this spec explicitly in ``kv_connector_extra_config``. The default
+    ``CPUOffloadingSpec`` remains the native copy implementation.
+    """
+
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
+        _set_cpu_bytes_from_legacy_num_blocks(vllm_config, kv_cache_config)
+        super().__init__(vllm_config, kv_cache_config)
 
 
 if _TieringOffloadingSpec is not None:
