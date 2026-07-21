@@ -72,6 +72,7 @@ def test_smart_ut_uses_the_verified_vllm_main_commit() -> None:
     workflow = SMART_UT_WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert ".github/vllm-main-verified.commit" in workflow
+    assert '[[ "${main_commit}" =~ ^[0-9a-f]{40}$ ]]' in workflow
     assert "main_commit: ${{ steps.vllm.outputs.main_commit }}" in workflow
     assert "vllm: ${{ needs.scope.outputs.main_commit }}" in workflow
     assert "d886c26d4d4fef7d079696beb4ece1cfb4b008a8" not in workflow
