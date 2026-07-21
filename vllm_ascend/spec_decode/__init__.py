@@ -51,9 +51,9 @@ def get_spec_decode_method(method, vllm_config, device, runner):
 
         return AscendDflashProposer(vllm_config, device, runner)
     elif method == "dspark":
-        from vllm_ascend.spec_decode.dspark_proposer import AscendDsparkProposer
+        from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 
-        return AscendDsparkProposer(vllm_config, device, runner)
+        return AscendDSparkProposer(vllm_config, device, runner)
     elif method == "draft_model":
         from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
 

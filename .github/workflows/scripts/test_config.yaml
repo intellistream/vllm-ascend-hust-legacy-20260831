@@ -480,6 +480,14 @@
     - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
     - tests/ut/spec_decode/test_speculators_vwn_eagle3.py
 
+- name: spec_decode_dspark
+  optional: false
+  base: spec_decode_base
+  source_file_dependencies:
+    - vllm_ascend/spec_decode/dspark_proposer.py
+  tests:
+    - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
+
 - name: spec_decode_ngram
   optional: false
   base: spec_decode_base
@@ -783,6 +791,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 1880
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 160
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py: 370
+  tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py: 0
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 30
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 350
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 730
@@ -861,5 +870,4 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
 

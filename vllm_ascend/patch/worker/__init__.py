@@ -57,7 +57,6 @@ import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 if not is_310p():
     _import_optional_patch("vllm_ascend.patch.worker.patch_qwen3_5")
     _import_optional_patch("vllm_ascend.patch.worker.patch_gdn_attn")
-    import vllm_ascend.patch.worker.patch_qwen3_dspark  # noqa
     import vllm_ascend.patch.worker.patch_qwen3_dflash  # noqa
     _import_optional_patch("vllm_ascend.patch.worker.patch_qwen3vl")
 else:
