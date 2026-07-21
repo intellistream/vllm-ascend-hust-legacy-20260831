@@ -55,11 +55,13 @@ jobs:
       - name: Read verified vLLM main commit
         id: vllm
         run: |
-          main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
-          [[ "${main_commit}" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
+          mapfile -t verified_lines < .github/vllm-main-verified.commit
+          if (( ${#verified_lines[@]} != 1 )) || \
+             [[ ! "${verified_lines[0]}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error file=.github/vllm-main-verified.commit::expected exactly one full lowercase commit ID"
             exit 1
-          }
+          fi
+          main_commit="${verified_lines[0]}"
           echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
 
       - uses: dorny/paths-filter@v4
