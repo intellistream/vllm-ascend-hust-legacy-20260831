@@ -336,6 +336,41 @@ class TestStorePlan:
         assert plan == [(1, 0)]
 
 
+class TestSchedulerEmbeddingReuse:
+    """Verify KV storage can reuse embeddings without padding hidden states."""
+
+    def test_embedding_map_keeps_scheduler_request_order(self):
+        from vllm_ascend.simllm.patch.patch_model_runner import (
+            _simllm_build_embedding_map,
+        )
+
+        embeddings = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+
+        embedding_map = _simllm_build_embedding_map(
+            ["req-c", "req-a", "req-b"],
+            embeddings,
+        )
+
+        assert list(embedding_map) == ["req-c", "req-a", "req-b"]
+        torch.testing.assert_close(embedding_map["req-a"], embeddings[1:2])
+        assert embedding_map["req-a"].shape == (1, 4)
+
+    def test_embedding_map_handles_missing_or_short_embeddings(self):
+        from vllm_ascend.simllm.patch.patch_model_runner import (
+            _simllm_build_embedding_map,
+        )
+
+        assert _simllm_build_embedding_map(["req-a"], None) == {}
+
+        embeddings = torch.ones(1, 4)
+        embedding_map = _simllm_build_embedding_map(
+            ["req-a", "req-b"],
+            embeddings,
+        )
+
+        assert list(embedding_map) == ["req-a"]
+
+
 # ---------------------------------------------------------------------------
 # Slot protection tests (verify injected KV survives the forward pass)
 # ---------------------------------------------------------------------------

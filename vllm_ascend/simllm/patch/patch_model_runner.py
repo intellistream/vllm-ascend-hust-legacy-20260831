@@ -758,8 +758,9 @@ def _simllm_extract_kv(self: Any, hidden_states: Any) -> None:
     - **Unmatched** requests: store averaged KV from ``keep_layers``
       (bottom-N + top-N per ``SandwichConfig``) for richer future matching.
 
-    Uses hidden_states from the model forward for embedding extraction
-    (more semantically rich than token embeddings).
+    Reuses scheduler-time prompt embeddings so cache lookup and storage use
+    the same representation. Hidden-state pooling is only a fallback when a
+    request has no scheduler embedding.
     """
     if hidden_states is None:
         return
@@ -813,18 +814,6 @@ def _simllm_extract_kv(self: Any, hidden_states: Any) -> None:
         blk_table = self.input_batch.block_table[0]
         blk_table_tensor = blk_table.get_device_tensor()
 
-        # -- Gather embeddings from hidden states -----------------------
-        qsl = self.query_start_loc
-        if hasattr(qsl, "gpu"):
-            query_start_loc = qsl.gpu[: num_reqs + 1]
-        else:
-            query_start_loc = qsl[: num_reqs + 1]
-
-        embeddings = _per_request_embeddings(
-            hidden_states, query_start_loc,
-            pooling=_simllm_config.embedding_pooling,  # type: ignore[union-attr]
-        )
-
         # -- Build CachedTask per request -------------------------------
         req_ids = list(self.input_batch.req_ids[:num_reqs])
         seq_lens = self.seq_lens[:num_reqs]
@@ -842,6 +831,30 @@ def _simllm_extract_kv(self: Any, hidden_states: Any) -> None:
                 "prefill req_ids, skipping."
             )
             return
+
+        # Reuse the embeddings already computed from scheduler prompt tokens.
+        # Re-pooling hidden_states here creates a [B, max_prefill_len, D]
+        # temporary tensor. With long prompts and a saturated batch that can
+        # consume several GiB and OOM after the warm cache has occupied HBM.
+        embedding_by_req = _simllm_build_embedding_map(
+            batch_req_ids,
+            getattr(self, "_simllm_batch_embeddings", None),
+        )
+        row_embeddings = None
+        if any(
+            req_ids[row_idx] not in embedding_by_req
+            for row_idx, _ in store_plan
+        ):
+            qsl = self.query_start_loc
+            if hasattr(qsl, "gpu"):
+                query_start_loc = qsl.gpu[: num_reqs + 1]
+            else:
+                query_start_loc = qsl[: num_reqs + 1]
+            row_embeddings = _per_request_embeddings(
+                hidden_states,
+                query_start_loc,
+                pooling=_simllm_config.embedding_pooling,  # type: ignore[union-attr]
+            )
 
         now = time.monotonic()
         stored = 0
@@ -890,11 +903,11 @@ def _simllm_extract_kv(self: Any, hidden_states: Any) -> None:
                 k_per_req = k_sum.mul_(scale)
                 v_per_req = v_sum.mul_(scale)
 
-            emb = (
-                embeddings[row_idx : row_idx + 1]
-                if embeddings is not None
-                else k_per_req.new_zeros(1, k_per_req.shape[1])
-            )
+            emb = embedding_by_req.get(req_ids[row_idx])
+            if emb is None and row_embeddings is not None:
+                emb = row_embeddings[row_idx : row_idx + 1]
+            if emb is None:
+                emb = k_per_req.new_zeros(1, k_per_req.shape[1])
             hsh = hash_values[hash_idx]
 
             from vllm_ascend.simllm.kv_manager import CachedTask
@@ -1073,6 +1086,23 @@ def _simllm_build_store_plan(
         if row_idx is not None:
             store_plan.append((row_idx, hash_idx))
     return store_plan
+
+
+def _simllm_build_embedding_map(
+    prefill_req_ids: list[str],
+    prefill_embeddings: Any,
+) -> dict[str, Any]:
+    """Map scheduler-time prompt embeddings to their request IDs."""
+    if prefill_embeddings is None:
+        return {}
+    shape = getattr(prefill_embeddings, "shape", ())
+    if not shape:
+        return {}
+    count = min(len(prefill_req_ids), shape[0])
+    return {
+        req_id: prefill_embeddings[idx : idx + 1]
+        for idx, req_id in enumerate(prefill_req_ids[:count])
+    }
 
 
 def _reconcile_kv_reuse_engine(self: Any) -> None:
