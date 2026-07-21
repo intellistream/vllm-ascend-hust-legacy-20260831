@@ -302,6 +302,7 @@ jobs:
           import json
           from importlib.metadata import distribution
           from pathlib import Path
+          from sysconfig import get_path
 
           for package in ("vllm", "vllm-ascend-hust"):
               dist = distribution(package)
@@ -310,13 +311,13 @@ jobs:
                   assert json.loads(direct_url)["dir_info"]["editable"] is True, package
                   continue
 
-              editable_paths = [
-                  path
-                  for path in (dist.files or ())
-                  if Path(path).name.startswith("__editable__.")
-                  and Path(path).suffix == ".pth"
-              ]
+              normalized_name = package.replace("-", "_")
+              editable_paths = list(
+                  Path(get_path("purelib")).glob(
+                      f"__editable__.{normalized_name}-*.pth"
+                  )
+              )
               assert editable_paths, f"{package}: no editable-install metadata"
-              assert all(dist.locate_file(path).is_file() for path in editable_paths)
+              assert all(path.is_file() for path in editable_paths)
           PY
           uv pip check --python .venv-dual-editable/bin/python
