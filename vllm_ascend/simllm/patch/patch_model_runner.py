@@ -1234,7 +1234,7 @@ def _simllm_build_embedding_map(
         return {}
     count = min(len(prefill_req_ids), shape[0])
     return {
-        req_id: prefill_embeddings[idx : idx + 1]
+        req_id: prefill_embeddings[idx : idx + 1].clone()
         for idx, req_id in enumerate(prefill_req_ids[:count])
     }
 
@@ -1277,18 +1277,15 @@ def _per_request_embeddings(
     num_reqs = len(ranges)
     if num_reqs == 0:
         return None
-    max_len = 0
-    slices: list[Any] = []
+
+    from vllm_ascend.simllm.embedding import extract_embedding
+
+    embeddings: list[Any] = []
     for start, end in ranges:
         if end > start:
-            sl = hidden_states[start:end]
-            slices.append(sl)
-            max_len = max(max_len, sl.shape[0])
-    if not slices:
-        return None
-    D = slices[0].shape[-1]
-    padded = hidden_states.new_zeros(len(slices), max_len, D)
-    for i, s in enumerate(slices):
-        padded[i, : s.shape[0], :] = s
-    from vllm_ascend.simllm.embedding import extract_embedding
-    return extract_embedding(padded, pooling=pooling)
+            embeddings.append(
+                extract_embedding(hidden_states[start:end], pooling=pooling)
+            )
+        else:
+            embeddings.append(hidden_states.new_zeros(1, hidden_states.shape[-1]))
+    return torch.cat(embeddings, dim=0)

@@ -16,6 +16,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from vllm_ascend.simllm.kv_manager import KVManager
@@ -617,6 +618,131 @@ class TestSchedulerEmbeddingReuse:
         )
 
         assert list(embedding_map) == ["req-a"]
+
+    def test_embedding_map_owns_per_request_storage(self):
+        from vllm_ascend.simllm.patch.patch_model_runner import (
+            _simllm_build_embedding_map,
+        )
+
+        embeddings = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+        embedding_map = _simllm_build_embedding_map(
+            ["req-a", "req-b", "req-c"], embeddings,
+        )
+
+        source_storage = embeddings.untyped_storage().data_ptr()
+        mapped_storages = {
+            embedding.untyped_storage().data_ptr()
+            for embedding in embedding_map.values()
+        }
+        assert source_storage not in mapped_storages
+        assert len(mapped_storages) == 3
+        assert all(embedding._base is None for embedding in embedding_map.values())
+
+    @pytest.mark.parametrize(
+        ("pooling", "expected"),
+        [
+            (
+                "mean",
+                torch.tensor([
+                    [2**-0.5, 2**-0.5],
+                    [2 / 5**0.5, 1 / 5**0.5],
+                ]),
+            ),
+            (
+                "last",
+                torch.tensor([
+                    [0.0, 1.0],
+                    [2 / 5**0.5, 1 / 5**0.5],
+                ]),
+            ),
+        ],
+    )
+    def test_hidden_state_fallback_pools_each_original_slice(
+        self, pooling, expected,
+    ):
+        from vllm_ascend.simllm.patch.patch_model_runner import (
+            _per_request_embeddings,
+        )
+
+        hidden_states = torch.tensor([
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [2.0, 1.0],
+        ])
+
+        result = _per_request_embeddings(
+            hidden_states,
+            torch.tensor([0, 2, 3]),
+            pooling=pooling,
+        )
+
+        torch.testing.assert_close(result, expected)
+
+    def test_extract_kv_prefers_scheduler_embedding_and_falls_back_per_missing_entry(
+        self, monkeypatch,
+    ):
+        from vllm_ascend.simllm.config import SimLLMConfig
+        from vllm_ascend.simllm.patch import patch_model_runner as patch_runner
+
+        class CapturingKVManager:
+            def __init__(self):
+                self.tasks = []
+
+            def store(self, task):
+                self.tasks.append(task)
+
+            def size(self):
+                return len(self.tasks)
+
+        manager = CapturingKVManager()
+        block_table = SimpleNamespace(
+            get_device_tensor=lambda: torch.tensor([[0], [1]]),
+        )
+        runner = SimpleNamespace(
+            input_batch=SimpleNamespace(
+                num_reqs=2,
+                req_ids=["req-a", "req-b"],
+                block_table=[block_table],
+            ),
+            seq_lens=torch.tensor([2, 1]),
+            query_start_loc=torch.tensor([0, 2, 3]),
+            kv_caches=[(
+                torch.ones(2, 4, 1, 1),
+                torch.ones(2, 4, 1, 1),
+            )],
+            _simllm_batch_hashes=torch.tensor([11, 22]),
+            _simllm_batch_hash_values=[11, 22],
+            _simllm_batch_req_ids=["req-a", "req-b"],
+            _simllm_batch_seq_lens=[2, 1],
+            _simllm_batch_embeddings=torch.tensor([[0.0, 1.0]]),
+            _simllm_match_results={},
+        )
+        hidden_states = torch.tensor([
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [3.0, 4.0],
+        ])
+
+        monkeypatch.setattr(patch_runner, "_kv_manager", manager)
+        monkeypatch.setattr(
+            patch_runner,
+            "_simllm_config",
+            SimLLMConfig(
+                enabled=True,
+                unmatched_store_mode="top",
+                embedding_pooling="last",
+            ),
+        )
+
+        patch_runner._simllm_extract_kv(runner, hidden_states)
+
+        assert [task.task_id for task in manager.tasks] == ["req-a", "req-b"]
+        torch.testing.assert_close(
+            manager.tasks[0].embedding, torch.tensor([[0.0, 1.0]]),
+        )
+        torch.testing.assert_close(
+            manager.tasks[1].embedding, torch.tensor([[0.6, 0.8]]),
+        )
 
 
 # ---------------------------------------------------------------------------
