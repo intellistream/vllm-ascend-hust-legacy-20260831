@@ -128,6 +128,13 @@ explicitly labeled `python-per-span-microbenchmark` and
 one Python-level copy per span and is **not** the native production transfer
 backend.
 
+The mapped-first manifest reports the `vllm-ascend` checkout as dirty only
+because the preceding span-first run had already written its untracked result
+directory.  Its `status_porcelain` list contains those four result files and no
+source change.  The clean source state before and after validation is recorded
+in `validation/repository-state.txt`, and both runs used the same Git tree named
+at the top of this document.
+
 Across both orders, mapped gather was strongly faster for highly fragmented
 cases.  For example, 512 individual 16 KiB spans measured 18.48-18.57 GB/s for
 mapped gather versus 0.39-0.41 GB/s for the Python per-span baseline.  At the
