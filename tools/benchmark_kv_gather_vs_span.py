@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
+import os
 import platform
 import random
+import shlex
 import statistics
 import subprocess
 import sys
@@ -190,30 +193,98 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--op-lib", type=Path, default=None)
     parser.add_argument("--opapi-lib", type=Path, default=None)
+    parser.add_argument(
+        "--backend-repo",
+        type=Path,
+        default=Path(__file__).resolve().parents[1],
+        help="vLLM Ascend repository recorded in the evidence manifest",
+    )
+    parser.add_argument(
+        "--vllm-repo",
+        type=Path,
+        default=None,
+        help="paired vLLM repository; defaults to the imported package root",
+    )
     return parser.parse_args()
 
 
-def git_output(*args: str) -> str:
+def git_output(repo: Path, *args: str, strip: bool = True) -> str:
     try:
-        return subprocess.check_output(["git", *args], text=True, stderr=subprocess.DEVNULL).strip()
+        output = subprocess.check_output(
+            ["git", "-c", f"safe.directory={repo}", "-C", str(repo), *args],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        return output.strip() if strip else output.rstrip("\n")
     except Exception:
         return ""
 
 
+def git_repo_state(repo: Path) -> dict[str, Any]:
+    requested_path = repo.expanduser().resolve()
+    root_text = git_output(requested_path, "rev-parse", "--show-toplevel")
+    if not root_text:
+        return {
+            "requested_path": str(requested_path),
+            "available": False,
+        }
+
+    root = Path(root_text)
+    status = git_output(
+        root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        strip=False,
+    )
+    return {
+        "requested_path": str(requested_path),
+        "root": str(root),
+        "available": True,
+        "branch": git_output(root, "branch", "--show-current"),
+        "commit": git_output(root, "rev-parse", "HEAD"),
+        "tree": git_output(root, "rev-parse", "HEAD^{tree}"),
+        "dirty": bool(status),
+        "status_porcelain": status.splitlines(),
+    }
+
+
+def file_evidence(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file():
+        return {"path": str(resolved), "available": False}
+
+    digest = hashlib.sha256()
+    with resolved.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "path": str(resolved),
+        "available": True,
+        "bytes": resolved.stat().st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
 def load_runtime(args: argparse.Namespace):
     import torch
-    import torch_npu  # noqa: F401
+    import torch_npu
 
     if args.op_lib is not None:
-        torch.ops.load_library(str(args.op_lib))
+        extension_path = args.op_lib.expanduser().resolve()
+        torch.ops.load_library(str(extension_path))
     else:
-        import vllm_ascend.vllm_ascend_C  # noqa: F401
+        import vllm_ascend.vllm_ascend_C as extension_module
+
+        extension_path = Path(extension_module.__file__).resolve()
 
     from vllm_ascend.custom_op_package import (
         activate_kv_cache_block_gather_runtime,
     )
 
-    activate_kv_cache_block_gather_runtime(
+    opapi_path = activate_kv_cache_block_gather_runtime(
         torch,
         opapi_library=args.opapi_lib,
     )
@@ -222,7 +293,16 @@ def load_runtime(args: argparse.Namespace):
     register = torch.ops._C_ascend.register_kv_cache_block_gather_host_pool
     inspect = torch.ops._C_ascend.inspect_kv_cache_block_gather_host_pool
     unregister = torch.ops._C_ascend.unregister_kv_cache_block_gather_host_pool
-    return torch, gather, register, inspect, unregister
+    return (
+        torch,
+        torch_npu,
+        gather,
+        register,
+        inspect,
+        unregister,
+        extension_path,
+        opapi_path,
+    )
 
 
 def validate_args(args: argparse.Namespace, element_size: int) -> None:
@@ -243,7 +323,7 @@ def measure_operation(
     *,
     warmup: int,
     iters: int,
-) -> tuple[dict[str, float], dict[str, float]]:
+) -> tuple[dict[str, float], dict[str, float], list[float], list[float]]:
     for _ in range(warmup):
         with torch.npu.stream(stream):
             operation()
@@ -267,7 +347,12 @@ def measure_operation(
         torch.npu.synchronize()
         wall_samples.append((time.perf_counter() - wall_start) * 1000.0)
         event_samples.append(start_event.elapsed_time(end_event))
-    return summarize_ms(wall_samples), summarize_ms(event_samples)
+    return (
+        summarize_ms(wall_samples),
+        summarize_ms(event_samples),
+        wall_samples,
+        event_samples,
+    )
 
 
 def validate_output(torch: Any, source: Any, out: Any, case: Case, backend: str) -> None:
@@ -331,8 +416,8 @@ def run_case(
         )
         validate_output(torch, source, out, case, backend)
 
-    span_wall, span_event = measurements["span"]
-    gather_wall, gather_event = measurements["mapped"]
+    span_wall, span_event, span_wall_samples, span_event_samples = measurements["span"]
+    gather_wall, gather_event, gather_wall_samples, gather_event_samples = measurements["mapped"]
 
     logical_bytes = args.parts * case.selected_blocks * case.block_bytes
     span_mean = span_wall["mean_ms"]
@@ -354,10 +439,14 @@ def run_case(
         "span_wall_p50_ms": span_wall["p50_ms"],
         "span_wall_p95_ms": span_wall["p95_ms"],
         "span_event_mean_ms": span_event["mean_ms"],
+        "span_wall_samples_ms": span_wall_samples,
+        "span_event_samples_ms": span_event_samples,
         "mapped_wall_mean_ms": gather_mean,
         "mapped_wall_p50_ms": gather_wall["p50_ms"],
         "mapped_wall_p95_ms": gather_wall["p95_ms"],
         "mapped_event_mean_ms": gather_event["mean_ms"],
+        "mapped_wall_samples_ms": gather_wall_samples,
+        "mapped_event_samples_ms": gather_event_samples,
         "span_gbps": logical_bytes / span_mean / 1.0e6,
         "mapped_gbps": logical_bytes / gather_mean / 1.0e6,
         "mapped_gain_percent": gain_percent,
@@ -402,7 +491,18 @@ def write_results(output_dir: Path, manifest: dict[str, Any], rows: list[dict[st
 
 def main() -> int:
     args = parse_args()
-    torch, gather, register, inspect, unregister = load_runtime(args)
+    (
+        torch,
+        torch_npu,
+        gather,
+        register,
+        inspect,
+        unregister,
+        extension_path,
+        opapi_path,
+    ) = load_runtime(args)
+    import vllm
+
     dtype = {
         "float16": torch.float16,
         "bfloat16": torch.bfloat16,
@@ -416,17 +516,43 @@ def main() -> int:
     # directly rather than introducing a separate stream whose context may not
     # be propagated through an OpCommand custom handler.
     stream = torch.npu.current_stream(device=args.device)
+    device = torch.device(args.device)
+    device_index = torch.npu.current_device() if device.index is None else device.index
+    vllm_repo = args.vllm_repo
+    if vllm_repo is None:
+        vllm_repo = Path(vllm.__file__).resolve().parents[1]
+
+    backend_state = git_repo_state(args.backend_repo)
+    vllm_state = git_repo_state(vllm_repo)
 
     manifest = {
+        "schema_version": "mapped-host-gather-benchmark/v2",
+        "benchmark_kind": "python-per-span-microbenchmark",
+        "production_backend_equivalent": False,
         "argv": sys.argv,
+        "command": shlex.join([sys.executable, *sys.argv]),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "platform": platform.platform(),
         "python": sys.version,
         "torch": torch.__version__,
-        "torch_npu": getattr(torch.version, "cann", ""),
-        "git_branch": git_output("branch", "--show-current"),
-        "git_sha": git_output("rev-parse", "HEAD"),
+        "torch_npu": getattr(torch_npu, "__version__", ""),
+        "cann": getattr(torch.version, "cann", ""),
+        "vllm": getattr(vllm, "__version__", ""),
+        "git_branch": backend_state.get("branch", ""),
+        "git_sha": backend_state.get("commit", ""),
+        "repositories": {
+            "vllm_ascend": backend_state,
+            "vllm": vllm_state,
+        },
         "device": args.device,
+        "device_index": device_index,
+        "device_name": torch.npu.get_device_name(device_index),
+        "visible_devices": os.environ.get("ASCEND_RT_VISIBLE_DEVICES", ""),
+        "artifacts": {
+            "benchmark_script": file_evidence(Path(__file__)),
+            "torch_extension": file_evidence(extension_path),
+            "opapi_library": file_evidence(opapi_path),
+        },
         "dtype": args.dtype,
         "parts": args.parts,
         "num_cpu_blocks": args.num_cpu_blocks,
@@ -496,6 +622,10 @@ def main() -> int:
                 )
                 rows.append(run_case(torch, gather, stream, source, out, case, args))
 
+        manifest["correctness"] = {
+            "validated_cases": len(rows),
+            "all_passed": bool(rows) and all(row["validated"] for row in rows),
+        }
         write_results(args.output_dir, manifest, rows)
     finally:
         for handle in reversed(mapping_handles):

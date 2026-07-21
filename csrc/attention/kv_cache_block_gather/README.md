@@ -81,8 +81,9 @@ UB，也没有显式的 local-to-local `DataCopy`。CANN 自带的纯搬运实�
 - 每个 case 校验完整的非零输出。
 
 这里的 span baseline 是直接对每个 CPU/NPU 连续 block-pair run 调用一次
-`copy_` 的 microbenchmark。它用于隔离碎片化的搬运开销，不等价于当前生产
-connector 的 staging+scatter 路径，也不能单独预测高并发服务吞吐。
+`copy_` 的 **Python per-span microbenchmark**。它用于隔离碎片化的搬运开销，
+不是当前生产 connector 的 native transfer backend，也不等价于其
+staging+scatter 路径，不能单独预测高并发服务吞吐。
 
 下面的队列布局 sweep 来自原型阶段的普通 CPU allocation + 显式 host
 registration，作用是比较同一 backing 下不同 kernel 结构的相对差异；它不作为

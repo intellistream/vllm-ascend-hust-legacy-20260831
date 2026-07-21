@@ -687,6 +687,16 @@ void kv_cache_block_gather(const torch::Tensor& src_block_ids,
     TORCH_CHECK(src_block_ids.is_privateuseone(), "src_block_ids must be on NPU");
     TORCH_CHECK(dst_block_ids.is_privateuseone(), "dst_block_ids must be on NPU");
     TORCH_CHECK(out.is_privateuseone(), "out must be on NPU");
+    TORCH_CHECK(src_block_ids.device() == out.device(),
+                "src_block_ids and out must be on the same NPU device, got ",
+                src_block_ids.device(),
+                " and ",
+                out.device());
+    TORCH_CHECK(dst_block_ids.device() == out.device(),
+                "dst_block_ids and out must be on the same NPU device, got ",
+                dst_block_ids.device(),
+                " and ",
+                out.device());
     TORCH_CHECK(src_pages.device().is_cpu(), "src_pages must be a CPU tensor");
     TORCH_CHECK(src_block_ids.scalar_type() == at::ScalarType::Int, "src_block_ids must be int32");
     TORCH_CHECK(dst_block_ids.scalar_type() == at::ScalarType::Int, "dst_block_ids must be int32");

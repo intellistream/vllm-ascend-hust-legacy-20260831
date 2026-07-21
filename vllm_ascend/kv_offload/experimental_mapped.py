@@ -149,6 +149,7 @@ class _Transfer:
     mapped_id_buffers: _MappedIDBuffers | None
     transfer_type: tuple[str, str]
     success: bool = True
+    needs_stream_sync: bool = False
 
 
 @dataclass
@@ -159,6 +160,7 @@ class _AsyncState:
     transfers: deque[_Transfer] = field(default_factory=deque)
     stream_pool: list[torch.npu.Stream] = field(default_factory=list)
     event_pool: list[torch.npu.Event] = field(default_factory=list)
+    poisoned: bool = False
 
 
 class MappedOffloadingHandler(OffloadingHandler):
@@ -262,7 +264,8 @@ class MappedOffloadingHandler(OffloadingHandler):
         first_error: Exception | None = None
         for handle in reversed(handles):
             try:
-                self._unregister_op(handle)
+                if not self._unregister_op(handle):
+                    raise RuntimeError(f"mapped CPU pool handle {handle} was not active")
             except Exception as exc:
                 if first_error is None:
                     first_error = exc
@@ -345,8 +348,11 @@ class MappedOffloadingHandler(OffloadingHandler):
         try:
             with torch.npu.stream(stream):
                 start_event.record(stream)
+                # Event recording itself is asynchronous stream work.  If the
+                # completion event fails, synchronize before reusing these
+                # objects even when this is an otherwise empty transfer.
+                work_may_be_inflight = True
                 if num_copy_ops > 0:
-                    work_may_be_inflight = True
                     torch.ops._C_ascend.swap_blocks_batch(
                         copy_src,
                         copy_dst,
@@ -420,9 +426,11 @@ class MappedOffloadingHandler(OffloadingHandler):
         try:
             with torch.npu.stream(stream):
                 start_event.record(stream)
+                # Keep the event/stream lifecycle conservative for empty jobs
+                # too; the start-event record may still be queued on device.
+                work_may_be_inflight = True
                 if num_copy_ops > 0:
                     assert mapped_id_buffers is not None
-                    work_may_be_inflight = True
                     self._run_mapped_gather(
                         src_blocks,
                         dst_blocks,
@@ -458,10 +466,11 @@ class MappedOffloadingHandler(OffloadingHandler):
             raise ValueError("source and destination block IDs must be 1D")
 
         group_sizes = gpu_spec.group_sizes
-        block_indices = gpu_spec.block_indices
         if len(group_sizes) != len(self.kv_cache_groups_data_refs):
             raise ValueError("group_sizes does not match canonical KV groups")
-        if len(block_indices) != len(self.kv_cache_groups_data_refs):
+        # The mapped path requires block_size_factor == 1, so block_indices is
+        # structural group metadata only; there is no sub-block expansion.
+        if len(gpu_spec.block_indices) != len(self.kv_cache_groups_data_refs):
             raise ValueError("block_indices does not match canonical KV groups")
         for group_idx, group_size in enumerate(group_sizes):
             if group_size < 0:
@@ -495,6 +504,10 @@ class MappedOffloadingHandler(OffloadingHandler):
         *,
         wait_for_current_stream: bool,
     ) -> tuple[torch.npu.Stream, torch.npu.Event, torch.npu.Event]:
+        if state.poisoned:
+            raise RuntimeError(
+                "cannot submit after a failed transfer left device work unsynchronized; retry handler shutdown"
+            )
         stream = state.stream_pool.pop() if state.stream_pool else torch.npu.Stream()
         start_event = state.event_pool.pop() if state.event_pool else torch.npu.Event(enable_timing=True)
         end_event = state.event_pool.pop() if state.event_pool else torch.npu.Event(enable_timing=True)
@@ -509,9 +522,28 @@ class MappedOffloadingHandler(OffloadingHandler):
         state.transfer_events[transfer.job_id] = transfer.end_event
         state.transfers.append(transfer)
 
-    @classmethod
+    def _recycle_transfer_resources(
+        self,
+        state: _AsyncState,
+        transfer: _Transfer,
+    ) -> None:
+        state.stream_pool.append(transfer.stream)
+        state.event_pool.extend((transfer.end_event, transfer.start_event))
+        if transfer.batch_src is not None:
+            if transfer.batch_dst is None or transfer.batch_sizes is None:
+                raise RuntimeError("store transfer is missing descriptor buffers")
+            self._store_descriptor_pool.append(
+                (
+                    transfer.batch_src,
+                    transfer.batch_dst,
+                    transfer.batch_sizes,
+                )
+            )
+        if transfer.mapped_id_buffers is not None:
+            self._release_mapped_ids(transfer.mapped_id_buffers)
+
     def _preserve_failed_submission(
-        cls,
+        self,
         state: _AsyncState,
         transfer: _Transfer,
         work_may_be_inflight: bool,
@@ -523,9 +555,32 @@ class MappedOffloadingHandler(OffloadingHandler):
                 transfer.end_event.record(transfer.stream)
                 completion_recorded = True
             except Exception:
-                transfer.stream.synchronize()
+                logger.exception(
+                    "Failed to record a completion event for a failed mapped KV transfer; synchronizing its stream"
+                )
+                try:
+                    transfer.stream.synchronize()
+                except Exception:
+                    # The handler can no longer prove that resources referenced
+                    # by this submission are idle. Keep the complete transfer
+                    # reachable and reject more work until shutdown retries the
+                    # stream synchronization successfully.
+                    logger.exception(
+                        "Failed to synchronize a failed mapped KV transfer; "
+                        "the handler is poisoned until shutdown succeeds"
+                    )
+                    transfer.needs_stream_sync = True
+                    state.poisoned = True
+                    state.transfers.append(transfer)
+                    return
+                self._recycle_transfer_resources(state, transfer)
+                return
         if completion_recorded:
-            cls._track_submission(state, transfer)
+            self._track_submission(state, transfer)
+        else:
+            # No device work was submitted, so all resources are immediately
+            # reusable even though the submission itself raised.
+            self._recycle_transfer_resources(state, transfer)
 
     def _prepare_store_descriptors(
         self,
@@ -748,7 +803,7 @@ class MappedOffloadingHandler(OffloadingHandler):
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
         for state in self._states:
-            while state.transfers and state.transfers[0].end_event.query():
+            while state.transfers and not state.transfers[0].needs_stream_sync and state.transfers[0].end_event.query():
                 transfer = state.transfers.popleft()
                 transfer_time = transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
                 results.append(
@@ -760,21 +815,8 @@ class MappedOffloadingHandler(OffloadingHandler):
                         transfer_type=transfer.transfer_type,
                     )
                 )
-                state.stream_pool.append(transfer.stream)
-                state.event_pool.extend((transfer.end_event, transfer.start_event))
-                if transfer.batch_src is not None:
-                    assert transfer.batch_dst is not None
-                    assert transfer.batch_sizes is not None
-                    self._store_descriptor_pool.append(
-                        (
-                            transfer.batch_src,
-                            transfer.batch_dst,
-                            transfer.batch_sizes,
-                        )
-                    )
-                if transfer.mapped_id_buffers is not None:
-                    self._release_mapped_ids(transfer.mapped_id_buffers)
-                del state.transfer_events[transfer.job_id]
+                self._recycle_transfer_resources(state, transfer)
+                state.transfer_events.pop(transfer.job_id, None)
         return results
 
     def wait(self, job_ids: set[int]) -> None:
@@ -793,8 +835,13 @@ class MappedOffloadingHandler(OffloadingHandler):
         for state in self._states:
             while state.transfers:
                 transfer = state.transfers[0]
-                transfer.end_event.synchronize()
+                if transfer.needs_stream_sync:
+                    transfer.stream.synchronize()
+                else:
+                    transfer.end_event.synchronize()
                 state.transfers.popleft()
+                state.transfer_events.pop(transfer.job_id, None)
+            state.poisoned = False
 
         # There can be no device read of host mappings after both queues drain.
         # Unregister before releasing the tensors or shared-memory views.

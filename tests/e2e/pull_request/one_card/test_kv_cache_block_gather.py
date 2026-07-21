@@ -4,8 +4,8 @@
 import pytest
 import torch
 import torch_npu  # noqa: F401
-
 import vllm_ascend.vllm_ascend_C  # noqa: F401
+
 from vllm_ascend.custom_op_package import activate_kv_cache_block_gather_runtime
 
 

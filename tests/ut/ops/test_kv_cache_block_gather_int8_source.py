@@ -44,3 +44,15 @@ def test_torch_binding_accepts_signed_byte_pages() -> None:
     assert "float32, float16, bfloat16, or int8" in binding
     assert "bytes_per_block % data_copy_block_bytes == 0" in binding
     assert "for block-aligned DataCopy" in binding
+
+
+def test_torch_binding_rejects_cross_device_id_tensors_before_acl_conversion() -> None:
+    binding = _read("csrc/kv_cache_block_gather_binding.cpp")
+
+    src_check = "src_block_ids.device() == out.device()"
+    dst_check = "dst_block_ids.device() == out.device()"
+    first_descriptor = "ConvertType(src_block_ids)"
+    assert src_check in binding
+    assert dst_check in binding
+    assert binding.index(src_check) < binding.index(first_descriptor)
+    assert binding.index(dst_check) < binding.index(first_descriptor)
