@@ -43,6 +43,7 @@ class SimHashHasher:
         self.num_bits = num_bits
         gen = torch.Generator().manual_seed(seed)
         self.projections: torch.Tensor = torch.randn(dim, num_bits, generator=gen)
+        self._powers: torch.Tensor | None = None
 
     @torch.no_grad()
     def hash(self, embeddings: torch.Tensor) -> torch.Tensor:
@@ -65,7 +66,11 @@ class SimHashHasher:
         bits = (proj > 0).to(torch.int64)  # [B, num_bits]
 
         # Pack bits: bit i → value 2^i
-        powers = 2 ** torch.arange(self.num_bits, device=embeddings.device)
+        if self._powers is None or self._powers.device != embeddings.device:
+            self._powers = 2 ** torch.arange(
+                self.num_bits, device=embeddings.device,
+            )
+        powers = self._powers
         return (bits * powers).sum(dim=1)  # [B] int64
 
 

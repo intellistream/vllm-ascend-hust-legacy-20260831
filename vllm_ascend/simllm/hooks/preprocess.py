@@ -48,8 +48,13 @@ class SimLLMPreprocessor:
         Pooling mode for ``extract_embedding`` (``"mean"``, ``"last"``, or ``"cls"``).
     """
 
-    def __init__(self, pooling: str = "mean") -> None:
+    def __init__(
+        self,
+        pooling: str = "mean",
+        embedding_layer: Any | None = None,
+    ) -> None:
         self._pooling = pooling
+        self._embedding_layer = embedding_layer
 
     @torch.no_grad()
     def extract_embeddings(
@@ -73,7 +78,9 @@ class SimLLMPreprocessor:
         -------
         ``[num_reqs, D]`` L2-normalized embeddings, one row per request.
         """
-        embed_layer = resolve_input_embedding_layer(model)
+        embed_layer = self._embedding_layer
+        if embed_layer is None:
+            embed_layer = resolve_input_embedding_layer(model)
         token_embs = embed_layer(input_ids)  # [num_tokens, D]
 
         # Convert flat [num_tokens, D] to list of per-request [S_i, D]

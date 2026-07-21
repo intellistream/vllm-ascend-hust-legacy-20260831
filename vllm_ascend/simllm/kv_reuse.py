@@ -24,6 +24,8 @@ attention wrapper instead).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch
 
 
@@ -86,7 +88,7 @@ class KVReuseEngine:
         self,
         kv_cache_k: torch.Tensor,
         kv_cache_v: torch.Tensor,
-        block_ids: list[int],
+        block_ids: Sequence[int] | torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> None:
@@ -109,19 +111,42 @@ class KVReuseEngine:
             Value tensor ``[1, num_kv_heads, L_kv, head_size]``.
         """
         seq_len = k.shape[2]
-        _ = len(block_ids)  # num_blocks — must match write range
         block_size = kv_cache_k.shape[1]
+
+        if isinstance(block_ids, torch.Tensor):
+            block_id_tensor = block_ids.reshape(-1).to(
+                device=kv_cache_k.device,
+                dtype=torch.long,
+                non_blocking=True,
+            )
+        else:
+            block_id_tensor = torch.as_tensor(
+                block_ids, dtype=torch.long, device=kv_cache_k.device,
+            )
+        if block_id_tensor.numel() == 0:
+            return
 
         # Flatten the leading batch dim: [1, H, L, D] → [L, H, D]
         k_flat = k.squeeze(0).permute(1, 0, 2)  # [L, H, D]
         v_flat = v.squeeze(0).permute(1, 0, 2)  # [L, H, D]
+        block_token_count = block_id_tensor.numel() * block_size
+        if seq_len < block_token_count:
+            pad_shape = (
+                block_token_count - seq_len,
+                k_flat.shape[1],
+                k_flat.shape[2],
+            )
+            k_flat = torch.cat((k_flat, k_flat.new_zeros(pad_shape)), dim=0)
+            v_flat = torch.cat((v_flat, v_flat.new_zeros(pad_shape)), dim=0)
 
-        for block_idx, block_id in enumerate(block_ids):
-            start = block_idx * block_size
-            end = min(start + block_size, seq_len)
-            length = end - start
-            kv_cache_k[block_id, :length, :, :] = k_flat[start:end, :, :]
-            kv_cache_v[block_id, :length, :, :] = v_flat[start:end, :, :]
+        k_blocks = k_flat[:block_token_count].reshape(
+            -1, block_size, k_flat.shape[1], k_flat.shape[2],
+        )
+        v_blocks = v_flat[:block_token_count].reshape(
+            -1, block_size, v_flat.shape[1], v_flat.shape[2],
+        )
+        kv_cache_k.index_copy_(0, block_id_tensor, k_blocks)
+        kv_cache_v.index_copy_(0, block_id_tensor, v_blocks)
 
     @staticmethod
     def gather_from_cache(
@@ -149,13 +174,32 @@ class KVReuseEngine:
         Tensor of shape ``[1, num_kv_heads, seq_len, head_size]`` — the
         contiguous KV sequence assembled from paged blocks.
         """
-        if len(block_ids) == 0 or seq_len == 0:
+        if seq_len == 0:
             return kv_cache.new_zeros(
                 1, kv_cache.shape[2], 0, kv_cache.shape[3]
             )
-        # Read blocks and concatenate along the token dimension.
-        blocks = [kv_cache[bid] for bid in block_ids]
-        flat = torch.cat(blocks, dim=0)[:seq_len]  # [seq_len, H, D]
+
+        if isinstance(block_ids, torch.Tensor):
+            if block_ids.numel() == 0:
+                return kv_cache.new_zeros(
+                    1, kv_cache.shape[2], 0, kv_cache.shape[3]
+                )
+            block_id_tensor = block_ids.reshape(-1).to(
+                device=kv_cache.device,
+                dtype=torch.long,
+                non_blocking=True,
+            )
+        else:
+            if len(block_ids) == 0:
+                return kv_cache.new_zeros(
+                    1, kv_cache.shape[2], 0, kv_cache.shape[3]
+                )
+            block_id_tensor = torch.as_tensor(
+                block_ids, dtype=torch.long, device=kv_cache.device,
+            )
+
+        blocks = kv_cache.index_select(0, block_id_tensor)
+        flat = blocks.reshape(-1, kv_cache.shape[2], kv_cache.shape[3])[:seq_len]
         return flat.permute(1, 0, 2).unsqueeze(0)  # [1, H, L, D]
 
     # ------------------------------------------------------------------
