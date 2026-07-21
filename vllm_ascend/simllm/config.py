@@ -55,6 +55,13 @@ class SimLLMConfig:
     # -- Embedding ----------------------------------------------------------
     embedding_pooling: str = "mean"
 
+    # -- KV storage ---------------------------------------------------------
+    unmatched_store_mode: str = "top"
+
+    # -- Diagnostics --------------------------------------------------------
+    profile: bool = False
+    profile_interval: int = 20
+
     # -- Deferral -----------------------------------------------------------
     deferral_ratio: float = 0.5
     max_deferrals: int = 3
@@ -75,6 +82,13 @@ class SimLLMConfig:
             sandwich_bottom=env_variables["VLLM_ASCEND_SIMLLM_SANDWICH_BOTTOM"](),
             sandwich_top=env_variables["VLLM_ASCEND_SIMLLM_SANDWICH_TOP"](),
             embedding_pooling=env_variables["VLLM_ASCEND_SIMLLM_EMBEDDING_POOLING"](),
+            unmatched_store_mode=env_variables[
+                "VLLM_ASCEND_SIMLLM_UNMATCHED_STORE_MODE"
+            ](),
+            profile=env_variables["VLLM_ASCEND_SIMLLM_PROFILE"](),
+            profile_interval=env_variables[
+                "VLLM_ASCEND_SIMLLM_PROFILE_INTERVAL"
+            ](),
             deferral_ratio=env_variables["VLLM_ASCEND_SIMLLM_DEFERRAL_RATIO"](),
             max_deferrals=env_variables["VLLM_ASCEND_SIMLLM_MAX_DEFERRALS"](),
         )

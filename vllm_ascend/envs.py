@@ -202,6 +202,19 @@ env_variables: dict[str, Callable[[], Any]] = {
         "VLLM_ASCEND_SIMLLM_EMBEDDING_POOLING", "mean"
     ),
 
+    # Store only final-layer KV by default to keep cache construction cheap.
+    # "sandwich" retains the previous keep-layer averaging behavior.
+    "VLLM_ASCEND_SIMLLM_UNMATCHED_STORE_MODE": lambda: os.getenv(
+        "VLLM_ASCEND_SIMLLM_UNMATCHED_STORE_MODE", "top"
+    ),
+
+    "VLLM_ASCEND_SIMLLM_PROFILE": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_SIMLLM_PROFILE", "0"))
+    ),
+    "VLLM_ASCEND_SIMLLM_PROFILE_INTERVAL": lambda: int(
+        os.getenv("VLLM_ASCEND_SIMLLM_PROFILE_INTERVAL", "20")
+    ),
+
     # Batch match ratio threshold for deferral logic. If the fraction of matched
     # tasks in a batch exceeds this value, unmatched tasks are deferred to the
     # next scheduling cycle. Valid range: [0.0, 1.0]. Default 0.5.
