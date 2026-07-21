@@ -124,6 +124,32 @@ def _format_startup_memory_error(
     return " ".join(message_lines)
 
 
+def _register_lmcache_blend_model_if_needed(
+    vllm_config: VllmConfig,
+    model_runner: NPUModelRunner,
+) -> None:
+    """Port the official CacheBlend tracker hook to the current worker.
+
+    The published LMCache-Ascend patch targets the retired ``worker_v1.py``
+    lifecycle. Current vLLM initializes its KV connector only after the model
+    has loaded, so the equivalent hook belongs immediately before connector
+    initialization in ``initialize_from_config``.
+    """
+    kv_config = vllm_config.kv_transfer_config
+    connector = getattr(kv_config, "kv_connector", None) if kv_config is not None else None
+    blending = os.environ.get("LMCACHE_ENABLE_BLENDING", "").strip().lower()
+    if connector not in {
+        "LMCacheAscendConnector",
+        "LMCacheAscendConnectorV1Dynamic",
+    } or blending not in {"1", "true", "yes", "on"}:
+        return
+
+    from lmcache.integration.vllm.utils import ENGINE_NAME
+    from lmcache.v1.compute.models.utils import VLLMModelTracker
+
+    VLLMModelTracker.register_model(ENGINE_NAME, model_runner.get_model())
+
+
 def _parse_npu_smi_logical_map(mapping_output: str) -> dict[tuple[str, str], int]:
     logical_map: dict[tuple[str, str], int] = {}
     for line in mapping_output.splitlines():
@@ -1160,6 +1186,7 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        _register_lmcache_blend_model_if_needed(self.vllm_config, self.model_runner)
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
