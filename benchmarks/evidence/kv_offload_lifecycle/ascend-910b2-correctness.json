@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "evidence_label": "real-hardware-correctness-smoke",
+  "scope": "Ascend 910B2 tensor correctness and shutdown lifecycle plus a local-model smoke; not an online-serving or performance experiment",
+  "result": "PASS_WITH_MODEL_RELOAD_PRECONDITION_UNMET",
+  "online_requests_measured": false,
+  "performance_claim": false,
+  "source": {
+    "vllm_hust_core_sha": "7803a82de711b53c7d3bdbe0c8c019b578e84d7b",
+    "vllm_ascend_hust_sha": "7feed154b6817aa607738185bb4cf6915e14c359",
+    "exact_vllm_ascend_extension_sha256": "dcc80131d86535df209f1e84c8bc703acf4f9c8470dc329eebb13a33701a4022"
+  },
+  "runtime": {
+    "container_image": "quay.io/ascend/vllm-ascend:v0.21.0rc1-openeuler",
+    "container_image_digest": "sha256:105834a38766a6b1b89a7eeb313a37351d098a69e8cdee87ad0ca3a6e090ce13",
+    "torch": "2.10.0+cpu",
+    "torch_npu": "2.10.0",
+    "hardware": "Ascend910B2",
+    "device_count": 1
+  },
+  "model": {
+    "name": "Qwen3-0.6B",
+    "model_safetensors_sha256": "f47f71177f32bcd101b7573ec9171e6a57f4f4d31148d38e382306f42996874b"
+  },
+  "tensor_lifecycle_gate": {
+    "result": "PASS",
+    "checks": [
+      "real NPU D2H copy",
+      "FIFO queued drain during concurrent shutdown",
+      "copied byte content",
+      "real NPU H2D reload and byte content",
+      "background health",
+      "idempotent shutdown",
+      "copy thread exited",
+      "transfer stream synchronized",
+      "late submission rejected after shutdown"
+    ],
+    "log_sha256": "2f96fcdac70fef02f1a7a2fe1fc10576d5966d57e3097367e80afdae19a4d9e0"
+  },
+  "model_smoke": {
+    "result": "INCONCLUSIVE_RELOAD_PRECONDITION_UNMET",
+    "completed": [
+      "exact source and extension import",
+      "Qwen3-0.6B load",
+      "SimpleCPUOffloadConnector worker and scheduler initialization",
+      "first deterministic request",
+      "engine shutdown returned without hang"
+    ],
+    "failed_stage": "reset_prefix_cache before forced reload",
+    "exact_error": "reset_prefix_cache returned false for 20 attempts over 10 seconds because 2 blocks remained allocated",
+    "classification": "harness/API precondition failure; no copy error or shutdown hang observed",
+    "log_sha256": "9cd5a752bc17f9efa8cd5b014fd5ddf282baf40d3e9d524509e9b2862d255ca8"
+  }
+}
