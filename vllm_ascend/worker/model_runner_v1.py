@@ -1847,14 +1847,16 @@ class NPUModelRunner(GPUModelRunner):
                 logits_indices=logits_indices_cpu,
                 plans=plans,
             )
-            _segment_reuse_trace_event(
-                "runner_terminal_logits_ready",
-                source="ascend_model_runner_logits_indices",
-                num_reqs=int(num_reqs),
-                query_start_loc=query_start_loc_cpu,
-                logits_indices=logits_indices_cpu,
-                plans=plans,
-            )
+            for plan in plans:
+                _segment_reuse_trace_event(
+                    "runner_terminal_logits_ready",
+                    request_id=plan["req_id"],
+                    source="ascend_model_runner_logits_indices",
+                    num_reqs=int(num_reqs),
+                    query_start_loc=query_start_loc_cpu,
+                    logits_indices=logits_indices_cpu,
+                    plan=plan,
+                )
 
     def _trace_segment_reuse_runtime_tensor_bundle(
         self,

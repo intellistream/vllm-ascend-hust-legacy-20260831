@@ -367,6 +367,7 @@ def _segment_reuse_terminal_replay_output_proof(
         _segment_reuse_trace_event(
             "ascend_terminal_replay_output_differential_proof",
             path=path,
+            request_id=getattr(metadata, "segment_reuse_request_id", None),
             sparse_mode=sparse_mode,
             attn_state=str(getattr(metadata, "attn_state", None)),
             path_executed=False,
@@ -401,6 +402,10 @@ def _segment_reuse_terminal_replay_output_proof(
     _segment_reuse_trace_event(
         "ascend_terminal_replay_output_differential_proof",
         path=path,
+        request_id=getattr(metadata, "segment_reuse_request_id", None),
+        layer_name=layer_name,
+        layer_index=_segment_reuse_int_or_none(layer_index),
+        graph_update_path=graph_update_path,
         sparse_mode=sparse_mode,
         attn_state=str(getattr(metadata, "attn_state", None)),
         **logical_metadata,
