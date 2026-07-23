@@ -7,9 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_pp_opt_worker_keeps_async_send_buffers_alive() -> None:
-    worker = (REPO_ROOT / "vllm_ascend/worker/worker.py").read_text(
-        encoding="utf-8"
-    )
+    worker = (REPO_ROOT / "vllm_ascend/worker/worker.py").read_text(encoding="utf-8")
 
     assert "VLLM_PP_OPT_OVERLAP_SENDS" in worker
     assert "self._pp_send_buffer_refs" in worker
@@ -20,9 +18,7 @@ def test_pp_opt_worker_keeps_async_send_buffers_alive() -> None:
 
 
 def test_pp_opt_model_runner_records_rank_local_forward_window() -> None:
-    model_runner = (
-        REPO_ROOT / "vllm_ascend/worker/model_runner_v1.py"
-    ).read_text(encoding="utf-8")
+    model_runner = (REPO_ROOT / "vllm_ascend/worker/model_runner_v1.py").read_text(encoding="utf-8")
 
     assert "pp_opt_profile.mark_t2()" in model_runner
     assert "pp_opt_profile.mark_t3()" in model_runner
@@ -31,9 +27,7 @@ def test_pp_opt_model_runner_records_rank_local_forward_window() -> None:
 
 
 def test_pp_opt_group_coordinator_tracks_nonblocking_sends() -> None:
-    patch = (
-        REPO_ROOT / "vllm_ascend/patch/worker/patch_distributed.py"
-    ).read_text(encoding="utf-8")
+    patch = (REPO_ROOT / "vllm_ascend/patch/worker/patch_distributed.py").read_text(encoding="utf-8")
 
     assert "if envs.VLLM_USE_PP_OPT_SCHEDULER:" in patch
     assert "self.size_send_work" in patch

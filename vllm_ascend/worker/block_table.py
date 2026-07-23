@@ -197,8 +197,7 @@ class BlockTable:
         req_indices = np.repeat(np.arange(num_reqs, dtype=np.int64), counts)
         if req_indices.shape[0] != num_tokens:
             raise ValueError(
-                "query_start_loc and positions describe different token counts: "
-                f"{req_indices.shape[0]} != {num_tokens}"
+                f"query_start_loc and positions describe different token counts: {req_indices.shape[0]} != {num_tokens}"
             )
 
         if self.dcp_world_size * self.pcp_world_size > 1:
@@ -257,41 +256,27 @@ class BlockTable:
             )
 
         if self.dcp_world_size * self.pcp_world_size > 1:
-            virtual_block_size = (
-                self.block_size * self.dcp_world_size * self.pcp_world_size
-            )
+            virtual_block_size = self.block_size * self.dcp_world_size * self.pcp_world_size
             logical_block_idx = positions // virtual_block_size
-            block_table_indices = self._get_block_table_indices(
-                req_indices, logical_block_idx
-            )
+            block_table_indices = self._get_block_table_indices(req_indices, logical_block_idx)
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             virtual_block_offsets = positions % virtual_block_size
             current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
             mask = (
-                virtual_block_offsets
-                // self.cp_kv_cache_interleave_size
-                % (self.dcp_world_size * self.pcp_world_size)
+                virtual_block_offsets // self.cp_kv_cache_interleave_size % (self.dcp_world_size * self.pcp_world_size)
                 == current_rank
             )
             block_offsets = (
                 virtual_block_offsets
-                // (
-                    self.dcp_world_size
-                    * self.pcp_world_size
-                    * self.cp_kv_cache_interleave_size
-                )
+                // (self.dcp_world_size * self.pcp_world_size * self.cp_kv_cache_interleave_size)
                 * self.cp_kv_cache_interleave_size
                 + virtual_block_offsets % self.cp_kv_cache_interleave_size
             )
             slot_mapping = block_numbers * self.block_size + block_offsets
-            self.slot_mapping.np[:num_tokens] = np.where(
-                mask, slot_mapping, PAD_SLOT_ID
-            )
+            self.slot_mapping.np[:num_tokens] = np.where(mask, slot_mapping, PAD_SLOT_ID)
         else:
             logical_block_idx = positions // self.block_size
-            block_table_indices = self._get_block_table_indices(
-                req_indices, logical_block_idx
-            )
+            block_table_indices = self._get_block_table_indices(req_indices, logical_block_idx)
             block_numbers = self.block_table.np.ravel()[block_table_indices]
             block_offsets = positions % self.block_size
             np.add(
@@ -560,9 +545,7 @@ class MultiGroupBlockTable:
             else:
                 block_table.compute_slot_mapping_draft(req_indices, positions)
 
-    def compute_slot_mapping_cpu(
-        self, req_indices: np.ndarray, positions: np.ndarray
-    ) -> None:
+    def compute_slot_mapping_cpu(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
         for block_table in self.block_tables:
             block_table.compute_slot_mapping_cpu(req_indices, positions)
 

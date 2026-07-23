@@ -22,12 +22,12 @@ import gc
 import logging
 import math
 import os
-import re
 import subprocess
 import sys
 from types import NoneType
 from typing import Any
 
+import regex as re
 import torch
 import torch.nn as nn
 import torch_npu
