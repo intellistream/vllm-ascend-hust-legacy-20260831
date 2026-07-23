@@ -544,6 +544,7 @@
     - vllm_ascend/worker/v2
   tests:
     - tests/ut/worker
+    - tests/ut/test_pp_opt_integration_static.py
     - tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py
     - tests/e2e/pull_request/one_card/test_qwen3_5_0_8b.py
     - tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py
@@ -845,7 +846,6 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
 
 
 
