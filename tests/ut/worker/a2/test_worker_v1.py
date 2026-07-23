@@ -98,7 +98,7 @@ class TestNPUWorker(TestBase):
         mock_register_atb_extensions.assert_called_once()
         mock_register_ascend_customop.assert_called_once()
         mock_init_ascend_config.assert_called_once_with(self.vllm_config_mock)
-        mock_check_ascend_device_type.assert_called_once()
+        mock_check_ascend_device_type.assert_not_called()
 
         # Verify cache_dtype setting
         self.assertEqual(worker.cache_dtype, torch.float16)
@@ -150,6 +150,7 @@ class TestNPUWorker(TestBase):
 
         # Verify init_cached_hf_modules is called (trust_remote_code=True)
         mock_init_cached_hf_modules.assert_not_called()
+        mock_check_ascend_device_type.assert_not_called()
 
     @patch("vllm_ascend.utils.adapt_patch")
     @patch("vllm_ascend.ops")
@@ -194,6 +195,7 @@ class TestNPUWorker(TestBase):
 
         # Verify cache_dtype is set to custom value
         self.assertEqual(worker.cache_dtype, torch.float32)
+        mock_check_ascend_device_type.assert_not_called()
 
     def test_initialize_cache(self):
         """Test initialize_cache method"""
@@ -253,6 +255,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker.NPUWorker._init_worker_distributed_environment")
     @patch("vllm_ascend.worker.worker.init_device_properties_triton")
     @patch("vllm_ascend.worker.worker.get_ascend_device_type")
+    @patch("vllm_ascend.worker.worker.check_ascend_device_type")
     @patch("torch.npu.set_device")
     @patch("torch.npu.empty_cache")
     @patch("torch.npu.mem_get_info")
@@ -261,6 +264,7 @@ class TestNPUWorker(TestBase):
         mock_mem_get_info,
         mock_empty_cache,
         mock_set_device,
+        mock_check_ascend_device_type,
         mock_get_device_type,
         mock_init_triton,
         mock_init_dist_env,
@@ -272,6 +276,11 @@ class TestNPUWorker(TestBase):
         # Setup mock
         mock_mem_get_info.return_value = (1000, 2000)
         mock_get_device_type.return_value = AscendDeviceType.A2
+        call_order = []
+        mock_set_device.side_effect = lambda _device: call_order.append("set_device")
+        mock_check_ascend_device_type.side_effect = lambda: call_order.append(
+            "check_device_type"
+        )
 
         # Mock MemorySnapshot
         mock_snapshot = MagicMock()
@@ -297,6 +306,8 @@ class TestNPUWorker(TestBase):
             result = worker._init_device()
 
             mock_init_dist_env.assert_called_once()
+            mock_check_ascend_device_type.assert_called_once()
+            self.assertEqual(call_order[:2], ["set_device", "check_device_type"])
             self.assertEqual(str(result), "npu:1")
             self.assertEqual(worker.init_snapshot, mock_snapshot)
             self.assertEqual(worker.requested_memory, 2000 * 0.5)

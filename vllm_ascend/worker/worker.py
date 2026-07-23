@@ -340,7 +340,6 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.logger import configure_ascend_file_logging
 
         configure_ascend_file_logging()
-        check_ascend_device_type()
 
         super().__init__(
             vllm_config=vllm_config,
