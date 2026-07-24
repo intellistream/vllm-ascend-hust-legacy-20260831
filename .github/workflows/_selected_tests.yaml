@@ -109,8 +109,12 @@ jobs:
           git config --global --add safe.directory "$cache"
           if [ -d "$cache" ] && git --git-dir="$cache" cat-file -e "${CHECKOUT_REF}^{commit}"; then
             checkout_sha=$(git --git-dir="$cache" rev-parse "${CHECKOUT_REF}^{commit}")
-            git clone --shared --no-checkout "$cache" .
-            git checkout --detach "$checkout_sha"
+            git init .
+            git remote remove origin 2>/dev/null || true
+            git remote add origin "$cache"
+            git fetch --no-tags origin "$checkout_sha"
+            git checkout --force --detach FETCH_HEAD
+            git clean -ffdx
           else
             git init .
             git remote add origin https://github.com/${{ github.repository }}.git
@@ -156,8 +160,12 @@ jobs:
           cd ./vllm-empty
           if [ -d "$cache" ] && git --git-dir="$cache" cat-file -e "${VLLM_REF}^{commit}"; then
             checkout_sha=$(git --git-dir="$cache" rev-parse "${VLLM_REF}^{commit}")
-            git clone --shared --no-checkout "$cache" .
-            git checkout --detach "$checkout_sha"
+            git init .
+            git remote remove origin 2>/dev/null || true
+            git remote add origin "$cache"
+            git fetch --no-tags origin "$checkout_sha"
+            git checkout --force --detach FETCH_HEAD
+            git clean -ffdx
           else
             git init .
             git remote add origin https://github.com/vllm-project/vllm.git
