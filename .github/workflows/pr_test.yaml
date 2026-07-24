@@ -213,7 +213,6 @@ jobs:
             --allowed-runner linux-aarch64-a2b3-1 \
             --runner-pool linux-aarch64-a2b3-npu0=0 \
             --runner-pool linux-aarch64-a2b3-npu1=1 \
-            --runner-pool linux-aarch64-a2b3-npu2=2 \
             --runner-pool linux-aarch64-a2b3-npu3=3 \
             --runner-pool linux-aarch64-a2b3-npu4=4 \
             --runner-pool linux-aarch64-a2b3-npu5=5 \
