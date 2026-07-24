@@ -35,6 +35,8 @@ def test_a2_single_npu_container_uses_runner_scoped_runtime_contract() -> None:
     assert "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro" in workflow
     assert "/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro" in workflow
     assert "ASCEND_RT_VISIBLE_DEVICES" in workflow
+    assert "matrix.group.device_id != null" in workflow
+    assert "/dev/davinci{0}" in workflow
 
 
 def test_npu_preflight_is_fail_closed_and_runs_before_package_install() -> None:
@@ -61,17 +63,21 @@ def test_container_checkout_uses_runner_compatible_node_runtime() -> None:
 def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
-    assert "matrix.group.runner == 'linux-aarch64-a2b3-1' && 'https://pypi.org/simple'" in workflow
+    assert (
+        "(matrix.group.device_id != null || matrix.group.runner == 'linux-aarch64-a2b3-1') && 'https://pypi.org/simple'"
+    ) in workflow
     container_env = workflow[workflow.index("      env:") : workflow.index("    steps:")]
     standalone_extra_index = (
-        "matrix.group.runner == 'linux-aarch64-a2b3-1' && 'https://repo.huaweicloud.com/ascend/repos/pypi'"
+        "(matrix.group.device_id != null || matrix.group.runner == 'linux-aarch64-a2b3-1') && "
+        "'https://repo.huaweicloud.com/ascend/repos/pypi'"
     )
     assert standalone_extra_index in container_env
     assert "https://download.pytorch.org/whl/cpu/" not in container_env
     install_block = workflow[
         workflow.index("- name: Install packages") : workflow.index("- name: Checkout vllm-project/vllm repo")
     ]
-    assert 'if [ "${{ matrix.group.runner }}" != "linux-aarch64-a2b3-1" ]; then' in install_block
+    assert 'if [ -z "${{ matrix.group.device_id }}" ]' in install_block
+    assert '[ "${{ matrix.group.runner }}" != "linux-aarch64-a2b3-1" ]' in install_block
     assert "cache-service.nginx-pypi-cache.svc.cluster.local:8081" in install_block
 
 
@@ -115,3 +121,5 @@ def test_hust_e2e_only_emits_groups_for_available_runner_families() -> None:
     workflow = PR_TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert "--allowed-runner linux-aarch64-a2b3-1" in workflow
+    for device_id in range(7):
+        assert f"--runner-pool linux-aarch64-a2b3-npu{device_id}={device_id}" in workflow

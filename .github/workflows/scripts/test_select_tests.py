@@ -108,6 +108,29 @@ def test_filter_allowed_runners_preserves_only_supported_groups(capsys):
     assert "linux-amd64-cpu-8-hk" in warning
 
 
+def test_assign_runner_pool_round_robins_groups_and_sets_device_ids():
+    groups = [{"runner": "linux-aarch64-a2b3-1", "tests": f"tests/{index}.py"} for index in range(4)]
+
+    assigned = select_tests._assign_runner_pool(
+        groups,
+        [
+            "linux-aarch64-a2b3-npu0=0",
+            "linux-aarch64-a2b3-npu3=3",
+            "linux-aarch64-a2b3-npu6=6",
+        ],
+    )
+
+    assert [(group["runner"], group["device_id"]) for group in assigned] == [
+        ("linux-aarch64-a2b3-npu0", 0),
+        ("linux-aarch64-a2b3-npu3", 3),
+        ("linux-aarch64-a2b3-npu6", 6),
+        ("linux-aarch64-a2b3-npu0", 0),
+    ]
+    assert "device_id" not in groups[0]
+    with pytest.raises(ValueError, match="LABEL=DEVICE_ID"):
+        select_tests._assign_runner_pool(groups, ["missing-device"])
+
+
 def test_collect_paths_and_basic_path_helpers():
     config = [
         {"name": "a", "tests": ["tests/ut/a/", "tests/ut/a/test_x.py", "tests/e2e/x"]},
