@@ -233,8 +233,9 @@ jobs:
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
-      ref: ${{ github.event.pull_request.head.sha }}
+      ref: ${{ github.ref }}
       base_ref: ${{ github.base_ref }}
+      ref_is_merge_commit: true
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
 
   validate-hust-dual-editable:

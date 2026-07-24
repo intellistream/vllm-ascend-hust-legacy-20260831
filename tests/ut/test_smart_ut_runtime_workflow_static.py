@@ -17,6 +17,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "_selected_tests.yaml"
+SMART_UT_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr_smart_ut.yaml"
 PR_TEST_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr_test.yaml"
 RUNNER_LABEL_PATH = REPO_ROOT / ".github" / "workflows" / "scripts" / "runner_label.json"
 
@@ -72,6 +73,22 @@ def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -
     ]
     assert 'if [ "${{ matrix.group.runner }}" != "linux-aarch64-a2b3-1" ]; then' in install_block
     assert "cache-service.nginx-pypi-cache.svc.cluster.local:8081" in install_block
+
+
+def test_pull_request_workflows_test_the_server_generated_merge_commit() -> None:
+    selected_workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    pr_workflow = PR_TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
+    smart_ut_workflow = SMART_UT_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "GIT_CONFIG_KEY_0: http.version" in selected_workflow
+    assert "GIT_CONFIG_VALUE_0: HTTP/1.1" in selected_workflow
+    assert "ref_is_merge_commit:" in selected_workflow
+    assert "fetch-depth: ${{ inputs.ref_is_merge_commit && 1 || 0 }}" in selected_workflow
+    assert "if: ${{ !inputs.ref_is_merge_commit }}" in selected_workflow
+    for workflow in (pr_workflow, smart_ut_workflow):
+        assert "ref: ${{ github.ref }}" in workflow
+        assert "ref_is_merge_commit: true" in workflow
+        assert "ref: ${{ github.event.pull_request.head.sha }}" not in workflow
 
 
 def test_hust_e2e_only_emits_groups_for_available_runner_families() -> None:
