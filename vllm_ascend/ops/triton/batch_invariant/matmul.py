@@ -265,8 +265,10 @@ def linear_persistent(x, y):
     M, K = x.shape
     N, _ = y.shape
 
-    # Allocate output tensor (same data type as x)
-    output = torch.zeros((M, N), dtype=x.dtype, device=x.device)
+    # The Triton kernel overwrites every valid output element, so the output
+    # does not need to be initialized. If the kernel is changed to use partial
+    # writes or atomic accumulation, initialization must be restored.
+    output = torch.empty((M, N), dtype=x.dtype, device=x.device)
 
     grid_size = (
         triton.runtime.driver.active.utils.get_device_properties(torch.npu.current_device())["num_vectorcore"] // 2
