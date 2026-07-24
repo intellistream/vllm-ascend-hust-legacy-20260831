@@ -656,6 +656,7 @@ def _assign_runner_pool(
         routed = dict(group)
         routed["runner"] = label
         routed["device_id"] = device_id
+        routed["device_runner"] = True
         assigned.append(routed)
     return assigned
 
