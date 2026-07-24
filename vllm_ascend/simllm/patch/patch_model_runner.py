@@ -49,10 +49,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import re
 import time
 from typing import Any
 
+import regex as re
 import torch
 from vllm.forward_context import get_forward_context
 
