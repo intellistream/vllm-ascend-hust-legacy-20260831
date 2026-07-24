@@ -210,7 +210,14 @@ jobs:
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
             --diff-base origin/${{ github.base_ref }} \
-            --allowed-runner linux-aarch64-a2b3-1
+            --allowed-runner linux-aarch64-a2b3-1 \
+            --runner-pool linux-aarch64-a2b3-npu0=0 \
+            --runner-pool linux-aarch64-a2b3-npu1=1 \
+            --runner-pool linux-aarch64-a2b3-npu2=2 \
+            --runner-pool linux-aarch64-a2b3-npu3=3 \
+            --runner-pool linux-aarch64-a2b3-npu4=4 \
+            --runner-pool linux-aarch64-a2b3-npu5=5 \
+            --runner-pool linux-aarch64-a2b3-npu6=6
 
       - name: Set no-tests output when source paths unchanged
         id: noop

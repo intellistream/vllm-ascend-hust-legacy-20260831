@@ -635,6 +635,31 @@ def _filter_allowed_runners(
     return selected
 
 
+def _assign_runner_pool(
+    test_groups: list[dict],
+    runner_pool: list[str] | None,
+) -> list[dict]:
+    """Distribute groups round-robin across ``LABEL=DEVICE_ID`` runners."""
+    if not runner_pool:
+        return test_groups
+
+    parsed_pool: list[tuple[str, int]] = []
+    for spec in runner_pool:
+        label, separator, raw_device = spec.rpartition("=")
+        if not separator or not label or not raw_device.isdigit():
+            raise ValueError(f"Invalid runner pool entry {spec!r}; expected LABEL=DEVICE_ID")
+        parsed_pool.append((label, int(raw_device)))
+
+    assigned: list[dict] = []
+    for index, group in enumerate(test_groups):
+        label, device_id = parsed_pool[index % len(parsed_pool)]
+        routed = dict(group)
+        routed["runner"] = label
+        routed["device_id"] = device_id
+        assigned.append(routed)
+    return assigned
+
+
 def _write_output(
     test_groups: list[dict],
     matched_modules: list[str],
@@ -728,6 +753,12 @@ def main():
         "--allowed-runner",
         action="append",
         help="Only emit test groups assigned to this runner label. May be repeated.",
+    )
+    parser.add_argument(
+        "--runner-pool",
+        action="append",
+        metavar="LABEL=DEVICE_ID",
+        help="Round-robin selected groups over device-specific runner labels.",
     )
 
     args = parser.parse_args()
@@ -843,6 +874,7 @@ def main():
     partition_config = _load_partition_config(meta)
     test_groups = _resolve_to_runners(all_groups, runners, partition_config, estimated_times)
     test_groups = _filter_allowed_runners(test_groups, args.allowed_runner)
+    test_groups = _assign_runner_pool(test_groups, args.runner_pool)
 
     _write_output(test_groups, matched_modules)
 
