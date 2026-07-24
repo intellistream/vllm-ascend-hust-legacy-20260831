@@ -76,7 +76,7 @@ jobs:
       options: >-
         ${{
           matrix.group.device_runner == true &&
-          format('--device /dev/davinci{0} --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro', matrix.group.device_id) ||
+          format('--device /dev/davinci{0} --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro --volume /data/actions-runners/git-cache:/__git-cache:ro', matrix.group.device_id) ||
           matrix.group.runner == 'linux-aarch64-a2b3-1' &&
           '--device /dev/davinci1 --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro' ||
           ''
@@ -99,12 +99,32 @@ jobs:
         GIT_CONFIG_VALUE_0: HTTP/1.1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v6.0.1
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-          fetch-depth: ${{ inputs.ref_is_merge_commit && 1 || 0 }}
-          filter: blob:none
-          submodules: recursive
+        env:
+          CHECKOUT_REF: ${{ inputs.ref || github.ref }}
+        run: |
+          set -euo pipefail
+          cache=/__git-cache/vllm-ascend-hust.git
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$cache"
+          if [ -d "$cache" ] && git --git-dir="$cache" cat-file -e "${CHECKOUT_REF}^{commit}"; then
+            checkout_sha=$(git --git-dir="$cache" rev-parse "${CHECKOUT_REF}^{commit}")
+            git clone --shared --no-checkout "$cache" .
+            git checkout --detach "$checkout_sha"
+          else
+            git init .
+            git remote add origin https://github.com/${{ github.repository }}.git
+            for attempt in 1 2 3 4 5; do
+              if git fetch --no-tags --filter=blob:none --depth=1 origin "$CHECKOUT_REF"; then
+                git checkout --detach FETCH_HEAD
+                break
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                exit 1
+              fi
+              sleep $((attempt * 5))
+            done
+          fi
+          git submodule update --init --recursive
 
       - name: Validate Ascend container runtime
         if: ${{ matrix.group.npu_type != 'cpu' }}
@@ -125,12 +145,32 @@ jobs:
           pip install uv
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v6.0.1
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ inputs.vllm }}
-          path: ./vllm-empty
-          filter: blob:none
+        env:
+          VLLM_REF: ${{ inputs.vllm }}
+        run: |
+          set -euo pipefail
+          cache=/__git-cache/vllm.git
+          git config --global --add safe.directory "$cache"
+          mkdir -p ./vllm-empty
+          cd ./vllm-empty
+          if [ -d "$cache" ] && git --git-dir="$cache" cat-file -e "${VLLM_REF}^{commit}"; then
+            checkout_sha=$(git --git-dir="$cache" rev-parse "${VLLM_REF}^{commit}")
+            git clone --shared --no-checkout "$cache" .
+            git checkout --detach "$checkout_sha"
+          else
+            git init .
+            git remote add origin https://github.com/vllm-project/vllm.git
+            for attempt in 1 2 3 4 5; do
+              if git fetch --no-tags --filter=blob:none --depth=1 origin "$VLLM_REF"; then
+                git checkout --detach FETCH_HEAD
+                break
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                exit 1
+              fi
+              sleep $((attempt * 5))
+            done
+          fi
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
