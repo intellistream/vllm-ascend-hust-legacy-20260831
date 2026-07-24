@@ -37,6 +37,11 @@ on:
         required: false
         default: 'main'
         description: 'The base branch to rebase onto (e.g. main, v0.8.x).'
+      ref_is_merge_commit:
+        type: boolean
+        required: false
+        default: false
+        description: 'The supplied ref is already GitHub merge-tested against its base.'
       upload_timing:
         type: boolean
         required: false
@@ -88,12 +93,16 @@ jobs:
         UV_NO_CACHE: 1
         UV_SYSTEM_PYTHON: 1
         TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+        GIT_CONFIG_COUNT: 1
+        GIT_CONFIG_KEY_0: http.version
+        GIT_CONFIG_VALUE_0: HTTP/1.1
     steps:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v6.0.1
         with:
           ref: ${{ inputs.ref || github.ref }}
-          fetch-depth: 0
+          fetch-depth: ${{ inputs.ref_is_merge_commit && 1 || 0 }}
+          filter: blob:none
           submodules: recursive
 
       - name: Validate Ascend container runtime
@@ -120,6 +129,7 @@ jobs:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
           path: ./vllm-empty
+          filter: blob:none
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
@@ -128,6 +138,7 @@ jobs:
           pip uninstall -y triton
 
       - name: Rebase on latest ${{ inputs.base_ref }}
+        if: ${{ !inputs.ref_is_merge_commit }}
         run: |
           git config user.name "vllm-ascend-ci"
           git config user.email "vllm-ascend-ci@users.noreply.github.com"
