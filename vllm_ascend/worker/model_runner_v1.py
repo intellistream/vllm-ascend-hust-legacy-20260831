@@ -3778,6 +3778,18 @@ class NPUModelRunner(GPUModelRunner):
                 if "sink" in name:
                     self._has_sinks = True
                     break
+
+            # Set up KV cache quantization for --kv-cache-dtype based schemes
+            # (int4, nvfp4, fp8_e4m3, fp4_e2m1). This must happen after model
+            # loading so that attention layers exist, but before any inference.
+            from vllm.model_executor.layers.attention import Attention
+            from vllm_ascend.quantization.kv_cache_utils import setup_kv_cache_quant
+
+            cache_dtype = self.vllm_config.cache_config.cache_dtype
+            if cache_dtype in ("int4", "nvfp4", "fp8_e4m3", "fp4_e2m1"):
+                for _name, module in self.model.named_modules():
+                    if isinstance(module, Attention):
+                        setup_kv_cache_quant(module, cache_dtype)
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
