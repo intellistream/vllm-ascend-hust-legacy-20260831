@@ -6,20 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-SPEC_MODULE = (
-    REPO_ROOT
-    / "vllm_ascend"
-    / "compilation"
-    / "passes"
-    / "qknorm_rope_pattern_specs.py"
-)
-FUSION_PASS = (
-    REPO_ROOT
-    / "vllm_ascend"
-    / "compilation"
-    / "passes"
-    / "qknorm_rope_fusion_pass.py"
-)
+SPEC_MODULE = REPO_ROOT / "vllm_ascend" / "compilation" / "passes" / "qknorm_rope_pattern_specs.py"
+FUSION_PASS = REPO_ROOT / "vllm_ascend" / "compilation" / "passes" / "qknorm_rope_fusion_pass.py"
 
 
 def _spec_builder():
