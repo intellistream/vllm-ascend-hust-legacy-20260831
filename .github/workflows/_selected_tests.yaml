@@ -94,7 +94,7 @@ jobs:
         UV_HTTP_TIMEOUT: 120
         UV_NO_CACHE: ${{ matrix.group.device_runner == true && '0' || '1' }}
         UV_CACHE_DIR: /__uv-cache
-        UV_LINK_MODE: copy
+        UV_LINK_MODE: symlink
         UV_SYSTEM_PYTHON: 1
         TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         GIT_CONFIG_COUNT: 1
