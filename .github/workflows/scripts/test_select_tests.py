@@ -92,6 +92,22 @@ def test_resolve_config_inheritance_merges_base_modules():
         )
 
 
+def test_filter_allowed_runners_preserves_only_supported_groups(capsys):
+    groups = [
+        {"runner": "linux-aarch64-a2b3-1", "tests": "tests/a.py"},
+        {"runner": "linux-aarch64-a3-2", "tests": "tests/b.py"},
+        {"runner": "linux-amd64-cpu-8-hk", "tests": "tests/c.py"},
+    ]
+
+    assert select_tests._filter_allowed_runners(groups, None) == groups
+    selected = select_tests._filter_allowed_runners(groups, ["linux-aarch64-a2b3-1"])
+
+    assert selected == [groups[0]]
+    warning = capsys.readouterr().err
+    assert "linux-aarch64-a3-2" in warning
+    assert "linux-amd64-cpu-8-hk" in warning
+
+
 def test_collect_paths_and_basic_path_helpers():
     config = [
         {"name": "a", "tests": ["tests/ut/a/", "tests/ut/a/test_x.py", "tests/e2e/x"]},

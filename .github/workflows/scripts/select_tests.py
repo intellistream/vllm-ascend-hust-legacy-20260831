@@ -617,6 +617,24 @@ def _resolve_to_runners(
     return result
 
 
+def _filter_allowed_runners(
+    test_groups: list[dict],
+    allowed_runners: list[str] | None,
+) -> list[dict]:
+    if not allowed_runners:
+        return test_groups
+
+    allowed = set(allowed_runners)
+    selected = [group for group in test_groups if group["runner"] in allowed]
+    skipped = sorted({group["runner"] for group in test_groups if group["runner"] not in allowed})
+    if skipped:
+        print(
+            "Skipping test groups for runners unavailable in this workflow: " + ", ".join(skipped),
+            file=sys.stderr,
+        )
+    return selected
+
+
 def _write_output(
     test_groups: list[dict],
     matched_modules: list[str],
@@ -705,6 +723,11 @@ def main():
         "--run-all-modules",
         action="store_true",
         help="Run tests for all configured modules regardless of changed files",
+    )
+    parser.add_argument(
+        "--allowed-runner",
+        action="append",
+        help="Only emit test groups assigned to this runner label. May be repeated.",
     )
 
     args = parser.parse_args()
@@ -819,6 +842,7 @@ def main():
     estimated_times = _load_estimated_times(meta)
     partition_config = _load_partition_config(meta)
     test_groups = _resolve_to_runners(all_groups, runners, partition_config, estimated_times)
+    test_groups = _filter_allowed_runners(test_groups, args.allowed_runner)
 
     _write_output(test_groups, matched_modules)
 

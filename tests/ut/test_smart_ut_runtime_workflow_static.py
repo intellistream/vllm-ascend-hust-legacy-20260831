@@ -17,6 +17,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "_selected_tests.yaml"
+PR_TEST_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr_test.yaml"
 RUNNER_LABEL_PATH = REPO_ROOT / ".github" / "workflows" / "scripts" / "runner_label.json"
 
 
@@ -65,3 +66,9 @@ def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -
     ]
     assert 'if [ "${{ matrix.group.runner }}" != "linux-aarch64-a2b3-1" ]; then' in install_block
     assert "cache-service.nginx-pypi-cache.svc.cluster.local:8081" in install_block
+
+
+def test_hust_e2e_only_emits_groups_for_available_runner_families() -> None:
+    workflow = PR_TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "--allowed-runner linux-aarch64-a2b3-1" in workflow
