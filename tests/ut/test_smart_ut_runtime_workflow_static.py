@@ -62,6 +62,12 @@ def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert "matrix.group.runner == 'linux-aarch64-a2b3-1' && 'https://pypi.org/simple'" in workflow
+    container_env = workflow[workflow.index("      env:") : workflow.index("    steps:")]
+    standalone_extra_index = (
+        "matrix.group.runner == 'linux-aarch64-a2b3-1' && 'https://repo.huaweicloud.com/ascend/repos/pypi'"
+    )
+    assert standalone_extra_index in container_env
+    assert "https://download.pytorch.org/whl/cpu/" not in container_env
     install_block = workflow[
         workflow.index("- name: Install packages") : workflow.index("- name: Checkout vllm-project/vllm repo")
     ]
