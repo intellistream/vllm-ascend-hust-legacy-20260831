@@ -35,7 +35,7 @@ def test_a2_single_npu_container_uses_runner_scoped_runtime_contract() -> None:
     assert "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro" in workflow
     assert "/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro" in workflow
     assert "ASCEND_RT_VISIBLE_DEVICES" in workflow
-    assert "matrix.group.device_id != null" in workflow
+    assert "matrix.group.device_runner == true" in workflow
     assert "/dev/davinci{0}" in workflow
 
 
@@ -64,11 +64,11 @@ def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert (
-        "(matrix.group.device_id != null || matrix.group.runner == 'linux-aarch64-a2b3-1') && 'https://pypi.org/simple'"
+        "(matrix.group.device_runner == true || matrix.group.runner == 'linux-aarch64-a2b3-1') && 'https://pypi.org/simple'"
     ) in workflow
     container_env = workflow[workflow.index("      env:") : workflow.index("    steps:")]
     standalone_extra_index = (
-        "(matrix.group.device_id != null || matrix.group.runner == 'linux-aarch64-a2b3-1') && "
+        "(matrix.group.device_runner == true || matrix.group.runner == 'linux-aarch64-a2b3-1') && "
         "'https://repo.huaweicloud.com/ascend/repos/pypi'"
     )
     assert standalone_extra_index in container_env
@@ -76,7 +76,7 @@ def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -
     install_block = workflow[
         workflow.index("- name: Install packages") : workflow.index("- name: Checkout vllm-project/vllm repo")
     ]
-    assert 'if [ -z "${{ matrix.group.device_id }}" ]' in install_block
+    assert 'if [ "${{ matrix.group.device_runner }}" != "true" ]' in install_block
     assert '[ "${{ matrix.group.runner }}" != "linux-aarch64-a2b3-1" ]' in install_block
     assert "cache-service.nginx-pypi-cache.svc.cluster.local:8081" in install_block
 

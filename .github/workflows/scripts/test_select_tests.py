@@ -120,11 +120,11 @@ def test_assign_runner_pool_round_robins_groups_and_sets_device_ids():
         ],
     )
 
-    assert [(group["runner"], group["device_id"]) for group in assigned] == [
-        ("linux-aarch64-a2b3-npu0", 0),
-        ("linux-aarch64-a2b3-npu3", 3),
-        ("linux-aarch64-a2b3-npu6", 6),
-        ("linux-aarch64-a2b3-npu0", 0),
+    assert [(group["runner"], group["device_id"], group["device_runner"]) for group in assigned] == [
+        ("linux-aarch64-a2b3-npu0", 0, True),
+        ("linux-aarch64-a2b3-npu3", 3, True),
+        ("linux-aarch64-a2b3-npu6", 6, True),
+        ("linux-aarch64-a2b3-npu0", 0, True),
     ]
     assert "device_id" not in groups[0]
     with pytest.raises(ValueError, match="LABEL=DEVICE_ID"):
