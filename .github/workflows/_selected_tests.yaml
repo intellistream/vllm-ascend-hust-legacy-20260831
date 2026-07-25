@@ -76,7 +76,7 @@ jobs:
       options: >-
         ${{
           matrix.group.device_runner == true &&
-          format('--device /dev/davinci{0} --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro --volume /data/actions-runners/git-cache:/__git-cache:ro --volume /data/actions-runners/tools/uv:/usr/local/bin/uv:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstd:ro --volume /data/actions-runners/uv-cache:/__uv-cache', matrix.group.device_id) ||
+          format('--device /dev/davinci{0} --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro --volume /data/actions-runners/git-cache:/__git-cache:ro --volume /data/actions-runners/tools/uv:/usr/local/bin/uv:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstd:ro --volume /data/actions-runners/uv-cache:/__uv-cache --volume /data/actions-runners/rdma-debs:/__rdma-debs:ro --volume /data/actions-runners/mooncake-wheels:/__mooncake-wheels:ro', matrix.group.device_id) ||
           matrix.group.runner == 'linux-aarch64-a2b3-1' &&
           '--device /dev/davinci1 --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro' ||
           ''
@@ -249,17 +249,30 @@ jobs:
         run: |
           set -euxo pipefail
 
-          apt-get install -y --no-install-recommends \
-            libibverbs1 \
-            ibverbs-providers \
-            librdmacm1 \
-            libnuma1 \
-            libcurl4
+          if [ "${{ matrix.group.device_runner }}" = "true" ]; then
+            test "$(dpkg-deb -f /__rdma-debs/libibverbs1_39.0-1_arm64.deb Version)" = "39.0-1"
+            test "$(dpkg-deb -f /__rdma-debs/ibverbs-providers_39.0-1_arm64.deb Version)" = "39.0-1"
+            test "$(dpkg-deb -f /__rdma-debs/librdmacm1_39.0-1_arm64.deb Version)" = "39.0-1"
+            apt-get install -y --no-install-recommends /__rdma-debs/*.deb
+          else
+            apt-get install -y --no-install-recommends \
+              libibverbs1 \
+              ibverbs-providers \
+              librdmacm1 \
+              libnuma1 \
+              libcurl4
+          fi
           ldconfig
 
           MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.9-cp312-cp312-manylinux_2_35_aarch64.whl"
-          pip install --no-cache-dir --no-deps \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
+          if [ "${{ matrix.group.device_runner }}" = "true" ]; then
+            echo "1efdc126efe553d53fda70923d6c67643058c27044360a73bd55252916f37cfc  /__mooncake-wheels/${MOONCAKE_WHEEL}" \
+              | sha256sum -c -
+            pip install --no-cache-dir --no-deps "/__mooncake-wheels/${MOONCAKE_WHEEL}"
+          else
+            pip install --no-cache-dir --no-deps \
+              "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
+          fi
 
           pip show mooncake-transfer-engine-ascend || true
 
