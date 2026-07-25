@@ -76,7 +76,7 @@ jobs:
       options: >-
         ${{
           matrix.group.device_runner == true &&
-          format('--device /dev/davinci{0} --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro --volume /data/actions-runners/git-cache:/__git-cache:ro --volume /data/actions-runners/tools/uv:/usr/local/bin/uv:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstd:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstdmt:ro --volume /data/actions-runners/uv-cache-npu{0}:/__uv-cache --volume /data/actions-runners/csrc-cache-artifacts:/__csrc-cache:ro --volume /data/actions-runners/rdma-debs:/__rdma-debs:ro --volume /data/actions-runners/mooncake-wheels:/__mooncake-wheels:ro', matrix.group.device_id) ||
+          format('--device /dev/davinci{0}:/dev/davinci0 --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro --volume /data/actions-runners/git-cache:/__git-cache:ro --volume /data/actions-runners/tools/uv:/usr/local/bin/uv:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstd:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstdmt:ro --volume /data/actions-runners/uv-cache-npu{0}:/__uv-cache --volume /data/actions-runners/modelscope-cache-npu{0}:/github/home/.cache/modelscope/hub --volume /data/actions-runners/csrc-cache-artifacts:/__csrc-cache:ro --volume /data/actions-runners/rdma-debs:/__rdma-debs:ro --volume /data/actions-runners/mooncake-wheels:/__mooncake-wheels:ro', matrix.group.device_id) ||
           matrix.group.runner == 'linux-aarch64-a2b3-1' &&
           '--device /dev/davinci1 --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro' ||
           ''
@@ -85,7 +85,7 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
-        ASCEND_RT_VISIBLE_DEVICES: ${{ matrix.group.device_runner == true && format('{0}', matrix.group.device_id) || (matrix.group.runner == 'linux-aarch64-a2b3-1' && '1' || '') }}
+        ASCEND_RT_VISIBLE_DEVICES: ${{ matrix.group.device_runner == true && '0' || (matrix.group.runner == 'linux-aarch64-a2b3-1' && '1' || '') }}
         MAX_JOBS: 4
         UV_INDEX_URL: ${{ (matrix.group.device_runner == true || matrix.group.runner == 'linux-aarch64-a2b3-1') && 'https://pypi.org/simple' || 'http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple' }}
         UV_EXTRA_INDEX_URL: ${{ (matrix.group.device_runner == true || matrix.group.runner == 'linux-aarch64-a2b3-1') && 'https://repo.huaweicloud.com/ascend/repos/pypi' || 'https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/' }}
@@ -144,6 +144,7 @@ jobs:
             for tool in git gcc g++ cmake curl uv zstd zstdmt; do
               command -v "$tool"
             done
+            test -f /github/home/.cache/modelscope/hub/models/Qwen/Qwen3-0___6B/config.json
             uv --version
             exit 0
           fi
