@@ -174,6 +174,18 @@ def test_failure_summary_preserves_numeric_pytest_exit_status() -> None:
     assert 'exit "${status}"' in script
 
 
+def test_selected_device_tests_retry_only_transient_npu_memory_contention() -> None:
+    script = RUN_SELECTED_TESTS_PATH.read_text(encoding="utf-8")
+
+    assert 'npu_resource_retry_attempts="${NPU_RESOURCE_RETRY_ATTEMPTS:-3}"' in script
+    assert 'npu_resource_retry_delay_seconds="${NPU_RESOURCE_RETRY_DELAY_SECONDS:-30}"' in script
+    assert 'attempt_log="${log_file}.attempt"' in script
+    assert "Free memory on device .* is less than desired GPU memory utilization" in script
+    assert '"${attempt_log}"' in script
+    assert '"${mode}" != "with-device"' in script
+    assert "Transient NPU memory contention detected; keeping the runner busy" in script
+
+
 def test_smart_ut_uses_the_verified_vllm_main_commit() -> None:
     workflow = SMART_UT_WORKFLOW_PATH.read_text(encoding="utf-8")
 
