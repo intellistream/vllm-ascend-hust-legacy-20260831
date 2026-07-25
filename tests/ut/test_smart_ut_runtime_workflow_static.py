@@ -242,6 +242,7 @@ def test_package_builds_do_not_auto_load_the_torch_device_backend() -> None:
     assert "GIT_CONFIG_KEY_0: http.version" in container_env
     assert "GIT_CONFIG_VALUE_0: HTTP/1.1" in container_env
 
+
 def test_pull_request_workflows_test_the_server_generated_merge_commit() -> None:
     selected_workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     pr_workflow = PR_TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
