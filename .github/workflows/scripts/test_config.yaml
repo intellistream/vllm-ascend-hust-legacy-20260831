@@ -160,6 +160,7 @@
   optional: false
   source_file_dependencies:
     - vllm_ascend/compilation/passes/qknorm_rope_fusion_pass.py
+    - vllm_ascend/compilation/passes/qknorm_rope_pattern_specs.py
   tests:
     - tests/ut/compilation
     - tests/e2e/pull_request/one_card/compile/test_graphex_qknorm_rope_fusion.py
@@ -846,7 +847,6 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
 
 
 
