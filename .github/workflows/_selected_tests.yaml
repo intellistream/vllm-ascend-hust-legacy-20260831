@@ -108,7 +108,9 @@ jobs:
           cache=/__git-cache/vllm-ascend-hust.git
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "$cache"
-          if [ -d "$cache" ] && git --git-dir="$cache" cat-file -e "${CHECKOUT_REF}^{commit}"; then
+          if [[ "$CHECKOUT_REF" =~ ^[0-9a-f]{40}$ ]] \
+            && [ -d "$cache" ] \
+            && git --git-dir="$cache" cat-file -e "${CHECKOUT_REF}^{commit}"; then
             checkout_sha=$(git --git-dir="$cache" rev-parse "${CHECKOUT_REF}^{commit}")
             git init .
             git remote remove origin 2>/dev/null || true
