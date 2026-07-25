@@ -34,14 +34,9 @@ from dataclasses import dataclass
 import pytest
 import torch
 from vllm import LLM, SamplingParams
+from vllm.distributed.kv_transfer.kv_connector.v1 import example_hidden_states_connector
 
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.23.0"):
-    from safetensors import safe_open
-else:
-    from vllm.distributed.kv_transfer.kv_connector.v1 import example_hidden_states_connector
-
+from tests.e2e.conftest import cleanup_dist_env_and_memory
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -131,32 +126,17 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
     hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
     assert hidden_states_path is not None
 
-    if vllm_version_is("0.23.0"):
-        assert os.path.exists(hidden_states_path)
-        with safe_open(hidden_states_path, "pt") as f:
-            tensor_names = f.keys()
-            assert "hidden_states" in tensor_names
-            hidden_states = f.get_tensor("hidden_states")
-            assert hidden_states.shape == expected_shape
+    obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
+    example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
+    hidden_states = obj["hidden_states"]
+    assert hidden_states.shape == expected_shape
 
-            if verify_token_ids:
-                token_ids = f.get_tensor("token_ids")
-                assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
+    if verify_token_ids:
+        token_ids = obj["token_ids"]
+        assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
 
-            if verify_nonzero:
-                assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
-    else:
-        obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
-        example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
-        hidden_states = obj["hidden_states"]
-        assert hidden_states.shape == expected_shape
-
-        if verify_token_ids:
-            token_ids = obj["token_ids"]
-            assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
-
-        if verify_nonzero:
-            assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
+    if verify_nonzero:
+        assert not torch.allclose(hidden_states, torch.zeros_like(hidden_states))
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -196,18 +176,22 @@ def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config):
 
         llm = LLM(**llm_kwargs)
 
-        outputs = llm.generate(case.prompts, sampling_config)
-        hidden_size = llm.llm_engine.model_config.get_hidden_size()
-        num_layers = len(case.aux_hidden_state_layer_ids)
+        try:
+            outputs = llm.generate(case.prompts, sampling_config)
+            hidden_size = llm.llm_engine.model_config.get_hidden_size()
+            num_layers = len(case.aux_hidden_state_layer_ids)
 
-        assert len(outputs) == len(case.prompts)
+            assert len(outputs) == len(case.prompts)
 
-        for output in outputs:
-            num_tokens = len(output.prompt_token_ids)
-            expected_shape = (num_tokens, num_layers, hidden_size)
-            _verify_output(
-                output,
-                expected_shape,
-                verify_nonzero=case.verify_nonzero,
-                verify_token_ids=case.verify_token_ids,
-            )
+            for output in outputs:
+                num_tokens = len(output.prompt_token_ids)
+                expected_shape = (num_tokens, num_layers, hidden_size)
+                _verify_output(
+                    output,
+                    expected_shape,
+                    verify_nonzero=case.verify_nonzero,
+                    verify_token_ids=case.verify_token_ids,
+                )
+        finally:
+            del llm
+            cleanup_dist_env_and_memory()

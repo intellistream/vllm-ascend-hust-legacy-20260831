@@ -72,8 +72,9 @@ def test_device_checkout_prefers_the_runner_local_git_mirrors() -> None:
 
     assert "cache=/__git-cache/vllm-ascend-hust.git" in workflow
     assert "cache=/__git-cache/vllm.git" in workflow
-    assert workflow.count('git --git-dir="$cache" cat-file -e') == 2
-    assert '[[ "$CHECKOUT_REF" =~ ^[0-9a-f]{40}$ ]]' in workflow
+    assert workflow.count('git --git-dir="$cache" cat-file -e') == 3
+    assert 'cat-file -e "${EXPECTED_REF_SHA}^{commit}"' in workflow
+    assert '[[ "$checkout_ref" =~ ^[0-9a-f]{40}$ ]]' in workflow
     assert workflow.count("git remote remove origin 2>/dev/null || true") == 4
     assert workflow.count("git fetch --no-tags --filter=blob:none --depth=1") == 2
     assert "uses: actions/checkout@" not in workflow
@@ -202,7 +203,8 @@ def test_pull_request_workflows_test_the_server_generated_merge_commit() -> None
 
     assert "ref_is_merge_commit:" in selected_workflow
     assert "CHECKOUT_REF: ${{ inputs.ref || github.ref }}" in selected_workflow
-    assert 'cat-file -e "${CHECKOUT_REF}^{commit}"' in selected_workflow
+    assert 'checkout_ref="$CHECKOUT_REF"' in selected_workflow
+    assert 'checkout_ref="$EXPECTED_REF_SHA"' in selected_workflow
     assert "EXPECTED_REF_SHA: ${{ inputs.ref_is_merge_commit && github.sha || '' }}" in selected_workflow
     assert 'if [ -n "$EXPECTED_REF_SHA" ]' in selected_workflow
     assert "expected ${EXPECTED_REF_SHA}" in selected_workflow
