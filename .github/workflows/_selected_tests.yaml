@@ -76,7 +76,7 @@ jobs:
       options: >-
         ${{
           matrix.group.device_runner == true &&
-          format('--device /dev/davinci{0} --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro --volume /data/actions-runners/git-cache:/__git-cache:ro --volume /data/actions-runners/tools/uv:/usr/local/bin/uv:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstd:ro --volume /data/actions-runners/uv-cache-npu{0}:/__uv-cache --volume /data/actions-runners/csrc-cache-artifacts:/__csrc-cache:ro --volume /data/actions-runners/rdma-debs:/__rdma-debs:ro --volume /data/actions-runners/mooncake-wheels:/__mooncake-wheels:ro', matrix.group.device_id) ||
+          format('--device /dev/davinci{0} --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro --volume /data/actions-runners/git-cache:/__git-cache:ro --volume /data/actions-runners/tools/uv:/usr/local/bin/uv:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstd:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstdmt:ro --volume /data/actions-runners/uv-cache-npu{0}:/__uv-cache --volume /data/actions-runners/csrc-cache-artifacts:/__csrc-cache:ro --volume /data/actions-runners/rdma-debs:/__rdma-debs:ro --volume /data/actions-runners/mooncake-wheels:/__mooncake-wheels:ro', matrix.group.device_id) ||
           matrix.group.runner == 'linux-aarch64-a2b3-1' &&
           '--device /dev/davinci1 --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro' ||
           ''
@@ -142,7 +142,7 @@ jobs:
       - name: Install packages
         run: |
           if [ "${{ matrix.group.device_runner }}" = "true" ]; then
-            for tool in git gcc g++ cmake curl uv zstd; do
+            for tool in git gcc g++ cmake curl uv zstd zstdmt; do
               command -v "$tool"
             done
             uv --version
