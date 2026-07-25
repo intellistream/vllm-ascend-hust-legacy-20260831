@@ -135,14 +135,15 @@ def test_device_runners_restore_and_save_csrc_cache_on_cache_miss() -> None:
     assert "steps.csrc-filter.outputs.csrc == 'true'" not in save_block
 
 
-def test_spec_decode_imports_helpers_exposed_by_both_pinned_vllm_revisions() -> None:
+def test_spec_decode_imports_helpers_exposed_by_pinned_and_current_vllm_revisions() -> None:
     source = REJECTION_SAMPLER_UTILS_PATH.read_text(encoding="utf-8")
-    import_block = source[source.index("from vllm.v1.worker.gpu.spec_decode") : source.index("@triton.jit")]
+    import_block = source[source.index("try:\n    from vllm.v1.worker.gpu.spec_decode") : source.index("@triton.jit")]
 
+    assert "except ImportError:" in import_block
     assert "_compute_block_stats_kernel," in import_block
     assert "_compute_global_lse," in import_block
-    assert "_compute_global_logsumexp" not in import_block
-    assert "_compute_local_logits_stats_kernel" not in import_block
+    assert "_compute_global_logsumexp as _compute_global_lse" in import_block
+    assert "_compute_local_logits_stats_kernel as _compute_block_stats_kernel" in import_block
 
 
 def test_disabled_balance_scheduler_preserves_the_upstream_schedule_signature() -> None:
