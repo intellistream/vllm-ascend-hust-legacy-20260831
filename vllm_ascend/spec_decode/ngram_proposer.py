@@ -28,7 +28,6 @@ class AscendNgramProposer(NgramProposer):
 
     def propose(
         self,
-        num_speculative_tokens: int,
         sampled_token_ids: list[list[int]],
         num_tokens_no_spec,
         token_ids_cpu,
@@ -61,7 +60,6 @@ class AscendNgramProposer(NgramProposer):
             valid_ngram_requests,
             num_tokens_no_spec,
             token_ids_cpu,
-            num_speculative_tokens,
         )
 
         return draft_token_ids
