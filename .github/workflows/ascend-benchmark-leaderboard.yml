@@ -747,6 +747,7 @@ jobs:
           source scripts/hust_ascend_manager_helper.sh
           PYTHON_BIN="${VLLM_HUST_PYTHON_BIN:-}"
           if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
+            # shellcheck disable=SC2119
             PYTHON_BIN="$(hust_resolve_python_bin)"
           fi
           if [[ ! -x "$PYTHON_BIN" ]]; then
@@ -754,13 +755,15 @@ jobs:
             exit 1
           fi
           export VLLM_HUST_PYTHON_BIN="$PYTHON_BIN"
-          echo "VLLM_HUST_PYTHON_BIN=$VLLM_HUST_PYTHON_BIN" >> "$GITHUB_ENV"
           source scripts/use_single_ascend_env.sh
 
           export PYTHONPATH="$VLLM_HUST_REPO:$VLLM_HUST_BENCHMARK_REPO/src${PYTHONPATH:+:$PYTHONPATH}"
-          echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
-          echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"
+          {
+            echo "VLLM_HUST_PYTHON_BIN=$VLLM_HUST_PYTHON_BIN"
+            echo "PYTHONPATH=$PYTHONPATH"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"
+            echo "PYTHON_BIN=$PYTHON_BIN"
+          } >> "$GITHUB_ENV"
           "$PYTHON_BIN" - <<'PY'
           import decorator
           import scipy
@@ -798,6 +801,7 @@ jobs:
           source scripts/hust_ascend_manager_helper.sh
           PYTHON_BIN="${VLLM_HUST_PYTHON_BIN:-}"
           if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
+            # shellcheck disable=SC2119
             PYTHON_BIN="$(hust_resolve_python_bin)"
           fi
           if [[ ! -x "$PYTHON_BIN" ]]; then
