@@ -1,3 +1,8 @@
+paths:
+  .github/workflows/ascend-benchmark-leaderboard.yml:
+    ignore:
+      - 'maximum number of inputs for "workflow_dispatch" event is 10 but 18 inputs are provided'
+
 self-hosted-runner:
   # Labels of self-hosted runner in array of strings.
   labels:

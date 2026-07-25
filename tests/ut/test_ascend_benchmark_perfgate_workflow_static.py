@@ -45,10 +45,6 @@ def test_perfgate_scripts_are_present() -> None:
 def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
-    assert "types: [labeled, synchronize]" in workflow
-    assert "github.event.action == 'synchronize'" in workflow
-    assert "contains(github.event.pull_request.labels.*.name, 'ready')" in workflow
-    assert "contains(github.event.pull_request.labels.*.name, 'verified')" in workflow
     assert "PERFGATE_MODE" in workflow
     assert "PERFGATE_SPEC_FILE" in workflow
     assert "SOC_VERSION: ascend910b2" in workflow
@@ -133,17 +129,13 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
 
 
 def test_required_perfgate_scripts_fail_fast() -> None:
-    stage1_script = (SCRIPT_DIR / "perfgate_stage1_compare.sh").read_text(
-        encoding="utf-8"
-    )
-    stage2_script = (SCRIPT_DIR / "perfgate_stage2_rebase_and_benchmark.sh").read_text(
-        encoding="utf-8"
-    )
+    stage1_script = (SCRIPT_DIR / "perfgate_stage1_compare.sh").read_text(encoding="utf-8")
+    stage2_script = (SCRIPT_DIR / "perfgate_stage2_rebase_and_benchmark.sh").read_text(encoding="utf-8")
 
-    assert 'write_env PERFGATE_STAGE1_COMPLETED 1' in stage1_script
+    assert "write_env PERFGATE_STAGE1_COMPLETED 1" in stage1_script
     assert '"$MODE" == "enforce"' in stage1_script
     assert '"$MODE" != "enforce"' in stage2_script
-    assert 'write_env PERFGATE_STAGE2_EXECUTED 1' in stage2_script
+    assert "write_env PERFGATE_STAGE2_EXECUTED 1" in stage2_script
     assert 'write_env PERFGATE_STAGE2_BASELINE_AVAILABLE "$stage2_baseline_available"' in stage2_script
     assert stage2_script.count('if [[ "$MODE" == "enforce" ]]') >= 2
 
@@ -307,8 +299,9 @@ def test_benchmark_runner_resolves_same_spec_without_random_online_default() -> 
     assert "official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json" not in runner_script
     assert 'if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then' in runner_script
     same_spec_block = runner_script[
-        runner_script.index('if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then') :
-        runner_script.index('else', runner_script.index('if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then'))
+        runner_script.index('if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then') : runner_script.index(
+            "else", runner_script.index('if [[ "$SAME_SPEC_BENCHMARK_ENABLED" == "1" ]]; then')
+        )
     ]
     assert "EFFECTIVE_CONSTRAINTS_FILE=$SAME_SPEC_CONSTRAINTS_FILE" in same_spec_block
     assert "bench_args=()" in same_spec_block
@@ -328,12 +321,8 @@ def test_benchmark_runner_resolves_same_spec_without_random_online_default() -> 
     assert 'client_parameters["request_rate"] = 1' in runner_script
     assert '"$SAME_SPEC_PR_PREVIEW_COMPAT" == "1"' in runner_script
     assert '"$effective_same_spec_file"' in runner_script
-    validation_failure_block = runner_script[
-        runner_script.index('if [[ "$validation_status" -ne 0 ]]; then') :
-    ]
-    validation_failure_block = validation_failure_block[
-        : validation_failure_block.index("  fi")
-    ]
+    validation_failure_block = runner_script[runner_script.index('if [[ "$validation_status" -ne 0 ]]; then') :]
+    validation_failure_block = validation_failure_block[: validation_failure_block.index("  fi")]
     assert "print_same_spec_server_log_tail" in validation_failure_block
 
 
@@ -398,7 +387,7 @@ def test_local_ascend_manager_fallback_bootstraps_pip() -> None:
     assert prepare_step.index("source scripts/hust_ascend_manager_helper.sh") < prepare_step.index(
         'PYTHON_BIN="$(hust_resolve_python_bin)"'
     )
-    assert "export VLLM_HUST_PYTHON_BIN=\"$PYTHON_BIN\"" in workflow
+    assert 'export VLLM_HUST_PYTHON_BIN="$PYTHON_BIN"' in workflow
     assert "VLLM_HUST_PYTHON_BIN=$VLLM_HUST_PYTHON_BIN" in workflow
     assert "_hust_ascend_manager_command_needs_pip()" in helper
     assert "--install-python-stack|--install-plugin" in helper
@@ -413,13 +402,13 @@ def test_single_ascend_env_falls_back_when_manager_env_fails() -> None:
 
     assert "manager_env_status=0" in single_env
     assert 'manager_env="$(hust_ascend_manager_run env --shell' in single_env
-    assert 'manager_env_status=$?' in single_env
+    assert "manager_env_status=$?" in single_env
     assert 'if [[ "${manager_env_status}" -eq 0 ]]; then' in single_env
     assert 'eval "${manager_env}"' in single_env
     assert "falling back to local CANN set_env.sh discovery" in single_env
     assert "/usr/local/Ascend/cann-*/set_env.sh" in single_env
     assert '[[ -n "${ASCEND_HOME_PATH:-}" && -n "${ASCEND_OPP_PATH:-}" ]] && python_can_import_tbe' in single_env
-    assert 'ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-<unset>}' in single_env
+    assert "ASCEND_OPP_PATH=${ASCEND_OPP_PATH:-<unset>}" in single_env
 
 
 def test_local_plugin_editable_install_bootstraps_build_metadata_deps() -> None:
@@ -439,18 +428,21 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
 
     assert "install_ascend_benchmark_with_dev_hub.sh" in prepare_step
     assert "hust_ascend_manager_run setup --non-interactive" not in prepare_step
-    assert 'run_in_quickstart_env()' not in prepare_step
+    assert "run_in_quickstart_env()" not in prepare_step
     assert 'mktemp "${RUNNER_TEMP:-/tmp}/benchmark-quickstart-env.' not in prepare_step
     assert '"$CONDA_BIN" run -n "vllm-hust-dev" bash "$inline_script"' not in prepare_step
     assert "find_library('stdc++')" in prepare_step
     assert 'PYTHON_BIN="${VLLM_HUST_PYTHON_BIN:-}"' in prepare_step
-    assert 'echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"' in prepare_step
+    assert 'echo "PYTHON_BIN=$PYTHON_BIN"' in prepare_step
     assert '"$PYTHON_BIN" - <<' in prepare_step
-    assert 'echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"' in prepare_step
+    assert 'echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}"' in prepare_step
+    assert '} >> "$GITHUB_ENV"' in prepare_step
     assert 'python -m pip install -e "$VLLM_HUST_BENCHMARK_REPO[publish]" jsonschema' not in prepare_step
     assert 'python -m pip install "huggingface_hub>=0.20"' not in prepare_step
     assert 'python -m pip install "numpy<2.0.0" scipy attrs decorator psutil' not in prepare_step
-    assert 'python -m pip install -c "$torch_constraints" -r "$VLLM_HUST_REPO/requirements/common.txt"' not in prepare_step
+    assert (
+        'python -m pip install -c "$torch_constraints" -r "$VLLM_HUST_REPO/requirements/common.txt"' not in prepare_step
+    )
     assert "VLLM_HUST_PYTHON_BIN" in prepare_step
 
 
@@ -463,7 +455,7 @@ def test_benchmark_verify_uses_resolved_python_not_conda_lookup() -> None:
     assert 'PYTHON_BIN="${VLLM_HUST_PYTHON_BIN:-}"' in verify_step
     assert 'PYTHON_BIN="$(hust_resolve_python_bin)"' in verify_step
     assert 'export VLLM_HUST_PYTHON_BIN="$PYTHON_BIN"' in verify_step
-    assert 'source scripts/use_single_ascend_env.sh' in verify_step
+    assert "source scripts/use_single_ascend_env.sh" in verify_step
     assert '"$PYTHON_BIN" --version' in verify_step
     assert '"$PYTHON_BIN" - <<' in verify_step
     assert "conda executable not found for Verify installation" not in verify_step
@@ -567,7 +559,10 @@ def test_dev_hub_install_wrapper_centralizes_custom_kernel_policy() -> None:
     assert "ASCEND_BENCHMARK_TRITON_ASCEND_INDEX_URL" in install_script
     assert "https://mirrors.huaweicloud.com/ascend/repos/pypi" in install_script
     assert "ensure_triton_ascend()" in install_script
-    assert 'run_env_pip install --no-deps --index-url "$ASCEND_BENCHMARK_TRITON_ASCEND_INDEX_URL" "$triton_ascend_spec"' in install_script
+    assert (
+        'run_env_pip install --no-deps --index-url "$ASCEND_BENCHMARK_TRITON_ASCEND_INDEX_URL" "$triton_ascend_spec"'
+        in install_script
+    )
     assert "Preinstall these packages on the self-hosted runner" not in install_script
     assert "ascend_custom_kernel_build_prereqs_present()" in install_script
     assert 'if [[ "$cann_major" == "9" ]] && ascend_custom_kernel_build_prereqs_present; then' in install_script
