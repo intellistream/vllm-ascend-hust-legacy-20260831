@@ -53,11 +53,14 @@ def test_npu_preflight_is_fail_closed_and_runs_before_package_install() -> None:
     assert "if: ${{ matrix.group.npu_type != 'cpu' }}" in preflight_block
 
 
-def test_container_checkout_uses_runner_compatible_node_runtime() -> None:
+def test_device_checkout_prefers_the_runner_local_git_mirrors() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
-    assert workflow.count("uses: actions/checkout@v6.0.1") == 2
-    assert "uses: actions/checkout@v7" not in workflow
+    assert "cache=/__git-cache/vllm-ascend-hust.git" in workflow
+    assert "cache=/__git-cache/vllm.git" in workflow
+    assert workflow.count('git --git-dir="$cache" cat-file -e') == 2
+    assert workflow.count("git fetch --no-tags --filter=blob:none --depth=1") == 2
+    assert "uses: actions/checkout@" not in workflow
 
 
 def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -> None:
@@ -76,9 +79,45 @@ def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -
     install_block = workflow[
         workflow.index("- name: Install packages") : workflow.index("- name: Checkout vllm-project/vllm repo")
     ]
-    assert 'if [ "${{ matrix.group.device_runner }}" != "true" ]' in install_block
+    assert 'if [ "${{ matrix.group.device_runner }}" = "true" ]' in install_block
+    assert "command -v \"$tool\"" in install_block
+    assert "exit 0" in install_block
     assert '[ "${{ matrix.group.runner }}" != "linux-aarch64-a2b3-1" ]' in install_block
     assert "cache-service.nginx-pypi-cache.svc.cluster.local:8081" in install_block
+
+
+def test_device_runners_restore_and_save_csrc_cache_on_cache_miss() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert (
+        "/data/actions-runners/csrc-cache-artifacts:/__csrc-cache:ro"
+        in workflow
+    )
+    restore_start = workflow.index(
+        "- name: Restore runner-local vllm-ascend csrc cache"
+    )
+    install_start = workflow.index(
+        "- name: Install vllm-project/vllm-ascend with device"
+    )
+    restore_block = workflow[restore_start:install_start]
+    assert (
+        '/__csrc-cache/${{ steps.get_csrc_hash.outputs.CSRC_HASH }}/vllm_ascend'
+        in restore_block
+    )
+    assert 'cp -a "${local_cache}/." vllm_ascend/' in restore_block
+    assert (
+        "matrix.group.device_runner == true && "
+        "steps.cache-csrc.outputs.cache-hit != 'true'"
+        in restore_block
+    )
+
+    save_start = workflow.index("- name: Save vllm-ascend csrc cache")
+    verify_start = workflow.index(
+        "- name: Verify required AscendC custom ops are registered (310p)"
+    )
+    save_block = workflow[save_start:verify_start]
+    assert "steps.cache-csrc.outputs.cache-hit != 'true'" in save_block
+    assert "steps.csrc-filter.outputs.csrc == 'true'" not in save_block
 
 
 def test_pull_request_workflows_test_the_server_generated_merge_commit() -> None:
@@ -89,7 +128,8 @@ def test_pull_request_workflows_test_the_server_generated_merge_commit() -> None
     assert "GIT_CONFIG_KEY_0: http.version" in selected_workflow
     assert "GIT_CONFIG_VALUE_0: HTTP/1.1" in selected_workflow
     assert "ref_is_merge_commit:" in selected_workflow
-    assert "fetch-depth: ${{ inputs.ref_is_merge_commit && 1 || 0 }}" in selected_workflow
+    assert "CHECKOUT_REF: ${{ inputs.ref || github.ref }}" in selected_workflow
+    assert 'cat-file -e "${CHECKOUT_REF}^{commit}"' in selected_workflow
     assert "if: ${{ !inputs.ref_is_merge_commit }}" in selected_workflow
     for workflow in (pr_workflow, smart_ut_workflow):
         assert "ref: ${{ github.ref }}" in workflow
@@ -101,5 +141,6 @@ def test_hust_e2e_only_emits_groups_for_available_runner_families() -> None:
     workflow = PR_TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert "--allowed-runner linux-aarch64-a2b3-1" in workflow
-    for device_id in range(7):
+    for device_id in (0, 1, 3, 4, 5, 6):
         assert f"--runner-pool linux-aarch64-a2b3-npu{device_id}={device_id}" in workflow
+    assert "--runner-pool linux-aarch64-a2b3-npu2=2" not in workflow
