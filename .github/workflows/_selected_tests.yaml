@@ -76,7 +76,7 @@ jobs:
       options: >-
         ${{
           matrix.group.device_runner == true &&
-          format('--device /dev/davinci{0}:/dev/davinci0 --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro --volume /data/actions-runners/git-cache:/__git-cache:ro --volume /data/actions-runners/tools/uv:/usr/local/bin/uv:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstd:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstdmt:ro --volume /data/actions-runners/uv-cache-npu{0}:/__uv-cache --volume /data/actions-runners/modelscope-cache-npu{0}:/github/home/.cache/modelscope/hub --volume /data/shared_models/modelscope_cache:/github/home/.cache/modelscope/hub/models:ro --volume /data/actions-runners/huggingface-cache-npu{0}:/github/home/.cache/huggingface --volume /data/actions-runners/vllm-assets:/github/home/.cache/vllm/assets:ro --volume /data/actions-runners/csrc-cache-artifacts:/__csrc-cache:ro --volume /data/actions-runners/rdma-debs:/__rdma-debs:ro --volume /data/actions-runners/mooncake-wheels:/__mooncake-wheels:ro', matrix.group.device_id) ||
+          format('--device /dev/davinci{0}:/dev/davinci0 --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro --volume /data/actions-runners/git-cache:/__git-cache:ro --volume /data/actions-runners/tools/uv:/usr/local/bin/uv:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstd:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstdmt:ro --volume /data/actions-runners/uv-cache-npu{0}:/__uv-cache --volume /data/shared_models/modelscope_cache:/__modelscope_seed:ro --volume /data/actions-runners/huggingface-cache-npu{0}:/github/home/.cache/huggingface --volume /data/actions-runners/vllm-assets:/github/home/.cache/vllm/assets:ro --volume /data/actions-runners/csrc-cache-artifacts:/__csrc-cache:ro --volume /data/actions-runners/rdma-debs:/__rdma-debs:ro --volume /data/actions-runners/mooncake-wheels:/__mooncake-wheels:ro', matrix.group.device_id) ||
           matrix.group.runner == 'linux-aarch64-a2b3-1' &&
           '--device /dev/davinci1 --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro' ||
           ''
@@ -145,7 +145,18 @@ jobs:
             for tool in git gcc g++ cmake curl uv zstd zstdmt; do
               command -v "$tool"
             done
-            test -f /github/home/.cache/modelscope/hub/models/Qwen/Qwen3-0___6B/config.json
+            modelscope_cache="${RUNNER_TEMP}/modelscope-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.group.device_id }}"
+            mkdir -p "${modelscope_cache}/models"
+            cp -as /__modelscope_seed/. "${modelscope_cache}/models/"
+            while IFS= read -r -d '' metadata; do
+              materialized="${metadata}.materialized"
+              cp --dereference --preserve=mode,timestamps "$metadata" "$materialized"
+              mv -f "$materialized" "$metadata"
+            done < <(find "${modelscope_cache}/models" -type l \
+              \( -name .mdl -o -name .msc -o -name .mv \) -print0)
+            echo "MODELSCOPE_CACHE=${modelscope_cache}" >> "$GITHUB_ENV"
+            test -f "${modelscope_cache}/models/Qwen/Qwen3-0___6B/config.json"
+            test ! -L "${modelscope_cache}/models/Qwen/Qwen3-0___6B/.mdl"
             uv --version
             exit 0
           fi
@@ -424,3 +435,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
+
+      - name: Remove per-job ModelScope cache view
+        if: ${{ always() && matrix.group.device_runner == true }}
+        run: |
+          case "${MODELSCOPE_CACHE:-}" in
+            "${RUNNER_TEMP}"/modelscope-"${GITHUB_RUN_ID}"-"${GITHUB_RUN_ATTEMPT}"-*)
+              rm -rf --one-file-system "$MODELSCOPE_CACHE"
+              ;;
+            *)
+              echo "::error::Refusing to remove unexpected ModelScope cache path: ${MODELSCOPE_CACHE:-<unset>}"
+              exit 1
+              ;;
+          esac
