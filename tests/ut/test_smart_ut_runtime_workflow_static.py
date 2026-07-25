@@ -74,6 +74,7 @@ def test_device_checkout_prefers_the_runner_local_git_mirrors() -> None:
     assert "cache=/__git-cache/vllm.git" in workflow
     assert workflow.count('git --git-dir="$cache" cat-file -e') == 2
     assert '[[ "$CHECKOUT_REF" =~ ^[0-9a-f]{40}$ ]]' in workflow
+    assert workflow.count("git remote remove origin 2>/dev/null || true") == 4
     assert workflow.count("git fetch --no-tags --filter=blob:none --depth=1") == 2
     assert "uses: actions/checkout@" not in workflow
 
@@ -202,14 +203,22 @@ def test_pull_request_workflows_test_the_server_generated_merge_commit() -> None
     assert "ref_is_merge_commit:" in selected_workflow
     assert "CHECKOUT_REF: ${{ inputs.ref || github.ref }}" in selected_workflow
     assert 'cat-file -e "${CHECKOUT_REF}^{commit}"' in selected_workflow
+    assert "EXPECTED_REF_SHA: ${{ inputs.ref_is_merge_commit && github.sha || '' }}" in selected_workflow
     assert 'if [ -n "$EXPECTED_REF_SHA" ]' in selected_workflow
     assert "expected ${EXPECTED_REF_SHA}" in selected_workflow
     assert "if: ${{ !inputs.ref_is_merge_commit }}" in selected_workflow
     for workflow in (pr_workflow, smart_ut_workflow):
         assert "ref: ${{ github.ref }}" in workflow
-        assert "expected_ref_sha: ${{ github.sha }}" in workflow
         assert "ref_is_merge_commit: true" in workflow
         assert "ref: ${{ github.event.pull_request.head.sha }}" not in workflow
+
+
+def test_labeled_e2e_retriggers_after_new_commits() -> None:
+    workflow = PR_TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "- synchronize" in workflow
+    assert "github.event.action == 'synchronize'" in workflow
+    assert "contains(github.event.pull_request.labels.*.name, 'e2e')" in workflow
 
 
 def test_hust_e2e_only_emits_groups_for_available_runner_families() -> None:
