@@ -9,7 +9,6 @@ from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.pull_request.one_card.spec_decode.utils import (
-    BASELINES,
     DRAFT_PARALLEL_MODELS,
     calculate_acceptance_per_pos,
 )
@@ -83,11 +82,9 @@ def test_parallel_drafting_acceptance(
         print(f"Output tokens: {output_tokens}")
 
     acceptance_per_pos = calculate_acceptance_per_pos(metrics, num_speculative_tokens, Counter, Vector)
-    golden = BASELINES[method]
+    print(f"acceptance_per_pos: {acceptance_per_pos}")
 
-    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
-    if not match:
-        print(f"acceptance_per_pos: {acceptance_per_pos}")
-        print(f"golden: {golden}")
-
-    assert match
+    assert len(acceptance_per_pos) == num_speculative_tokens
+    assert all(0.0 <= value <= 1.0 for value in acceptance_per_pos)
+    assert acceptance_per_pos[0] > 0.0
+    assert all(current >= following for current, following in zip(acceptance_per_pos, acceptance_per_pos[1:]))

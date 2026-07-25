@@ -36,6 +36,11 @@ def get_llm() -> LLM:
             "is_original_qwen3_reranker": True,
         },
         enable_lora=True,
+        # This test validates LoRA scoring, not graph capture. Even a small
+        # pooling graph matrix can exhaust A2 SQ/CQ resources on shared CI
+        # runners before the correctness assertion runs.
+        enforce_eager=True,
+        max_num_seqs=4,
     )
 
 
