@@ -72,6 +72,7 @@ def test_device_checkout_prefers_the_runner_local_git_mirrors() -> None:
     assert "cache=/__git-cache/vllm-ascend-hust.git" in workflow
     assert "cache=/__git-cache/vllm.git" in workflow
     assert workflow.count('git --git-dir="$cache" cat-file -e') == 2
+    assert '[[ "$CHECKOUT_REF" =~ ^[0-9a-f]{40}$ ]]' in workflow
     assert workflow.count("git fetch --no-tags --filter=blob:none --depth=1") == 2
     assert "uses: actions/checkout@" not in workflow
 
@@ -202,8 +203,9 @@ def test_pull_request_workflows_test_the_server_generated_merge_commit() -> None
     assert 'cat-file -e "${CHECKOUT_REF}^{commit}"' in selected_workflow
     assert "if: ${{ !inputs.ref_is_merge_commit }}" in selected_workflow
     for workflow in (pr_workflow, smart_ut_workflow):
-        assert "ref: ${{ github.ref }}" in workflow
+        assert "ref: ${{ github.sha }}" in workflow
         assert "ref_is_merge_commit: true" in workflow
+        assert "ref: ${{ github.ref }}" not in workflow
         assert "ref: ${{ github.event.pull_request.head.sha }}" not in workflow
 
 

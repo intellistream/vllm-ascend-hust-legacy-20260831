@@ -156,7 +156,7 @@ jobs:
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ needs.scope.outputs.main_commit }}
-      ref: ${{ github.ref }}
+      ref: ${{ github.sha }}
       base_ref: ${{ github.base_ref }}
       ref_is_merge_commit: true
       test_groups: ${{ needs.scope.outputs.test_groups }}
