@@ -2,12 +2,12 @@
 
 Tests that the Ascend NPU ngram proposer:
 1. Has a propose() signature matching the parent NgramProposerGPU.
-2. Delegates to the parent's PyTorch kernel implementation correctly.
+2. Implements scatter-and-kernel logic correctly (no super() dependency).
 """
 
 import inspect
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import torch
 
@@ -34,48 +34,51 @@ def test_propose_signature_matches_parent():
     )
 
 
-def test_propose_delegates_to_parent():
-    """Verify that propose() delegates to the parent's implementation."""
-    mock_parent_propose = MagicMock(return_value=(
-        torch.tensor([[1, 2, 3]], dtype=torch.int32),
-        torch.tensor([3], dtype=torch.int32),
-    ))
-
+def test_propose_uses_kernel_directly():
+    """Verify that propose() calls self.kernel() with expected arguments
+    instead of delegating to super().propose()."""
     proposer = AscendNgramProposerNPU.__new__(AscendNgramProposerNPU)
-    # Manually set required attributes (normally set by __init__)
     proposer.k = 3
     proposer.min_n = 2
     proposer.max_n = 5
     proposer.max_model_len = 32
     proposer.max_num_seqs = 4
     proposer.device = "cpu"
-    proposer.kernel = MagicMock()
     proposer.vllm_config = MagicMock()
     proposer.runner = SimpleNamespace()
 
-    with patch.object(type(proposer).__bases__[0], "propose", mock_parent_propose):
-        b = 1
-        num_spec_tokens = 3
-        num_tokens_no_spec = torch.tensor([5], dtype=torch.int32)
-        token_ids_gpu = torch.zeros((b, 32), dtype=torch.int32)
-        valid_sampled_token_ids_gpu = torch.full(
-            (b, num_spec_tokens + 1), -1, dtype=torch.int32
-        )
-        valid_sampled_tokens_count = torch.tensor([0], dtype=torch.int32)
+    # Replace the kernel with a mock
+    mock_kernel = MagicMock(return_value=(
+        torch.tensor([[21, 22, 23]], dtype=torch.int32),
+        torch.tensor([3], dtype=torch.int32),
+    ))
+    proposer.kernel = mock_kernel
 
-        result = proposer.propose(
-            num_spec_tokens,
-            num_tokens_no_spec,
-            token_ids_gpu,
-            valid_sampled_token_ids_gpu,
-            valid_sampled_tokens_count,
-        )
+    b = 1
+    num_spec_tokens = 3
+    num_tokens_no_spec = torch.tensor([5], dtype=torch.int32, device="cpu")
+    token_ids_gpu = torch.arange(32, dtype=torch.int32, device="cpu").unsqueeze(0)
+    valid_sampled_token_ids_gpu = torch.tensor([[10, 11, 12, -1]], dtype=torch.int32, device="cpu")
+    valid_sampled_tokens_count = torch.tensor([3], dtype=torch.int32, device="cpu")
 
-    mock_parent_propose.assert_called_once_with(
+    result = proposer.propose(
         num_spec_tokens,
         num_tokens_no_spec,
         token_ids_gpu,
         valid_sampled_token_ids_gpu,
         valid_sampled_tokens_count,
     )
+
+    # Verify the kernel was called once
+    assert mock_kernel.call_count == 1
+
+    # Verify the result is returned correctly
     assert result is not None, "propose() must return a tuple (draft_tokens, num_valid)"
+    draft_tokens, num_valid = result
+    assert draft_tokens.shape == (b, proposer.k), f"Expected (1, {proposer.k}), got {draft_tokens.shape}"
+    assert num_valid.shape == (b,), f"Expected (1,), got {num_valid.shape}"
+
+    # Verify token_ids_gpu was updated with sampled tokens at positions 5, 6, 7
+    assert token_ids_gpu[0, 5].item() == 10, f"Expected 10 at position 5, got {token_ids_gpu[0, 5]}"
+    assert token_ids_gpu[0, 6].item() == 11, f"Expected 11 at position 6, got {token_ids_gpu[0, 6]}"
+    assert token_ids_gpu[0, 7].item() == 12, f"Expected 12 at position 7, got {token_ids_gpu[0, 7]}"
