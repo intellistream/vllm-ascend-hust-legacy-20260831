@@ -120,6 +120,7 @@ jobs:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
         HF_HUB_OFFLINE: 1
+        SELECTED_TEST_LOG_SCOPE: ${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.vllm }}-${{ matrix.group.partition }}
         ASCEND_RT_VISIBLE_DEVICES: ${{ matrix.group.device_runner == true && '0' || (matrix.group.runner == 'linux-aarch64-a2b3-1' && '1' || '') }}
         MAX_JOBS: 4
         UV_INDEX_URL: ${{ (matrix.group.device_runner == true || matrix.group.runner == 'linux-aarch64-a2b3-1') && 'https://pypi.org/simple' || 'http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple' }}
@@ -489,8 +490,8 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: timing-data-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
-          path: ${{ runner.temp }}/selected-tests-*/test_timing_data.json
+          name: timing-data-${{ github.run_id }}-${{ github.run_attempt }}-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
+          path: ${{ runner.temp }}/selected-tests-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ env.SELECTED_TEST_LOG_SCOPE }}/test_timing_data.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -499,11 +500,38 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: selected-test-logs-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card
-          path: ${{ runner.temp }}/selected-tests-*
+          name: selected-test-logs-${{ github.run_id }}-${{ github.run_attempt }}-vllm-${{ inputs.vllm }}-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
+          path: ${{ runner.temp }}/selected-tests-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ env.SELECTED_TEST_LOG_SCOPE }}
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
+
+      - name: Remove per-job selected-test scratch
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "${SELECTED_TEST_LOG_DIR:-}" ]; then
+            case "$SELECTED_TEST_LOG_DIR" in
+              "${RUNNER_TEMP}"/selected-tests-"${{ matrix.group.npu_type }}"-"${{ matrix.group.num_npus }}"card-"${SELECTED_TEST_LOG_SCOPE}")
+                rm -rf --one-file-system "$SELECTED_TEST_LOG_DIR"
+                ;;
+              *)
+                echo "::error::Refusing to remove unexpected selected-test log path: $SELECTED_TEST_LOG_DIR"
+                exit 1
+                ;;
+            esac
+          fi
+          if [ -n "${SELECTED_TEST_VLLM_CACHE_ROOT:-}" ]; then
+            case "$SELECTED_TEST_VLLM_CACHE_ROOT" in
+              "${RUNNER_TEMP}"/vllm-cache-"${{ matrix.group.npu_type }}"-"${{ matrix.group.num_npus }}"card.*)
+                rm -rf --one-file-system "$SELECTED_TEST_VLLM_CACHE_ROOT"
+                ;;
+              *)
+                echo "::error::Refusing to remove unexpected vLLM cache path: $SELECTED_TEST_VLLM_CACHE_ROOT"
+                exit 1
+                ;;
+            esac
+          fi
 
       - name: Remove per-job ModelScope cache view
         if: ${{ always() && matrix.group.device_runner == true }}
