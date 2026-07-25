@@ -21,6 +21,9 @@ SMART_UT_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr_smart_ut.yaml
 PR_TEST_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr_test.yaml"
 RUNNER_LABEL_PATH = REPO_ROOT / ".github" / "workflows" / "scripts" / "runner_label.json"
 RUN_SELECTED_TESTS_PATH = REPO_ROOT / ".github" / "workflows" / "scripts" / "run_selected_tests.sh"
+REJECTION_SAMPLER_UTILS_PATH = (
+    REPO_ROOT / "vllm_ascend" / "worker" / "v2" / "spec_decode" / "rejection_sampler_utils.py"
+)
 
 
 def test_a2_single_npu_container_uses_runner_scoped_runtime_contract() -> None:
@@ -91,6 +94,8 @@ def test_device_runners_restore_and_save_csrc_cache_on_cache_miss() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
     assert "/data/actions-runners/csrc-cache-artifacts:/__csrc-cache:ro" in workflow
+    assert "/data/actions-runners/tools/zstd:/usr/local/bin/zstdmt:ro" in workflow
+    assert "git gcc g++ cmake curl uv zstd zstdmt" in workflow
     restore_start = workflow.index("- name: Restore runner-local vllm-ascend csrc cache")
     install_start = workflow.index("- name: Install vllm-project/vllm-ascend with device")
     restore_block = workflow[restore_start:install_start]
@@ -103,6 +108,16 @@ def test_device_runners_restore_and_save_csrc_cache_on_cache_miss() -> None:
     save_block = workflow[save_start:verify_start]
     assert "steps.cache-csrc.outputs.cache-hit != 'true'" in save_block
     assert "steps.csrc-filter.outputs.csrc == 'true'" not in save_block
+
+
+def test_spec_decode_imports_helpers_exposed_by_both_pinned_vllm_revisions() -> None:
+    source = REJECTION_SAMPLER_UTILS_PATH.read_text(encoding="utf-8")
+    import_block = source[source.index("from vllm.v1.worker.gpu.spec_decode") : source.index("@triton.jit")]
+
+    assert "_compute_block_stats_kernel," in import_block
+    assert "_compute_global_lse," in import_block
+    assert "_compute_global_logsumexp" not in import_block
+    assert "_compute_local_logits_stats_kernel" not in import_block
 
 
 def test_device_runners_materialize_torch_npu_cache_links() -> None:
