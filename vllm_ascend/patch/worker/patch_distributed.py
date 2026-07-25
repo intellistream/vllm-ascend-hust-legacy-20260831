@@ -127,7 +127,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.use_cpu_custom_send_recv = False
         self.group_name = group_name
         self.group_ranks = group_ranks
-        if envs.VLLM_USE_PP_OPT_SCHEDULER:
+        if getattr(envs, "VLLM_USE_PP_OPT_SCHEDULER", False):
             self.size_send_work: torch.distributed.Work | None = None
             self.object_send_work: torch.distributed.Work | None = None
             self.tensor_send_works: list[torch.distributed.Work] = []

@@ -923,7 +923,10 @@ class NPUWorker(WorkerBase):
         else:
             all_gather_group = get_tp_group()
         send_tensors = output.tensors
-        if envs_vllm.VLLM_USE_PP_OPT_SCHEDULER and envs_vllm.VLLM_PP_OPT_OVERLAP_SENDS:
+        pp_overlap_sends = getattr(envs_vllm, "VLLM_USE_PP_OPT_SCHEDULER", False) and getattr(
+            envs_vllm, "VLLM_PP_OPT_OVERLAP_SENDS", False
+        )
+        if pp_overlap_sends:
             send_tensors = {
                 key: value.clone() if isinstance(value, torch.Tensor) else value
                 for key, value in output.tensors.items()
@@ -932,7 +935,7 @@ class NPUWorker(WorkerBase):
             send_tensors,
             all_gather_group=all_gather_group,
         )
-        if envs_vllm.VLLM_USE_PP_OPT_SCHEDULER and envs_vllm.VLLM_PP_OPT_OVERLAP_SENDS and pp_send_work:
+        if pp_overlap_sends and pp_send_work:
             self._pp_send_buffer_refs.append((pp_send_work, send_tensors))
         else:
             self._pp_send_work = pp_send_work

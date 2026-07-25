@@ -8,7 +8,7 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 try:
-    from vllm.v1.worker.pp_opt_profile import (
+    from vllm.v1.worker.pp_opt_profile import (  # type: ignore[import-not-found]
         mark_t2,
         mark_t3,
         profile_model_runner_execute,

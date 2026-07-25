@@ -66,6 +66,15 @@ def test_pp_opt_call_sites_import_compatibility_module() -> None:
     assert "from vllm_ascend.worker import pp_opt_profile" in model_runner
 
 
+def test_pp_opt_call_sites_tolerate_core_without_feature_envs() -> None:
+    distributed_patch = (REPO_ROOT / "vllm_ascend/patch/worker/patch_distributed.py").read_text(encoding="utf-8")
+    worker = (REPO_ROOT / "vllm_ascend/worker/worker.py").read_text(encoding="utf-8")
+
+    assert 'getattr(envs, "VLLM_USE_PP_OPT_SCHEDULER", False)' in distributed_patch
+    assert 'getattr(envs_vllm, "VLLM_USE_PP_OPT_SCHEDULER", False)' in worker
+    assert '"VLLM_PP_OPT_OVERLAP_SENDS", False' in worker
+
+
 def test_pp_opt_worker_keeps_async_send_buffers_alive() -> None:
     worker = (REPO_ROOT / "vllm_ascend/worker/worker.py").read_text(encoding="utf-8")
 
@@ -89,7 +98,7 @@ def test_pp_opt_model_runner_records_rank_local_forward_window() -> None:
 def test_pp_opt_group_coordinator_tracks_nonblocking_sends() -> None:
     patch = (REPO_ROOT / "vllm_ascend/patch/worker/patch_distributed.py").read_text(encoding="utf-8")
 
-    assert "if envs.VLLM_USE_PP_OPT_SCHEDULER:" in patch
+    assert 'if getattr(envs, "VLLM_USE_PP_OPT_SCHEDULER", False):' in patch
     assert "self.size_send_work" in patch
     assert "self.object_send_work" in patch
     assert "self.tensor_send_works" in patch
