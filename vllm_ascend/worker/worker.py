@@ -865,7 +865,10 @@ class NPUWorker(WorkerBase):
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
 
-        if envs_vllm.VLLM_PP_OPT_OVERLAP_SENDS and self._pp_send_buffer_refs:
+        pp_overlap_sends = getattr(envs_vllm, "VLLM_USE_PP_OPT_SCHEDULER", False) and getattr(
+            envs_vllm, "VLLM_PP_OPT_OVERLAP_SENDS", False
+        )
+        if pp_overlap_sends and self._pp_send_buffer_refs:
             active_send_refs: list[tuple[list[Handle], dict[str, Any]]] = []
             for handles, tensor_dict in self._pp_send_buffer_refs:
                 if handles and all(handle.is_completed() for handle in handles):
@@ -923,9 +926,6 @@ class NPUWorker(WorkerBase):
         else:
             all_gather_group = get_tp_group()
         send_tensors = output.tensors
-        pp_overlap_sends = getattr(envs_vllm, "VLLM_USE_PP_OPT_SCHEDULER", False) and getattr(
-            envs_vllm, "VLLM_PP_OPT_OVERLAP_SENDS", False
-        )
         if pp_overlap_sends:
             send_tensors = {
                 key: value.clone() if isinstance(value, torch.Tensor) else value
