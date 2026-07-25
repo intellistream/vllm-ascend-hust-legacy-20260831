@@ -17,11 +17,25 @@
 #
 
 import torch
-from vllm.logger import logger
 from torch import fx as fx
 from vllm.compilation.passes.inductor_pass import get_pass_context
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
+from vllm.logger import logger
+
+
+def _has_unsafe_deepseek_v2_norm_quant_fusion(config: VllmConfig) -> bool:
+    """Return whether the Ascend norm-quant pass is unsafe for this model.
+
+    The Ascend-quantized DeepSeek V2 graph path currently produces outputs
+    that diverge from eager execution when the backend-specific norm-quant
+    fusion is enabled. Keep the other compiler passes and ACL Graph enabled
+    while this fusion is repaired.
+    """
+    model_config = config.model_config
+    if model_config is None or getattr(model_config, "quantization", None) != "ascend":
+        return False
+    return "DeepseekV2ForCausalLM" in (getattr(model_config, "architectures", None) or ())
 
 
 class GraphFusionPassManager:
@@ -53,21 +67,27 @@ class GraphFusionPassManager:
 
         # By default, we enable the graph fusion and quantization fusion pass.
         self.ascend_compilation_config: dict = config.additional_config.get("ascend_compilation_config", {})
-        if self.ascend_compilation_config.get("fuse_norm_quant", True) and not is_310p():
+        enable_norm_quant = self.ascend_compilation_config.get("fuse_norm_quant", True) and not is_310p()
+        if enable_norm_quant and _has_unsafe_deepseek_v2_norm_quant_fusion(config):
+            logger.warning(
+                "Skipping Ascend norm-quant fusion for Ascend-quantized "
+                "DeepSeek V2 because its compiled graph output is not "
+                "correctness-safe."
+            )
+            enable_norm_quant = False
+
+        if enable_norm_quant:
             from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
 
             self.passes.append(AddRMSNormQuantFusionPass(config))
 
-        if self.ascend_compilation_config.get("fuse_qknorm_rope", True) and hasattr(
-            torch.ops.vllm, "qkv_rmsnorm_rope"
-        ):
+        if self.ascend_compilation_config.get("fuse_qknorm_rope", True) and hasattr(torch.ops.vllm, "qkv_rmsnorm_rope"):
             from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
 
             self.passes.append(QKNormRopeFusionPass(config))
         elif self.ascend_compilation_config.get("fuse_qknorm_rope", True):
             logger.warning(
-                "Skipping qknorm_rope fusion because torch.ops.vllm.qkv_rmsnorm_rope "
-                "is not registered in this runtime."
+                "Skipping qknorm_rope fusion because torch.ops.vllm.qkv_rmsnorm_rope is not registered in this runtime."
             )
 
         if self.ascend_compilation_config.get("fuse_allreduce_rms", True):
