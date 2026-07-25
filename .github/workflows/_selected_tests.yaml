@@ -107,12 +107,18 @@ jobs:
         run: |
           set -euo pipefail
           cache=/__git-cache/vllm-ascend-hust.git
+          checkout_ref="$CHECKOUT_REF"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "$cache"
-          if [[ "$CHECKOUT_REF" =~ ^[0-9a-f]{40}$ ]] \
+          if [ -n "$EXPECTED_REF_SHA" ] \
             && [ -d "$cache" ] \
-            && git --git-dir="$cache" cat-file -e "${CHECKOUT_REF}^{commit}"; then
-            checkout_sha=$(git --git-dir="$cache" rev-parse "${CHECKOUT_REF}^{commit}")
+            && git --git-dir="$cache" cat-file -e "${EXPECTED_REF_SHA}^{commit}"; then
+            checkout_ref="$EXPECTED_REF_SHA"
+          fi
+          if [[ "$checkout_ref" =~ ^[0-9a-f]{40}$ ]] \
+            && [ -d "$cache" ] \
+            && git --git-dir="$cache" cat-file -e "${checkout_ref}^{commit}"; then
+            checkout_sha=$(git --git-dir="$cache" rev-parse "${checkout_ref}^{commit}")
             git init .
             git remote remove origin 2>/dev/null || true
             git remote add origin "$cache"
