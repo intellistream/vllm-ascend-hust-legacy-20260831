@@ -108,6 +108,8 @@ jobs:
         run: |
           set -euo pipefail
           cache=/__git-cache/vllm-ascend-hust.git
+          # CHECKOUT_REF is injected through the step environment below.
+          # shellcheck disable=SC2153
           checkout_ref="$CHECKOUT_REF"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "$cache"
