@@ -460,6 +460,36 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_extract_hidden_states_falls_back_to_eager(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.model_config.architectures = ["Qwen3ForCausalLM"]
+        vllm_config.speculative_config = MagicMock(method="extract_hidden_states")
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        mock_init_recompute.return_value = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        with (
+            self.assertLogs(logger="vllm", level="WARNING") as cm,
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+        ):
+            platform.NPUPlatform().check_and_update_config(vllm_config)
+
+        self.assertTrue(any("compiled auxiliary hidden-state outputs" in log for log in cm.output))
+        self.assertTrue(vllm_config.model_config.enforce_eager)
+        self.assertEqual(vllm_config.compilation_config.mode, CompilationMode.NONE)
+        self.assertEqual(vllm_config.compilation_config.cudagraph_mode, CUDAGraphMode.NONE)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
     def test_check_and_update_config_unsupported_compilation_level(
         self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
     ):

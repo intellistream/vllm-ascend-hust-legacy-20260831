@@ -643,6 +643,22 @@ class NPUPlatform(Platform):
 
         from vllm.config.compilation import CUDAGraphMode
 
+        speculative_config = vllm_config.speculative_config
+        if (
+            model_config is not None
+            and speculative_config is not None
+            and getattr(speculative_config, "method", None) == "extract_hidden_states"
+            and not enforce_eager
+        ):
+            logger.warning(
+                "Disabling NPU graph compilation for extract_hidden_states because "
+                "compiled auxiliary hidden-state outputs are not correctness-safe; "
+                "falling back to eager execution."
+            )
+            enforce_eager = True
+            model_config.enforce_eager = True
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         if model_config is not None and architecture == "Qwen2ForCausalLM":
             if os.environ.get("VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE", "0") != "0":
                 logger.warning(

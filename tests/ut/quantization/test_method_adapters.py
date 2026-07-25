@@ -135,6 +135,11 @@ class TestAscendFusedMoEMethod(TestBase):
         self.mock_moe_config = MagicMock()
         self.method = AscendFusedMoEMethod(self.mock_scheme, self.mock_moe_config)
 
+    def test_preserves_ascend_moe_execution_path(self):
+        self.assertFalse(self.method.is_monolithic)
+        self.assertIsNone(self.method.maybe_make_prepare_finalize())
+        self.assertIsNone(self.method.maybe_make_prepare_finalize(routing_tables=MagicMock()))
+
     def test_process_weights_after_loading_delegates(self):
         layer = torch.nn.Module()
         self.mock_scheme.process_weights_after_loading.return_value = None
