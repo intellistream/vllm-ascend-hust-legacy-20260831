@@ -32,11 +32,6 @@ on:
         required: false
         default: ''
         description: 'The vllm-ascend ref to test.'
-      expected_ref_sha:
-        type: string
-        required: false
-        default: ''
-        description: 'Fail unless the checked-out vllm-ascend ref resolves to this SHA.'
       base_ref:
         type: string
         required: false
@@ -108,7 +103,7 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         env:
           CHECKOUT_REF: ${{ inputs.ref || github.ref }}
-          EXPECTED_REF_SHA: ${{ inputs.expected_ref_sha }}
+          EXPECTED_REF_SHA: ${{ inputs.ref_is_merge_commit && github.sha || '' }}
         run: |
           set -euo pipefail
           cache=/__git-cache/vllm-ascend-hust.git
@@ -202,6 +197,7 @@ jobs:
             git clean -ffdx
           else
             git init .
+            git remote remove origin 2>/dev/null || true
             git remote add origin https://github.com/vllm-project/vllm.git
             for attempt in 1 2 3 4 5; do
               if git fetch --no-tags --filter=blob:none --depth=1 origin "$VLLM_REF"; then

@@ -144,7 +144,6 @@ jobs:
     with:
       vllm: d886c26d4d4fef7d079696beb4ece1cfb4b008a8
       ref: ${{ github.ref }}
-      expected_ref_sha: ${{ github.sha }}
       base_ref: ${{ github.base_ref }}
       ref_is_merge_commit: true
       test_groups: ${{ needs.scope.outputs.test_groups }}

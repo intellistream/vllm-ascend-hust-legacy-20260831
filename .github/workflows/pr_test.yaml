@@ -21,6 +21,7 @@ on:
   pull_request:
     types:
       - labeled
+      - synchronize
     branches:
       - 'main'
       - '*-dev'
@@ -39,7 +40,11 @@ concurrency:
 
 jobs:
   lint-and-select-tests:
-    if: ${{ github.event.label.name == 'e2e' }}
+    if: >-
+      ${{
+        (github.event.action == 'labeled' && github.event.label.name == 'e2e') ||
+        (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'e2e'))
+      }}
     runs-on: ubuntu-latest
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -240,7 +245,6 @@ jobs:
     with:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.ref }}
-      expected_ref_sha: ${{ github.sha }}
       base_ref: ${{ github.base_ref }}
       ref_is_merge_commit: true
       test_groups: ${{ needs.lint-and-select-tests.outputs.test_groups }}
