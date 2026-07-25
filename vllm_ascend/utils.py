@@ -800,7 +800,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 exc,
             )
         else:
-            REGISTERED_ASCEND_OPS["FusedMoE"] = fused_moe_module.AscendFusedMoE
+            fused_moe = getattr(fused_moe_module, "AscendFusedMoE", None)
+            if fused_moe is not None:
+                REGISTERED_ASCEND_OPS["FusedMoE"] = fused_moe
             shared_fused_moe = getattr(fused_moe_module, "AscendSharedFusedMoE", None)
             if shared_fused_moe is not None:
                 REGISTERED_ASCEND_OPS["SharedFusedMoE"] = shared_fused_moe
@@ -842,7 +844,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 fused_moe as fused_moe_310_module,
             )
 
-            REGISTERED_ASCEND_OPS["FusedMoE"] = fused_moe_310_module.AscendFusedMoE310
+            fused_moe_310 = getattr(fused_moe_310_module, "AscendFusedMoE310", None)
+            if fused_moe_310 is not None:
+                REGISTERED_ASCEND_OPS["FusedMoE"] = fused_moe_310
             shared_fused_moe_310 = getattr(fused_moe_310_module, "AscendSharedFusedMoE310", None)
             if shared_fused_moe_310 is not None:
                 REGISTERED_ASCEND_OPS["SharedFusedMoE"] = shared_fused_moe_310
