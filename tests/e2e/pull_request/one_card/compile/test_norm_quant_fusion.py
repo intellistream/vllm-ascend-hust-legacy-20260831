@@ -27,7 +27,7 @@ from vllm.utils.system_utils import update_environment_variables
 import vllm_ascend.ops.register_custom_ops  # noqa
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.compilation.passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import enable_add_rms_norm_bias_custom_op
 
 from .backend import TestBackend
 
@@ -254,6 +254,13 @@ def test_rmsnorm_quant_fusion(
     torch.set_default_dtype(dtype)
     torch.manual_seed(1)
 
+    if not enable_add_rms_norm_bias_custom_op():
+        pytest.skip("AddRmsNormBias custom op is unavailable on this CANN runtime")
+    if not hasattr(torch.ops._C_ascend, "npu_add_rms_norm_bias"):
+        pytest.skip("Operator _C_ascend.npu_add_rms_norm_bias is unavailable")
+    if not hasattr(torch.ops.npu, "npu_add_rms_norm_quant"):
+        pytest.skip("Fusion operator npu.npu_add_rms_norm_quant is unavailable")
+
     vllm_config = VllmConfig(model_config=ModelConfig(dtype=dtype))
 
     with vllm.config.set_current_vllm_config(vllm_config):
@@ -272,8 +279,6 @@ def test_rmsnorm_quant_fusion(
     with vllm.config.set_current_vllm_config(vllm_config), set_ascend_forward_context(None, vllm_config):
         backend = get_or_create_backend(vllm_config)
         if use_bias:
-            if not enable_custom_op():
-                return
             if sp_enable:
                 model = TestModelSPWithBias(hidden_size, dtype, eps, device="npu")
             else:
