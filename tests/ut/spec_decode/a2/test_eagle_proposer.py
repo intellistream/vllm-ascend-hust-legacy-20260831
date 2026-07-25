@@ -977,6 +977,10 @@ class TestEagleProposerPropose:
         mock_get_ascend_config.return_value = mock_ascend_config
 
         self.vllm_config = MagicMock(spec=VllmConfig)
+        # This fixture exercises the v1 proposer.  An unset MagicMock field is
+        # truthy and would route the shared forward-context hook through the v2
+        # path, which requires initialized distributed groups.
+        self.vllm_config.use_v2_model_runner = False
         self.vllm_config.speculative_config = MagicMock()
         self.vllm_config.speculative_config.num_speculative_tokens = 3
         self.vllm_config.speculative_config.method = "eagle3"
