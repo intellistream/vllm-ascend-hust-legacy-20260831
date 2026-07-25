@@ -51,8 +51,13 @@ class AscendNgramProposerNPU(NgramProposerGPU):
             num_valid_draft_tokens: [batch_size] tensor of valid draft count.
         """
         assert num_speculative_tokens == self.k
+        assert token_ids_gpu.device == self.device, (
+            f"token_ids_gpu device {token_ids_gpu.device} != expected {self.device}"
+        )
+        assert num_tokens_no_spec.device == self.device, (
+            f"num_tokens_no_spec device {num_tokens_no_spec.device} != expected {self.device}"
+        )
 
-        batch_size = num_tokens_no_spec.shape[0]
         max_seq_len = token_ids_gpu.shape[1]
         max_new_tokens = valid_sampled_token_ids_gpu.shape[1]
 
@@ -66,15 +71,22 @@ class AscendNgramProposerNPU(NgramProposerGPU):
         )
         write_positions_long = write_positions.clamp(max=max_seq_len - 1).long()
         tokens_cast = valid_sampled_token_ids_gpu.to(token_ids_gpu.dtype)
-        token_ids_gpu.scatter_(
-            1,
-            write_positions_long,
-            torch.where(scatter_mask, tokens_cast, token_ids_gpu.gather(1, write_positions_long)),
-        )
+        existing_values = token_ids_gpu.gather(1, write_positions_long)
+        tokens_to_scatter = torch.where(scatter_mask, tokens_cast, existing_values)
+        token_ids_gpu.scatter_(1, write_positions_long, tokens_to_scatter)
 
         # Compute updated lengths after scatter.
         clamped_count = valid_sampled_tokens_count.clamp(max=max_seq_len - num_tokens_no_spec)
         updated_lengths = num_tokens_no_spec + clamped_count
 
         combined_mask = (valid_sampled_tokens_count > 0) & (updated_lengths >= self.min_n)
+
+        # NOTE: Unlike the parent's propose(), we do not wrap the kernel call
+        # with set_forward_context() because this path is a fallback — the model
+        # runner uses the AscendC custom op (npu_ngram_spec_decode) for the
+        # primary ngram_gpu path. The NgramGPUKernel uses only standard PyTorch
+        # ops (unfold, argmax, gather, cumsum) that do not require forward
+        # context, so the omission is safe. If this code path becomes the primary
+        # path in the future, add:
+        #   with set_forward_context(None, self.vllm_config):
         return self.kernel(updated_lengths, token_ids_gpu, combined_mask)
