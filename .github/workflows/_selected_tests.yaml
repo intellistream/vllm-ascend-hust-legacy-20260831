@@ -76,7 +76,7 @@ jobs:
       options: >-
         ${{
           matrix.group.device_runner == true &&
-          format('--device /dev/davinci{0} --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro --volume /data/actions-runners/git-cache:/__git-cache:ro --volume /data/actions-runners/tools/uv:/usr/local/bin/uv:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstd:ro --volume /data/actions-runners/uv-cache-npu{0}:/__uv-cache --volume /data/actions-runners/rdma-debs:/__rdma-debs:ro --volume /data/actions-runners/mooncake-wheels:/__mooncake-wheels:ro', matrix.group.device_id) ||
+          format('--device /dev/davinci{0} --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro --volume /data/actions-runners/git-cache:/__git-cache:ro --volume /data/actions-runners/tools/uv:/usr/local/bin/uv:ro --volume /data/actions-runners/tools/zstd:/usr/local/bin/zstd:ro --volume /data/actions-runners/uv-cache-npu{0}:/__uv-cache --volume /data/actions-runners/csrc-cache-artifacts:/__csrc-cache:ro --volume /data/actions-runners/rdma-debs:/__rdma-debs:ro --volume /data/actions-runners/mooncake-wheels:/__mooncake-wheels:ro', matrix.group.device_id) ||
           matrix.group.runner == 'linux-aarch64-a2b3-1' &&
           '--device /dev/davinci1 --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --volume /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro --volume /usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro' ||
           ''
@@ -244,6 +244,18 @@ jobs:
             vllm_ascend/include
           key: vllm-ascend-build-v1-${{ steps.get_arch.outputs.arch }}-${{ matrix.group.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
 
+      - name: Restore runner-local vllm-ascend csrc cache
+        if: ${{ matrix.group.device_runner == true && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        run: |
+          local_cache="/__csrc-cache/${{ steps.get_csrc_hash.outputs.CSRC_HASH }}/vllm_ascend"
+          if [ -d "${local_cache}" ]; then
+            cp -a "${local_cache}/." vllm_ascend/
+            find vllm_ascend -maxdepth 1 -name '*.so' -type f | grep -q .
+            echo "Restored runner-local CSRC cache for ${{ steps.get_csrc_hash.outputs.CSRC_HASH }}"
+          else
+            echo "Runner-local CSRC cache miss for ${{ steps.get_csrc_hash.outputs.CSRC_HASH }}"
+          fi
+
       - name: Install Mooncake wheel
         if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
@@ -292,7 +304,7 @@ jobs:
           fi
 
       - name: Save vllm-ascend csrc cache
-        if: ${{ matrix.group.npu_type != 'cpu' && steps.csrc-filter.outputs.csrc == 'true' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
         uses: runs-on/cache/save@v5
         with:
           path: |
