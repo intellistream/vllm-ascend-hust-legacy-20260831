@@ -45,6 +45,10 @@ def test_perfgate_scripts_are_present() -> None:
 def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
+    assert "types: [labeled, synchronize]" in workflow
+    assert "github.event.action == 'synchronize'" in workflow
+    assert "contains(github.event.pull_request.labels.*.name, 'ready')" in workflow
+    assert "contains(github.event.pull_request.labels.*.name, 'verified')" in workflow
     assert "PERFGATE_MODE" in workflow
     assert "PERFGATE_SPEC_FILE" in workflow
     assert "SOC_VERSION: ascend910b2" in workflow

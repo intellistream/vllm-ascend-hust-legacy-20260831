@@ -563,6 +563,7 @@
     - tests/e2e/pull_request/four_card/test_graph_mode.py
 
 
+
 - name: worker_v2
   optional: false
   source_file_dependencies:
@@ -846,6 +847,4 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
-
 
