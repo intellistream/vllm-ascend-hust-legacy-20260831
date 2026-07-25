@@ -42,11 +42,14 @@ def test_a2_single_npu_container_uses_runner_scoped_runtime_contract() -> None:
     assert "matrix.group.device_runner == true && '0'" in workflow
     assert "matrix.group.device_runner == true" in workflow
     assert "/dev/davinci{0}:/dev/davinci0" in workflow
-    assert "/data/actions-runners/modelscope-cache-npu{0}:/github/home/.cache/modelscope/hub" in workflow
-    assert "/data/shared_models/modelscope_cache:/github/home/.cache/modelscope/hub/models:ro" in workflow
+    assert "/data/shared_models/modelscope_cache:/__modelscope_seed:ro" in workflow
     assert "/data/actions-runners/huggingface-cache-npu{0}:/github/home/.cache/huggingface" in workflow
     assert "/data/actions-runners/vllm-assets:/github/home/.cache/vllm/assets:ro" in workflow
-    assert "/github/home/.cache/modelscope/hub/models/Qwen/Qwen3-0___6B/config.json" in workflow
+    assert 'cp -as /__modelscope_seed/. "${modelscope_cache}/models/"' in workflow
+    assert r"\( -name .mdl -o -name .msc -o -name .mv \)" in workflow
+    assert 'echo "MODELSCOPE_CACHE=${modelscope_cache}" >> "$GITHUB_ENV"' in workflow
+    assert 'test ! -L "${modelscope_cache}/models/Qwen/Qwen3-0___6B/.mdl"' in workflow
+    assert 'rm -rf --one-file-system "$MODELSCOPE_CACHE"' in workflow
 
 
 def test_npu_preflight_is_fail_closed_and_runs_before_package_install() -> None:
