@@ -188,6 +188,23 @@ def test_selected_device_tests_retry_only_transient_npu_memory_contention() -> N
     assert "Transient NPU memory contention detected; keeping the runner busy" in script
 
 
+def test_selected_test_artifacts_are_unique_and_scratch_is_released() -> None:
+    script = RUN_SELECTED_TESTS_PATH.read_text(encoding="utf-8")
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert 'selected_test_log_scope="${SELECTED_TEST_LOG_SCOPE:-local}"' in script
+    assert "selected-tests-${npu_type}-${num_npus}card-${selected_test_log_scope}" in script
+    assert "SELECTED_TEST_LOG_DIR" in script
+    assert "SELECTED_TEST_VLLM_CACHE_ROOT" in script
+    assert "SELECTED_TEST_LOG_SCOPE:" in workflow
+    assert "selected-test-logs-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
+    assert "timing-data-${{ github.run_id }}-${{ github.run_attempt }}" in workflow
+    assert "${{ matrix.group.partition }}" in workflow
+    assert "Remove per-job selected-test scratch" in workflow
+    assert 'rm -rf --one-file-system "$SELECTED_TEST_LOG_DIR"' in workflow
+    assert 'rm -rf --one-file-system "$SELECTED_TEST_VLLM_CACHE_ROOT"' in workflow
+
+
 def test_selected_tests_deliver_exact_merge_source_as_hosted_bundle() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 

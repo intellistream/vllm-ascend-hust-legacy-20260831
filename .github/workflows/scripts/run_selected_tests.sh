@@ -28,11 +28,16 @@ test_results=()
 failed_logs=()
 timing_entries=()
 test_index=0
-pytest_log_dir="${RUNNER_TEMP:-/tmp}/selected-tests-${npu_type}-${num_npus}card"
+selected_test_log_scope="${SELECTED_TEST_LOG_SCOPE:-local}"
+selected_test_log_scope="${selected_test_log_scope//[^a-zA-Z0-9_.-]/_}"
+pytest_log_dir="${RUNNER_TEMP:-/tmp}/selected-tests-${npu_type}-${num_npus}card-${selected_test_log_scope}"
 npu_resource_retry_attempts="${NPU_RESOURCE_RETRY_ATTEMPTS:-3}"
 npu_resource_retry_delay_seconds="${NPU_RESOURCE_RETRY_DELAY_SECONDS:-30}"
 
 mkdir -p "${pytest_log_dir}"
+if [ -n "${GITHUB_ENV:-}" ]; then
+  printf 'SELECTED_TEST_LOG_DIR=%s\n' "${pytest_log_dir}" >> "${GITHUB_ENV}"
+fi
 
 setup_vllm_cache_root() {
   if [ "${CI:-}" != "true" ]; then
@@ -40,6 +45,9 @@ setup_vllm_cache_root() {
   fi
   export VLLM_CACHE_ROOT
   VLLM_CACHE_ROOT="$(mktemp -d "${RUNNER_TEMP:-/tmp}/vllm-cache-${npu_type}-${num_npus}card.XXXXXX")"
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    printf 'SELECTED_TEST_VLLM_CACHE_ROOT=%s\n' "${VLLM_CACHE_ROOT}" >> "${GITHUB_ENV}"
+  fi
   echo "Using vLLM cache root: ${VLLM_CACHE_ROOT}"
 }
 
