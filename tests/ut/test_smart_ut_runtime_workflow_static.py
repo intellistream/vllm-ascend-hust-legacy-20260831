@@ -49,6 +49,7 @@ def test_a2_single_npu_container_uses_runner_scoped_runtime_contract() -> None:
     assert r"\( -name .mdl -o -name .msc -o -name .mv \)" in workflow
     assert 'echo "MODELSCOPE_CACHE=${modelscope_cache}" >> "$GITHUB_ENV"' in workflow
     assert 'test ! -L "${modelscope_cache}/models/Qwen/Qwen3-0___6B/.mdl"' in workflow
+    assert 'if [ -z "${MODELSCOPE_CACHE:-}" ]; then' in workflow
     assert 'rm -rf --one-file-system "$MODELSCOPE_CACHE"' in workflow
 
 
@@ -181,11 +182,13 @@ def test_pull_request_workflows_test_the_server_generated_merge_commit() -> None
     assert "ref_is_merge_commit:" in selected_workflow
     assert "CHECKOUT_REF: ${{ inputs.ref || github.ref }}" in selected_workflow
     assert 'cat-file -e "${CHECKOUT_REF}^{commit}"' in selected_workflow
+    assert 'if [ -n "$EXPECTED_REF_SHA" ]' in selected_workflow
+    assert "expected ${EXPECTED_REF_SHA}" in selected_workflow
     assert "if: ${{ !inputs.ref_is_merge_commit }}" in selected_workflow
     for workflow in (pr_workflow, smart_ut_workflow):
-        assert "ref: ${{ github.sha }}" in workflow
+        assert "ref: ${{ github.ref }}" in workflow
+        assert "expected_ref_sha: ${{ github.sha }}" in workflow
         assert "ref_is_merge_commit: true" in workflow
-        assert "ref: ${{ github.ref }}" not in workflow
         assert "ref: ${{ github.event.pull_request.head.sha }}" not in workflow
 
 
