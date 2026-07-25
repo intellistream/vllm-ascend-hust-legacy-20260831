@@ -42,7 +42,6 @@ def test_propose_forwards_upstream_arguments_and_updates_tokens():
     token_ids_cpu = np.zeros((1, 8), dtype=np.int32)
 
     result = proposer.propose(
-        3,
         [[11]],
         num_tokens_no_spec,
         token_ids_cpu,
@@ -55,5 +54,4 @@ def test_propose_forwards_upstream_arguments_and_updates_tokens():
         [0],
         num_tokens_no_spec,
         token_ids_cpu,
-        3,
     )

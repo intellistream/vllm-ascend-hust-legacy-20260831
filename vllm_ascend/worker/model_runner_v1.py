@@ -1756,7 +1756,6 @@ class NPUModelRunner(GPUModelRunner):
 
                 assert isinstance(self.drafter, AscendNgramProposer)
                 draft_token_ids = self.drafter.propose(
-                    self.speculative_config.num_speculative_tokens,
                     valid_sampled_token_ids,
                     self.input_batch.num_tokens_no_spec,
                     self.input_batch.token_ids_cpu,
