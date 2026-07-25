@@ -93,7 +93,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
-from vllm.v1.worker import mamba_utils, pp_opt_profile
+from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
     get_total_cp_world_size,
 )
@@ -163,6 +163,7 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
+from vllm_ascend.worker import pp_opt_profile
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer

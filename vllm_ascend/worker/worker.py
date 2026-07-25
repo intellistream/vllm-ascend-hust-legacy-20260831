@@ -56,7 +56,6 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
-from vllm.v1.worker import pp_opt_profile
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -79,6 +78,7 @@ from vllm_ascend.utils import (
     setup_ascend_local_comm_res,
     vllm_version_is,
 )
+from vllm_ascend.worker import pp_opt_profile
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
