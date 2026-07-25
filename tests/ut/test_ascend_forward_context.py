@@ -5,6 +5,7 @@
 Verifies that get_mrv2_in_profile_run() and override_mrv2_in_profile_run()
 work correctly with and without torch.compile(fullgraph=True).
 """
+
 import torch
 
 from vllm_ascend.ascend_forward_context import (
@@ -78,17 +79,13 @@ def test_dynamo_fullgraph_compatible():
     # Default (flag=False): read + add 1, no multiply
     out_off = compiled(x)
     expected_off = x + 1
-    assert torch.allclose(out_off, expected_off), (
-        f"Expected {expected_off}, got {out_off}"
-    )
+    assert torch.allclose(out_off, expected_off), f"Expected {expected_off}, got {out_off}"
 
     # Flag=True: read + multiply by 2 + add 1
     with override_mrv2_in_profile_run(True):
         out_on = compiled(x)
         expected_on = x * 2 + 1
-        assert torch.allclose(out_on, expected_on), (
-            f"Expected {expected_on}, got {out_on}"
-        )
+        assert torch.allclose(out_on, expected_on), f"Expected {expected_on}, got {out_on}"
 
 
 def test_dynamo_fullgraph_compatible_after_exit():
@@ -108,9 +105,7 @@ def test_dynamo_fullgraph_compatible_after_exit():
     # After exit, flag is False again
     out = compiled(x)
     expected = x + 1
-    assert torch.allclose(out, expected), (
-        f"Expected {expected}, got {out}"
-    )
+    assert torch.allclose(out, expected), f"Expected {expected}, got {out}"
 
 
 def test_override_isolated_between_calls():

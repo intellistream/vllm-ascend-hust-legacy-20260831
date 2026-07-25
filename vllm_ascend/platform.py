@@ -538,8 +538,7 @@ class NPUPlatform(Platform):
             isinstance(layer, str) and layer for layer in layer_sharding
         ):
             raise ValueError(
-                "additional_config.layer_sharding must be a list of non-empty "
-                f"strings, got {layer_sharding!r}."
+                f"additional_config.layer_sharding must be a list of non-empty strings, got {layer_sharding!r}."
             )
 
     @classmethod
@@ -1390,10 +1389,6 @@ class NPUPlatform(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
-
-    @classmethod
-    def manual_seed_all(cls, seed: int) -> None:
-        pass
 
     @classmethod
     def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
