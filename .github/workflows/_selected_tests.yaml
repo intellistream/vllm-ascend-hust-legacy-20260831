@@ -64,8 +64,43 @@ permissions:
   contents: read
 
 jobs:
+  prepare-ascend-source:
+    name: Prepare exact Ascend source bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact vllm-ascend source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify and bundle exact source
+        env:
+          EXPECTED_REF_SHA: ${{ inputs.ref_is_merge_commit && github.sha || '' }}
+        run: |
+          set -euo pipefail
+          checkout_sha="$(git rev-parse HEAD)"
+          if [ -n "$EXPECTED_REF_SHA" ] && [ "$checkout_sha" != "$EXPECTED_REF_SHA" ]; then
+            echo "::error::Hosted checkout resolved ${checkout_sha}, expected ${EXPECTED_REF_SHA}"
+            exit 1
+          fi
+          git branch --force codex-exact-source "$checkout_sha"
+          git bundle create "${RUNNER_TEMP}/vllm-ascend-source.bundle" codex-exact-source
+          git bundle verify "${RUNNER_TEMP}/vllm-ascend-source.bundle"
+
+      - name: Upload exact source bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: selected-tests-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.vllm }}
+          path: ${{ runner.temp }}/vllm-ascend-source.bundle
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   selected-tests:
     name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }} card-${{ matrix.group.partition && format('(part {0})', matrix.group.partition) || '' }}
+    needs: prepare-ascend-source
     strategy:
       fail-fast: false
       matrix:
@@ -101,6 +136,12 @@ jobs:
         GIT_CONFIG_KEY_0: http.version
         GIT_CONFIG_VALUE_0: HTTP/1.1
     steps:
+      - name: Download exact Ascend source bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: selected-tests-source-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.vllm }}
+          path: ${{ runner.temp }}/exact-ascend-source
+
       - name: Checkout vllm-project/vllm-ascend repo
         env:
           CHECKOUT_REF: ${{ inputs.ref || github.ref }}
@@ -108,40 +149,51 @@ jobs:
         run: |
           set -euo pipefail
           cache=/__git-cache/vllm-ascend-hust.git
+          exact_bundle="${RUNNER_TEMP}/exact-ascend-source/vllm-ascend-source.bundle"
           # CHECKOUT_REF is injected through the step environment below.
           # shellcheck disable=SC2153
           checkout_ref="$CHECKOUT_REF"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "$cache"
-          if [ -n "$EXPECTED_REF_SHA" ] \
-            && [ -d "$cache" ] \
-            && git --git-dir="$cache" cat-file -e "${EXPECTED_REF_SHA}^{commit}"; then
-            checkout_ref="$EXPECTED_REF_SHA"
-          fi
-          if [[ "$checkout_ref" =~ ^[0-9a-f]{40}$ ]] \
-            && [ -d "$cache" ] \
-            && git --git-dir="$cache" cat-file -e "${checkout_ref}^{commit}"; then
-            checkout_sha=$(git --git-dir="$cache" rev-parse "${checkout_ref}^{commit}")
+          if [ -n "$EXPECTED_REF_SHA" ] && [ -f "$exact_bundle" ]; then
+            git bundle verify "$exact_bundle"
             git init .
             git remote remove origin 2>/dev/null || true
-            git remote add origin "$cache"
-            git fetch --no-tags origin "$checkout_sha"
+            git remote add origin "$exact_bundle"
+            git fetch --no-tags origin codex-exact-source
             git checkout --force --detach FETCH_HEAD
             git clean -ffdx
           else
-            git init .
-            git remote remove origin 2>/dev/null || true
-            git remote add origin https://github.com/${{ github.repository }}.git
-            for attempt in 1 2 3 4 5; do
-              if git fetch --no-tags --filter=blob:none --depth=1 origin "$CHECKOUT_REF"; then
-                git checkout --detach FETCH_HEAD
-                break
-              fi
-              if [ "$attempt" -eq 5 ]; then
-                exit 1
-              fi
-              sleep $((attempt * 5))
-            done
+            if [ -n "$EXPECTED_REF_SHA" ] \
+              && [ -d "$cache" ] \
+              && git --git-dir="$cache" cat-file -e "${EXPECTED_REF_SHA}^{commit}"; then
+              checkout_ref="$EXPECTED_REF_SHA"
+            fi
+            if [[ "$checkout_ref" =~ ^[0-9a-f]{40}$ ]] \
+              && [ -d "$cache" ] \
+              && git --git-dir="$cache" cat-file -e "${checkout_ref}^{commit}"; then
+              checkout_sha=$(git --git-dir="$cache" rev-parse "${checkout_ref}^{commit}")
+              git init .
+              git remote remove origin 2>/dev/null || true
+              git remote add origin "$cache"
+              git fetch --no-tags origin "$checkout_sha"
+              git checkout --force --detach FETCH_HEAD
+              git clean -ffdx
+            else
+              git init .
+              git remote remove origin 2>/dev/null || true
+              git remote add origin https://github.com/${{ github.repository }}.git
+              for attempt in 1 2 3 4 5; do
+                if git fetch --no-tags --filter=blob:none --depth=1 origin "$CHECKOUT_REF"; then
+                  git checkout --detach FETCH_HEAD
+                  break
+                fi
+                if [ "$attempt" -eq 5 ]; then
+                  exit 1
+                fi
+                sleep $((attempt * 5))
+              done
+            fi
           fi
           checkout_sha=$(git rev-parse HEAD)
           if [ -n "$EXPECTED_REF_SHA" ] && [ "$checkout_sha" != "$EXPECTED_REF_SHA" ]; then
