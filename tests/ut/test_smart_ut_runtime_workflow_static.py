@@ -38,9 +38,11 @@ def test_a2_single_npu_container_uses_runner_scoped_runtime_contract() -> None:
     assert "--device /dev/hisi_hdc" in workflow
     assert "/usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro" in workflow
     assert "/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64:ro" in workflow
-    assert "ASCEND_RT_VISIBLE_DEVICES" in workflow
+    assert "matrix.group.device_runner == true && '0'" in workflow
     assert "matrix.group.device_runner == true" in workflow
-    assert "/dev/davinci{0}" in workflow
+    assert "/dev/davinci{0}:/dev/davinci0" in workflow
+    assert "/data/actions-runners/modelscope-cache-npu{0}:/github/home/.cache/modelscope/hub" in workflow
+    assert "/github/home/.cache/modelscope/hub/models/Qwen/Qwen3-0___6B/config.json" in workflow
 
 
 def test_npu_preflight_is_fail_closed_and_runs_before_package_install() -> None:
