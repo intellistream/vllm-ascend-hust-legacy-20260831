@@ -509,11 +509,16 @@ jobs:
 
       - name: Remove per-job selected-test scratch
         if: always()
+        env:
+          SELECTED_TEST_NPU_TYPE: ${{ matrix.group.npu_type }}
+          SELECTED_TEST_NUM_NPUS: ${{ matrix.group.num_npus }}
         run: |
           set -euo pipefail
+          expected_log_dir="${RUNNER_TEMP}/selected-tests-${SELECTED_TEST_NPU_TYPE}-${SELECTED_TEST_NUM_NPUS}card-${SELECTED_TEST_LOG_SCOPE}"
+          expected_cache_prefix="${RUNNER_TEMP}/vllm-cache-${SELECTED_TEST_NPU_TYPE}-${SELECTED_TEST_NUM_NPUS}card."
           if [ -n "${SELECTED_TEST_LOG_DIR:-}" ]; then
             case "$SELECTED_TEST_LOG_DIR" in
-              "${RUNNER_TEMP}"/selected-tests-"${{ matrix.group.npu_type }}"-"${{ matrix.group.num_npus }}"card-"${SELECTED_TEST_LOG_SCOPE}")
+              "$expected_log_dir")
                 rm -rf --one-file-system "$SELECTED_TEST_LOG_DIR"
                 ;;
               *)
@@ -524,7 +529,7 @@ jobs:
           fi
           if [ -n "${SELECTED_TEST_VLLM_CACHE_ROOT:-}" ]; then
             case "$SELECTED_TEST_VLLM_CACHE_ROOT" in
-              "${RUNNER_TEMP}"/vllm-cache-"${{ matrix.group.npu_type }}"-"${{ matrix.group.num_npus }}"card.*)
+              "$expected_cache_prefix"*)
                 rm -rf --one-file-system "$SELECTED_TEST_VLLM_CACHE_ROOT"
                 ;;
               *)
