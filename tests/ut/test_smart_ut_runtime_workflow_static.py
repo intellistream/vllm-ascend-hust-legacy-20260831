@@ -24,6 +24,7 @@ RUN_SELECTED_TESTS_PATH = REPO_ROOT / ".github" / "workflows" / "scripts" / "run
 REJECTION_SAMPLER_UTILS_PATH = (
     REPO_ROOT / "vllm_ascend" / "worker" / "v2" / "spec_decode" / "rejection_sampler_utils.py"
 )
+BALANCE_SCHEDULER_PATH = REPO_ROOT / "vllm_ascend" / "patch" / "platform" / "patch_balance_schedule.py"
 
 
 def test_a2_single_npu_container_uses_runner_scoped_runtime_contract() -> None:
@@ -69,6 +70,16 @@ def test_device_checkout_prefers_the_runner_local_git_mirrors() -> None:
     assert workflow.count('git --git-dir="$cache" cat-file -e') == 2
     assert workflow.count("git fetch --no-tags --filter=blob:none --depth=1") == 2
     assert "uses: actions/checkout@" not in workflow
+
+
+def test_tag_checkout_exports_the_upstream_compatibility_version() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    checkout_start = workflow.index("- name: Checkout vllm-project/vllm repo")
+    install_start = workflow.index("- name: Install vllm-project/vllm from source")
+    checkout_block = workflow[checkout_start:install_start]
+    assert '[[ "$VLLM_REF" =~ ^v(' in checkout_block
+    assert 'echo "VLLM_VERSION=${BASH_REMATCH[1]}" >> "$GITHUB_ENV"' in checkout_block
 
 
 def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -> None:
@@ -122,6 +133,14 @@ def test_spec_decode_imports_helpers_exposed_by_both_pinned_vllm_revisions() -> 
     assert "_compute_global_lse," in import_block
     assert "_compute_global_logsumexp" not in import_block
     assert "_compute_local_logits_stats_kernel" not in import_block
+
+
+def test_disabled_balance_scheduler_preserves_the_upstream_schedule_signature() -> None:
+    source = BALANCE_SCHEDULER_PATH.read_text(encoding="utf-8")
+    fallback = source[source.index("def schedule(") : source.index("# NOTE(woosuk)")]
+
+    assert "return super().schedule()" in fallback
+    assert "return super().schedule(throttle_prefills)" not in fallback
 
 
 def test_device_runners_materialize_torch_npu_cache_links() -> None:
