@@ -174,6 +174,39 @@ def test_failure_summary_preserves_numeric_pytest_exit_status() -> None:
     assert 'exit "${status}"' in script
 
 
+def test_selected_device_tests_retry_only_transient_npu_memory_contention() -> None:
+    script = RUN_SELECTED_TESTS_PATH.read_text(encoding="utf-8")
+
+    assert 'npu_resource_retry_attempts="${NPU_RESOURCE_RETRY_ATTEMPTS:-3}"' in script
+    assert 'npu_resource_retry_delay_seconds="${NPU_RESOURCE_RETRY_DELAY_SECONDS:-30}"' in script
+    assert 'attempt_log="${log_file}.attempt"' in script
+    assert "Free memory on device .* is less than desired GPU memory utilization" in script
+    assert '"${attempt_log}"' in script
+    assert '"${mode}" != "with-device"' in script
+    assert "Transient NPU memory contention detected; keeping the runner busy" in script
+
+
+def test_smart_ut_uses_the_verified_vllm_main_commit() -> None:
+    workflow = SMART_UT_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert ".github/vllm-main-verified.commit" in workflow
+    assert "mapfile -t verified_lines" in workflow
+    assert "${#verified_lines[@]} != 1" in workflow
+    assert '[[ ! "${verified_lines[0]}" =~ ^[0-9a-f]{40}$ ]]' in workflow
+    assert "tr -d '[:space:]'" not in workflow
+    assert "main_commit: ${{ steps.vllm.outputs.main_commit }}" in workflow
+    assert "vllm: ${{ needs.scope.outputs.main_commit }}" in workflow
+    assert "d886c26d4d4fef7d079696beb4ece1cfb4b008a8" not in workflow
+
+
+def test_package_builds_do_not_auto_load_the_torch_device_backend() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    container_env = workflow[workflow.index("      env:") : workflow.index("    steps:")]
+    assert "TORCH_DEVICE_BACKEND_AUTOLOAD: 0" in container_env
+    assert "GIT_CONFIG_KEY_0: http.version" in container_env
+    assert "GIT_CONFIG_VALUE_0: HTTP/1.1" in container_env
+
 def test_pull_request_workflows_test_the_server_generated_merge_commit() -> None:
     selected_workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     pr_workflow = PR_TEST_WORKFLOW_PATH.read_text(encoding="utf-8")

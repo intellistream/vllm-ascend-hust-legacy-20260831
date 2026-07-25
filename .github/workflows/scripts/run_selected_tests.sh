@@ -29,6 +29,8 @@ failed_logs=()
 timing_entries=()
 test_index=0
 pytest_log_dir="${RUNNER_TEMP:-/tmp}/selected-tests-${npu_type}-${num_npus}card"
+npu_resource_retry_attempts="${NPU_RESOURCE_RETRY_ATTEMPTS:-3}"
+npu_resource_retry_delay_seconds="${NPU_RESOURCE_RETRY_DELAY_SECONDS:-30}"
 
 mkdir -p "${pytest_log_dir}"
 
@@ -89,10 +91,32 @@ run_pytest_target() {
   if [ "${record_timing}" = true ]; then
     start_time=$(date +%s%N)
   fi
-  set +e
-  pytest -sv --color=yes "${target}" 2>&1 | tee "${log_file}"
-  local status=${PIPESTATUS[0]}
-  set -e
+  : > "${log_file}"
+  local attempt_log="${log_file}.attempt"
+  local attempt=1
+  local status=0
+  while true; do
+    echo "pytest attempt ${attempt}/${npu_resource_retry_attempts}" | tee -a "${log_file}"
+    set +e
+    pytest -sv --color=yes "${target}" 2>&1 | tee "${attempt_log}" | tee -a "${log_file}"
+    status=${PIPESTATUS[0]}
+    set -e
+    if [ "${status}" -eq 0 ]; then
+      break
+    fi
+    if [ "${mode}" != "with-device" ] || [ "${attempt}" -ge "${npu_resource_retry_attempts}" ]; then
+      break
+    fi
+    if ! grep -qE \
+      "Free memory on device .* is less than desired GPU memory utilization" \
+      "${attempt_log}"; then
+      break
+    fi
+    echo "::warning::Transient NPU memory contention detected; keeping the runner busy and retrying ${target} after ${npu_resource_retry_delay_seconds}s." \
+      | tee -a "${log_file}"
+    sleep "${npu_resource_retry_delay_seconds}"
+    attempt=$((attempt + 1))
+  done
   if [ "${record_timing}" = true ]; then
     local elapsed_ns=$(( $(date +%s%N) - start_time ))
     local elapsed=$(( elapsed_ns / 1000000000 )).$(( (elapsed_ns % 1000000000) / 100000000 ))
