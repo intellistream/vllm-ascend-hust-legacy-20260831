@@ -193,6 +193,14 @@ def test_pull_request_workflows_test_the_server_generated_merge_commit() -> None
         assert "ref: ${{ github.event.pull_request.head.sha }}" not in workflow
 
 
+def test_labeled_e2e_retriggers_after_new_commits() -> None:
+    workflow = PR_TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "- synchronize" in workflow
+    assert "github.event.action == 'synchronize'" in workflow
+    assert "contains(github.event.pull_request.labels.*.name, 'e2e')" in workflow
+
+
 def test_hust_e2e_only_emits_groups_for_available_runner_families() -> None:
     workflow = PR_TEST_WORKFLOW_PATH.read_text(encoding="utf-8")
 
