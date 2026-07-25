@@ -1066,7 +1066,7 @@ class NPUPlatform(Platform):
             dict[str, Any]: _description_
         """
         # NOTE(Ronald1995): avoid circular import.
-        from vllm_ascend.ascend_forward_context import get_mc2_mask, select_moe_comm_method
+        from vllm_ascend.ascend_forward_context import get_mc2_mask, get_mrv2_in_profile_run, select_moe_comm_method
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 
