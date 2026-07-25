@@ -69,15 +69,16 @@ def test_npu_preflight_is_fail_closed_and_runs_before_package_install() -> None:
 
 def test_device_checkout_prefers_the_runner_local_git_mirrors() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    selected_job = workflow[workflow.index("  selected-tests:") :]
 
     assert "cache=/__git-cache/vllm-ascend-hust.git" in workflow
     assert "cache=/__git-cache/vllm.git" in workflow
     assert workflow.count('git --git-dir="$cache" cat-file -e') == 3
     assert 'cat-file -e "${EXPECTED_REF_SHA}^{commit}"' in workflow
     assert '[[ "$checkout_ref" =~ ^[0-9a-f]{40}$ ]]' in workflow
-    assert workflow.count("git remote remove origin 2>/dev/null || true") == 4
+    assert workflow.count("git remote remove origin 2>/dev/null || true") == 5
     assert workflow.count("git fetch --no-tags --filter=blob:none --depth=1") == 2
-    assert "uses: actions/checkout@" not in workflow
+    assert "uses: actions/checkout@" not in selected_job
 
 
 def test_tag_checkout_exports_the_upstream_compatibility_version() -> None:
@@ -96,7 +97,8 @@ def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -
     assert (
         "(matrix.group.device_runner == true || matrix.group.runner == 'linux-aarch64-a2b3-1') && 'https://pypi.org/simple'"
     ) in workflow
-    container_env = workflow[workflow.index("      env:") : workflow.index("    steps:")]
+    selected_job = workflow[workflow.index("  selected-tests:") :]
+    container_env = selected_job[selected_job.index("      env:") : selected_job.index("    steps:")]
     standalone_extra_index = (
         "(matrix.group.device_runner == true || matrix.group.runner == 'linux-aarch64-a2b3-1') && "
         "'https://repo.huaweicloud.com/ascend/repos/pypi'"
@@ -186,6 +188,21 @@ def test_selected_device_tests_retry_only_transient_npu_memory_contention() -> N
     assert "Transient NPU memory contention detected; keeping the runner busy" in script
 
 
+def test_selected_tests_deliver_exact_merge_source_as_hosted_bundle() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    assert "prepare-ascend-source:" in workflow
+    assert "runs-on: ubuntu-latest" in workflow
+    assert "fetch-depth: 0" in workflow
+    assert 'git bundle create "${RUNNER_TEMP}/vllm-ascend-source.bundle" codex-exact-source' in workflow
+    assert "needs: prepare-ascend-source" in workflow
+    assert "Download exact Ascend source bundle" in workflow
+    assert 'exact_bundle="${RUNNER_TEMP}/exact-ascend-source/vllm-ascend-source.bundle"' in workflow
+    assert 'git remote add origin "$exact_bundle"' in workflow
+    assert "git fetch --no-tags origin codex-exact-source" in workflow
+    assert 'if [ -n "$EXPECTED_REF_SHA" ] && [ -f "$exact_bundle" ]; then' in workflow
+
+
 def test_smart_ut_uses_the_verified_vllm_main_commit() -> None:
     workflow = SMART_UT_WORKFLOW_PATH.read_text(encoding="utf-8")
 
@@ -202,7 +219,8 @@ def test_smart_ut_uses_the_verified_vllm_main_commit() -> None:
 def test_package_builds_do_not_auto_load_the_torch_device_backend() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
-    container_env = workflow[workflow.index("      env:") : workflow.index("    steps:")]
+    selected_job = workflow[workflow.index("  selected-tests:") :]
+    container_env = selected_job[selected_job.index("      env:") : selected_job.index("    steps:")]
     assert "TORCH_DEVICE_BACKEND_AUTOLOAD: 0" in container_env
     assert "GIT_CONFIG_KEY_0: http.version" in container_env
     assert "GIT_CONFIG_VALUE_0: HTTP/1.1" in container_env
