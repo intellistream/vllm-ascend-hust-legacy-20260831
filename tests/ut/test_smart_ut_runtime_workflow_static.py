@@ -20,6 +20,7 @@ WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "_selected_tests.yaml"
 SMART_UT_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr_smart_ut.yaml"
 PR_TEST_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr_test.yaml"
 RUNNER_LABEL_PATH = REPO_ROOT / ".github" / "workflows" / "scripts" / "runner_label.json"
+RUN_SELECTED_TESTS_PATH = REPO_ROOT / ".github" / "workflows" / "scripts" / "run_selected_tests.sh"
 
 
 def test_a2_single_npu_container_uses_runner_scoped_runtime_contract() -> None:
@@ -80,7 +81,7 @@ def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -
         workflow.index("- name: Install packages") : workflow.index("- name: Checkout vllm-project/vllm repo")
     ]
     assert 'if [ "${{ matrix.group.device_runner }}" = "true" ]' in install_block
-    assert "command -v \"$tool\"" in install_block
+    assert 'command -v "$tool"' in install_block
     assert "exit 0" in install_block
     assert '[ "${{ matrix.group.runner }}" != "linux-aarch64-a2b3-1" ]' in install_block
     assert "cache-service.nginx-pypi-cache.svc.cluster.local:8081" in install_block
@@ -89,35 +90,42 @@ def test_standalone_a2_runner_does_not_depend_on_cluster_local_package_cache() -
 def test_device_runners_restore_and_save_csrc_cache_on_cache_miss() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
 
-    assert (
-        "/data/actions-runners/csrc-cache-artifacts:/__csrc-cache:ro"
-        in workflow
-    )
-    restore_start = workflow.index(
-        "- name: Restore runner-local vllm-ascend csrc cache"
-    )
-    install_start = workflow.index(
-        "- name: Install vllm-project/vllm-ascend with device"
-    )
+    assert "/data/actions-runners/csrc-cache-artifacts:/__csrc-cache:ro" in workflow
+    restore_start = workflow.index("- name: Restore runner-local vllm-ascend csrc cache")
+    install_start = workflow.index("- name: Install vllm-project/vllm-ascend with device")
     restore_block = workflow[restore_start:install_start]
-    assert (
-        '/__csrc-cache/${{ steps.get_csrc_hash.outputs.CSRC_HASH }}/vllm_ascend'
-        in restore_block
-    )
+    assert "/__csrc-cache/${{ steps.get_csrc_hash.outputs.CSRC_HASH }}/vllm_ascend" in restore_block
     assert 'cp -a "${local_cache}/." vllm_ascend/' in restore_block
-    assert (
-        "matrix.group.device_runner == true && "
-        "steps.cache-csrc.outputs.cache-hit != 'true'"
-        in restore_block
-    )
+    assert "matrix.group.device_runner == true && steps.cache-csrc.outputs.cache-hit != 'true'" in restore_block
 
     save_start = workflow.index("- name: Save vllm-ascend csrc cache")
-    verify_start = workflow.index(
-        "- name: Verify required AscendC custom ops are registered (310p)"
-    )
+    verify_start = workflow.index("- name: Verify required AscendC custom ops are registered (310p)")
     save_block = workflow[save_start:verify_start]
     assert "steps.cache-csrc.outputs.cache-hit != 'true'" in save_block
     assert "steps.csrc-filter.outputs.csrc == 'true'" not in save_block
+
+
+def test_device_runners_materialize_torch_npu_cache_links() -> None:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+
+    start = workflow.index("- name: Materialize torch-npu paths rejected by symlink checks")
+    end = workflow.index("- name: Save vllm-ascend csrc cache")
+    block = workflow[start:end]
+    assert "matrix.group.device_runner == true" in block
+    assert 'root = Path(site.getsitepackages()[0]) / "torch_npu"' in block
+    assert "path.resolve(strict=True)" in block
+    assert "shutil.copy2(target, materialized, follow_symlinks=True)" in block
+    assert 'test ! -L "${torch_npu_root}/lib/libop_plugin_atb.so"' in block
+
+
+def test_failure_summary_preserves_numeric_pytest_exit_status() -> None:
+    script = RUN_SELECTED_TESTS_PATH.read_text(encoding="utf-8")
+
+    summary = script[script.index("print_summary()") : script.index("run_pytest_target()")]
+    assert "local result target result_status log_file" in summary
+    assert "read -r target result_status log_file" in summary
+    assert "read -r target status log_file" not in summary
+    assert 'exit "${status}"' in script
 
 
 def test_pull_request_workflows_test_the_server_generated_merge_commit() -> None:

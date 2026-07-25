@@ -302,6 +302,30 @@ jobs:
             uv pip install -e . --no-build-isolation
           fi
 
+      - name: Materialize torch-npu paths rejected by symlink checks
+        if: ${{ matrix.group.device_runner == true }}
+        run: |
+          python - <<'PY'
+          import shutil
+          import site
+          from pathlib import Path
+
+          root = Path(site.getsitepackages()[0]) / "torch_npu"
+          symlinks = sorted(path for path in root.rglob("*") if path.is_symlink())
+          for path in symlinks:
+              target = path.resolve(strict=True)
+              materialized = path.with_name(f".{path.name}.materialized")
+              if target.is_dir():
+                  shutil.copytree(target, materialized, symlinks=False)
+              else:
+                  shutil.copy2(target, materialized, follow_symlinks=True)
+              path.unlink()
+              materialized.replace(path)
+          print(f"Materialized {len(symlinks)} torch-npu cache links")
+          PY
+          torch_npu_root="$(python -c 'import site; print(site.getsitepackages()[0])')/torch_npu"
+          test ! -L "${torch_npu_root}/lib/libop_plugin_atb.so"
+
       - name: Save vllm-ascend csrc cache
         if: ${{ matrix.group.npu_type != 'cpu' && steps.cache-csrc.outputs.cache-hit != 'true' }}
         uses: runs-on/cache/save@v5
