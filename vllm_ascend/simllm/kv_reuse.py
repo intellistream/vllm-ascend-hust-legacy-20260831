@@ -121,7 +121,9 @@ class KVReuseEngine:
             )
         else:
             block_id_tensor = torch.as_tensor(
-                block_ids, dtype=torch.long, device=kv_cache_k.device,
+                block_ids,
+                dtype=torch.long,
+                device=kv_cache_k.device,
             )
         if block_id_tensor.numel() == 0:
             return
@@ -140,10 +142,16 @@ class KVReuseEngine:
             v_flat = torch.cat((v_flat, v_flat.new_zeros(pad_shape)), dim=0)
 
         k_blocks = k_flat[:block_token_count].reshape(
-            -1, block_size, k_flat.shape[1], k_flat.shape[2],
+            -1,
+            block_size,
+            k_flat.shape[1],
+            k_flat.shape[2],
         )
         v_blocks = v_flat[:block_token_count].reshape(
-            -1, block_size, v_flat.shape[1], v_flat.shape[2],
+            -1,
+            block_size,
+            v_flat.shape[1],
+            v_flat.shape[2],
         )
         kv_cache_k.index_copy_(0, block_id_tensor, k_blocks)
         kv_cache_v.index_copy_(0, block_id_tensor, v_blocks)
@@ -175,15 +183,11 @@ class KVReuseEngine:
         contiguous KV sequence assembled from paged blocks.
         """
         if seq_len == 0:
-            return kv_cache.new_zeros(
-                1, kv_cache.shape[2], 0, kv_cache.shape[3]
-            )
+            return kv_cache.new_zeros(1, kv_cache.shape[2], 0, kv_cache.shape[3])
 
         if isinstance(block_ids, torch.Tensor):
             if block_ids.numel() == 0:
-                return kv_cache.new_zeros(
-                    1, kv_cache.shape[2], 0, kv_cache.shape[3]
-                )
+                return kv_cache.new_zeros(1, kv_cache.shape[2], 0, kv_cache.shape[3])
             block_id_tensor = block_ids.reshape(-1).to(
                 device=kv_cache.device,
                 dtype=torch.long,
@@ -191,11 +195,11 @@ class KVReuseEngine:
             )
         else:
             if len(block_ids) == 0:
-                return kv_cache.new_zeros(
-                    1, kv_cache.shape[2], 0, kv_cache.shape[3]
-                )
+                return kv_cache.new_zeros(1, kv_cache.shape[2], 0, kv_cache.shape[3])
             block_id_tensor = torch.as_tensor(
-                block_ids, dtype=torch.long, device=kv_cache.device,
+                block_ids,
+                dtype=torch.long,
+                device=kv_cache.device,
             )
 
         blocks = kv_cache.index_select(0, block_id_tensor)
@@ -206,9 +210,7 @@ class KVReuseEngine:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _align_length(
-        self, t: torch.Tensor, target_len: int
-    ) -> torch.Tensor:
+    def _align_length(self, t: torch.Tensor, target_len: int) -> torch.Tensor:
         """Truncate or zero-pad *t* along the sequence-length dimension (dim=2)."""
         # t: [1, num_kv_heads, L, head_size]
         cur_len = t.shape[2]
@@ -218,7 +220,11 @@ class KVReuseEngine:
             return t[:, :, :target_len, :]
         # Pad with zeros at the end.
         pad = torch.zeros(
-            1, t.shape[1], target_len - cur_len, t.shape[3],
-            dtype=t.dtype, device=t.device,
+            1,
+            t.shape[1],
+            target_len - cur_len,
+            t.shape[3],
+            dtype=t.dtype,
+            device=t.device,
         )
         return torch.cat([t, pad], dim=2)

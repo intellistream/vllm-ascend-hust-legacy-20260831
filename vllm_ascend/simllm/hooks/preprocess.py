@@ -90,9 +90,7 @@ class SimLLMPreprocessor:
         for start, end in ranges:
             if end <= start:
                 # Empty request — produce zero embedding (should not happen in practice).
-                req_embs.append(
-                    torch.zeros(1, token_embs.shape[-1], device=token_embs.device)
-                )
+                req_embs.append(torch.zeros(1, token_embs.shape[-1], device=token_embs.device))
             else:
                 req_embs.append(token_embs[start:end])  # [S_i, D]
 

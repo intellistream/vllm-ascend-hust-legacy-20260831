@@ -54,9 +54,7 @@ def _make_mock_runner(
     runner.input_batch.req_ids = [f"req_{i}" for i in range(num_reqs)]
 
     # Flat input_ids: [0,1,2,3,4, 0,1,2,3,4,5,6, 0,1,2,3]
-    input_ids = torch.cat([
-        torch.arange(t, dtype=torch.long) for t in tokens_per_req
-    ])
+    input_ids = torch.cat([torch.arange(t, dtype=torch.long) for t in tokens_per_req])
     runner.input_batch.input_ids = input_ids
     runner.input_batch.num_tokens = torch.tensor(tokens_per_req)
 
@@ -70,31 +68,25 @@ def _make_mock_runner(
     # -- kv_caches --
     k_cache_shape = (num_blocks, block_size, num_kv_heads, head_size)
     v_cache_shape = (num_blocks, block_size, num_kv_heads, head_size)
-    runner.kv_caches = [
-        (torch.zeros(k_cache_shape), torch.zeros(v_cache_shape))
-        for _ in range(num_layers)
-    ]
+    runner.kv_caches = [(torch.zeros(k_cache_shape), torch.zeros(v_cache_shape)) for _ in range(num_layers)]
 
     # -- block_table --
     blk_table = MagicMock()
     blk_table_tensor = torch.zeros(num_reqs, num_blocks, dtype=torch.long)
     for i, t in enumerate(tokens_per_req):
         n_blocks = KVReuseEngine.num_blocks_needed(t, block_size)
-        blk_table_tensor[i, :n_blocks] = torch.arange(
-            i * 3, i * 3 + n_blocks
-        )
+        blk_table_tensor[i, :n_blocks] = torch.arange(i * 3, i * 3 + n_blocks)
     blk_table.get_device_tensor.return_value = blk_table_tensor
     runner.input_batch.block_table = {0: blk_table}
 
     # -- model --
     runner.model = MagicMock()
     runner.model.get_input_embeddings.return_value.weight = torch.randn(
-        1000, dim,
+        1000,
+        dim,
     )
-    runner.model.get_input_embeddings.return_value.forward = (
-        lambda ids: runner.model.get_input_embeddings.return_value.weight[
-            ids % 1000
-        ]
+    runner.model.get_input_embeddings.return_value.forward = lambda ids: (
+        runner.model.get_input_embeddings.return_value.weight[ids % 1000]
     )
     # Make get_input_embeddings() return a module whose forward does the lookup.
     embed = MagicMock()
@@ -174,7 +166,8 @@ class TestStoreThenMatch:
         kv_mgr = KVManager(max_cache_size=10)
         hasher = SimHashHasher(dim=64, num_bits=32)
         identifier = SimilarityIdentifier(
-            embedding_dim=64, cosine_threshold=0.8,
+            embedding_dim=64,
+            cosine_threshold=0.8,
         )
 
         # Store a task.
@@ -198,7 +191,9 @@ class TestStoreThenMatch:
 
         # Match with identical embedding.
         result = identifier.identify(
-            emb.clone(), torch.tensor([hsh]), kv_mgr,
+            emb.clone(),
+            torch.tensor([hsh]),
+            kv_mgr,
         )
         assert result[0].matched is True
         assert result[0].source_task_id == "task_1"
@@ -210,7 +205,8 @@ class TestStoreThenMatch:
         kv_mgr = KVManager(max_cache_size=10)
         hasher = SimHashHasher(dim=64, num_bits=32)
         identifier = SimilarityIdentifier(
-            embedding_dim=64, cosine_threshold=0.85,
+            embedding_dim=64,
+            cosine_threshold=0.85,
         )
 
         emb1 = torch.randn(1, 64)
@@ -219,11 +215,17 @@ class TestStoreThenMatch:
 
         from vllm_ascend.simllm.kv_manager import CachedTask
 
-        kv_mgr.store(CachedTask(
-            task_id="task_a", embedding=emb1, lsh_hash=hsh1,
-            top_k=torch.randn(1, 4, 8, 64), top_v=torch.randn(1, 4, 8, 64),
-            last_access_time=time.monotonic(), seq_len=8,
-        ))
+        kv_mgr.store(
+            CachedTask(
+                task_id="task_a",
+                embedding=emb1,
+                lsh_hash=hsh1,
+                top_k=torch.randn(1, 4, 8, 64),
+                top_v=torch.randn(1, 4, 8, 64),
+                last_access_time=time.monotonic(),
+                seq_len=8,
+            )
+        )
 
         emb2 = torch.randn(1, 64)
         emb2 = torch.nn.functional.normalize(emb2, dim=-1)
@@ -238,7 +240,8 @@ class TestStoreThenMatch:
         kv_mgr = KVManager(max_cache_size=10)
         hasher = SimHashHasher(dim=64, num_bits=32)
         identifier = SimilarityIdentifier(
-            embedding_dim=64, cosine_threshold=0.7,
+            embedding_dim=64,
+            cosine_threshold=0.7,
         )
 
         emb_base = torch.randn(1, 64)
@@ -255,15 +258,24 @@ class TestStoreThenMatch:
 
         from vllm_ascend.simllm.kv_manager import CachedTask
 
-        for i, (emb, hsh) in enumerate([
-            (emb_far, hsh_far), (emb_base, hsh_base), (emb_close, hsh_close),
-        ]):
-            kv_mgr.store(CachedTask(
-                task_id=f"task_{i}", embedding=emb, lsh_hash=hsh,
-                top_k=torch.randn(1, 4, 10, 64),
-                top_v=torch.randn(1, 4, 10, 64),
-                last_access_time=time.monotonic(), seq_len=10,
-            ))
+        for i, (emb, hsh) in enumerate(
+            [
+                (emb_far, hsh_far),
+                (emb_base, hsh_base),
+                (emb_close, hsh_close),
+            ]
+        ):
+            kv_mgr.store(
+                CachedTask(
+                    task_id=f"task_{i}",
+                    embedding=emb,
+                    lsh_hash=hsh,
+                    top_k=torch.randn(1, 4, 10, 64),
+                    top_v=torch.randn(1, 4, 10, 64),
+                    last_access_time=time.monotonic(),
+                    seq_len=10,
+                )
+            )
 
         # Query with emb_base → should match task_1 (emb_base itself) with cos≈1.
         result = identifier.identify(emb_base, torch.tensor([hsh_base]), kv_mgr)
@@ -342,7 +354,8 @@ class TestDecodeOnlyBatch:
     """Decode steps must not run prefill-only SimLLM cache handling."""
 
     def test_decode_only_batch_leaves_sandwich_slots_unchanged(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         from vllm_ascend.simllm.patch import patch_model_runner as patch_runner
         from vllm_ascend.simllm.sandwich import SandwichConfig
@@ -354,14 +367,13 @@ class TestDecodeOnlyBatch:
         runner.query_start_loc = torch.tensor([0, 1, 2])
         runner.seq_lens = torch.tensor([1, 1])
 
-        slot_mapping = {
-            f"model.layers.{idx}.self_attn": torch.arange(2) + idx * 10
-            for idx in range(4)
-        }
+        slot_mapping = {f"model.layers.{idx}.self_attn": torch.arange(2) + idx * 10 for idx in range(4)}
         original = {name: slots.clone() for name, slots in slot_mapping.items()}
         forward_context = MagicMock(slot_mapping=slot_mapping)
         monkeypatch.setattr(
-            patch_runner, "get_forward_context", lambda: forward_context,
+            patch_runner,
+            "get_forward_context",
+            lambda: forward_context,
         )
         monkeypatch.setattr(
             patch_runner,
@@ -383,14 +395,20 @@ class TestDecodeOnlyBatch:
         original_forward = MagicMock(return_value=hidden_states)
         extract_kv = MagicMock()
         monkeypatch.setattr(
-            patch_runner, "_simllm_config", MagicMock(enabled=True),
+            patch_runner,
+            "_simllm_config",
+            MagicMock(enabled=True),
         )
         monkeypatch.setattr(
-            patch_runner, "_original_model_forward", original_forward,
+            patch_runner,
+            "_original_model_forward",
+            original_forward,
         )
         monkeypatch.setattr(patch_runner, "_simllm_extract_kv", extract_kv)
         monkeypatch.setattr(
-            patch_runner, "_simllm_apply_sandwich_slots", MagicMock(),
+            patch_runner,
+            "_simllm_apply_sandwich_slots",
+            MagicMock(),
         )
 
         result = patch_runner._simllm_model_forward(runner, 2)
@@ -434,7 +452,8 @@ class TestSchedulerRewrite:
         )
 
         patch_runner._simllm_rewrite_scheduler_output(
-            runner, scheduler_output,
+            runner,
+            scheduler_output,
         )
 
         assert matched.num_computed_tokens == 1023
@@ -451,7 +470,9 @@ class TestSchedulerRewrite:
         calls = []
 
         monkeypatch.setattr(
-            patch_runner, "_simllm_config", MagicMock(enabled=True),
+            patch_runner,
+            "_simllm_config",
+            MagicMock(enabled=True),
         )
         monkeypatch.setattr(
             patch_runner,
@@ -529,7 +550,8 @@ class TestKVExtractionStoreMode:
             block_table=[
                 SimpleNamespace(
                     get_device_tensor=lambda: torch.tensor(
-                        [[0]], dtype=torch.long,
+                        [[0]],
+                        dtype=torch.long,
                     ),
                 ),
             ],
@@ -579,7 +601,8 @@ class TestKVExtractionStoreMode:
         )
 
         patch_runner._simllm_extract_kv(
-            self._runner_for_extract(), torch.randn(2, 8),
+            self._runner_for_extract(),
+            torch.randn(2, 8),
         )
 
         assert len(gather_calls) == 2
@@ -626,14 +649,12 @@ class TestSchedulerEmbeddingReuse:
 
         embeddings = torch.arange(12, dtype=torch.float32).reshape(3, 4)
         embedding_map = _simllm_build_embedding_map(
-            ["req-a", "req-b", "req-c"], embeddings,
+            ["req-a", "req-b", "req-c"],
+            embeddings,
         )
 
         source_storage = embeddings.untyped_storage().data_ptr()
-        mapped_storages = {
-            embedding.untyped_storage().data_ptr()
-            for embedding in embedding_map.values()
-        }
+        mapped_storages = {embedding.untyped_storage().data_ptr() for embedding in embedding_map.values()}
         assert source_storage not in mapped_storages
         assert len(mapped_storages) == 3
         assert all(embedding._base is None for embedding in embedding_map.values())
@@ -643,32 +664,40 @@ class TestSchedulerEmbeddingReuse:
         [
             (
                 "mean",
-                torch.tensor([
-                    [2**-0.5, 2**-0.5],
-                    [2 / 5**0.5, 1 / 5**0.5],
-                ]),
+                torch.tensor(
+                    [
+                        [2**-0.5, 2**-0.5],
+                        [2 / 5**0.5, 1 / 5**0.5],
+                    ]
+                ),
             ),
             (
                 "last",
-                torch.tensor([
-                    [0.0, 1.0],
-                    [2 / 5**0.5, 1 / 5**0.5],
-                ]),
+                torch.tensor(
+                    [
+                        [0.0, 1.0],
+                        [2 / 5**0.5, 1 / 5**0.5],
+                    ]
+                ),
             ),
         ],
     )
     def test_hidden_state_fallback_pools_each_original_slice(
-        self, pooling, expected,
+        self,
+        pooling,
+        expected,
     ):
         from vllm_ascend.simllm.patch.patch_model_runner import (
             _per_request_embeddings,
         )
 
-        hidden_states = torch.tensor([
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [2.0, 1.0],
-        ])
+        hidden_states = torch.tensor(
+            [
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [2.0, 1.0],
+            ]
+        )
 
         result = _per_request_embeddings(
             hidden_states,
@@ -679,7 +708,8 @@ class TestSchedulerEmbeddingReuse:
         torch.testing.assert_close(result, expected)
 
     def test_extract_kv_prefers_scheduler_embedding_and_falls_back_per_missing_entry(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         from vllm_ascend.simllm.config import SimLLMConfig
         from vllm_ascend.simllm.patch import patch_model_runner as patch_runner
@@ -706,10 +736,12 @@ class TestSchedulerEmbeddingReuse:
             ),
             seq_lens=torch.tensor([2, 1]),
             query_start_loc=torch.tensor([0, 2, 3]),
-            kv_caches=[(
-                torch.ones(2, 4, 1, 1),
-                torch.ones(2, 4, 1, 1),
-            )],
+            kv_caches=[
+                (
+                    torch.ones(2, 4, 1, 1),
+                    torch.ones(2, 4, 1, 1),
+                )
+            ],
             _simllm_batch_hashes=torch.tensor([11, 22]),
             _simllm_batch_hash_values=[11, 22],
             _simllm_batch_req_ids=["req-a", "req-b"],
@@ -717,11 +749,13 @@ class TestSchedulerEmbeddingReuse:
             _simllm_batch_embeddings=torch.tensor([[0.0, 1.0]]),
             _simllm_match_results={},
         )
-        hidden_states = torch.tensor([
-            [1.0, 0.0],
-            [1.0, 0.0],
-            [3.0, 4.0],
-        ])
+        hidden_states = torch.tensor(
+            [
+                [1.0, 0.0],
+                [1.0, 0.0],
+                [3.0, 4.0],
+            ]
+        )
 
         monkeypatch.setattr(patch_runner, "_kv_manager", manager)
         monkeypatch.setattr(
@@ -738,10 +772,12 @@ class TestSchedulerEmbeddingReuse:
 
         assert [task.task_id for task in manager.tasks] == ["req-a", "req-b"]
         torch.testing.assert_close(
-            manager.tasks[0].embedding, torch.tensor([[0.0, 1.0]]),
+            manager.tasks[0].embedding,
+            torch.tensor([[0.0, 1.0]]),
         )
         torch.testing.assert_close(
-            manager.tasks[1].embedding, torch.tensor([[0.6, 0.8]]),
+            manager.tasks[1].embedding,
+            torch.tensor([[0.6, 0.8]]),
         )
 
 
@@ -783,7 +819,8 @@ class TestProtectKVSlots:
         from vllm_ascend.simllm.similarity import MatchResult
 
         runner, slot_mapping = self._make_runner_with_slots(
-            num_reqs=3, tokens_per_req=(5, 7, 4),
+            num_reqs=3,
+            tokens_per_req=(5, 7, 4),
         )
 
         # Mock forward context.
@@ -812,13 +849,9 @@ class TestProtectKVSlots:
 
         # Req 1: tokens 5-11 (start=5), first 3 tokens should be -1
         for layer_name, sm in slot_mapping.items():
-            assert (sm[5:8] == -1).all(), (
-                f"Req 1 first 3 tokens should be -1 in {layer_name}"
-            )
+            assert (sm[5:8] == -1).all(), f"Req 1 first 3 tokens should be -1 in {layer_name}"
             # Remaining 4 tokens (indices 8-11) should be UNCHANGED
-            assert (sm[8:12] >= 100).all(), (
-                f"Req 1 last 4 tokens should be untouched in {layer_name}"
-            )
+            assert (sm[8:12] >= 100).all(), f"Req 1 last 4 tokens should be untouched in {layer_name}"
 
         # Req 2: tokens 12-15 (start=12), unmatched → should be UNTOUCHED
         for layer_name, sm in slot_mapping.items():
@@ -833,7 +866,8 @@ class TestProtectKVSlots:
         from vllm_ascend.simllm.similarity import MatchResult
 
         runner, slot_mapping = self._make_runner_with_slots(
-            num_reqs=1, tokens_per_req=(5,),
+            num_reqs=1,
+            tokens_per_req=(5,),
         )
 
         mock_ctx = MagicMock()
@@ -866,7 +900,8 @@ class TestProtectKVSlots:
         )
 
         runner, slot_mapping = self._make_runner_with_slots(
-            num_reqs=2, tokens_per_req=(3, 4),
+            num_reqs=2,
+            tokens_per_req=(3, 4),
         )
 
         mock_ctx = MagicMock()
@@ -880,9 +915,7 @@ class TestProtectKVSlots:
         _simllm_protect_kv_slots(runner)
 
         for k in slot_mapping:
-            assert torch.equal(slot_mapping[k], original[k]), (
-                f"slot_mapping[{k}] should be unchanged"
-            )
+            assert torch.equal(slot_mapping[k], original[k]), f"slot_mapping[{k}] should be unchanged"
 
     @patch("vllm_ascend.simllm.patch.patch_model_runner.get_forward_context")
     def test_empty_match_results_early_return(self, mock_get_fwd_ctx):
@@ -892,7 +925,8 @@ class TestProtectKVSlots:
         )
 
         runner, slot_mapping = self._make_runner_with_slots(
-            num_reqs=1, tokens_per_req=(3,),
+            num_reqs=1,
+            tokens_per_req=(3,),
         )
         mock_ctx = MagicMock()
         mock_ctx.slot_mapping = slot_mapping
@@ -915,7 +949,8 @@ class TestProtectKVSlots:
         from vllm_ascend.simllm.similarity import MatchResult
 
         runner, sm0 = self._make_runner_with_slots(
-            num_reqs=1, tokens_per_req=(4,),
+            num_reqs=1,
+            tokens_per_req=(4,),
         )
         sm1 = {k: v.clone() for k, v in sm0.items()}
 
@@ -955,13 +990,10 @@ class TestScopedInjection:
     def test_top_n_only(self):
         """With top_layers=3, num_layers=8: only top 3 layers receive KV."""
         num_layers, top_n = 8, 3
-        k_caches = [
-            (torch.zeros(3, 16, 4, 8), torch.zeros(3, 16, 4, 8))
-            for _ in range(num_layers)
-        ]
+        k_caches = [(torch.zeros(3, 16, 4, 8), torch.zeros(3, 16, 4, 8)) for _ in range(num_layers)]
 
         # Simulate the scoped injection logic.
-        target = k_caches[num_layers - top_n:]  # layers 5, 6, 7
+        target = k_caches[num_layers - top_n :]  # layers 5, 6, 7
         assert len(target) == 3
         # Bottom layers (0-4) should NOT be targeted.
         for idx in range(num_layers - top_n):
@@ -988,8 +1020,7 @@ class TestScopedInjection:
 class TestSandwichStorage:
     """Verify unmatched tasks store averaged keep_layers KV."""
 
-    def _build_kv_caches(self, num_layers=8, num_blocks=4,
-                         block_size=16, num_kv_heads=4, head_size=8):
+    def _build_kv_caches(self, num_layers=8, num_blocks=4, block_size=16, num_kv_heads=4, head_size=8):
         """Build kv_caches with non-zero KV in each layer."""
         return [
             (
@@ -1002,6 +1033,7 @@ class TestSandwichStorage:
     def test_keep_layers_bound_check(self):
         """keep_layers indices should all be within [0, num_layers)."""
         from vllm_ascend.simllm.sandwich import SandwichConfig
+
         cfg = SandwichConfig(bottom_layers=3, top_layers=3, num_layers=8)
         keep = cfg.keep_layers  # {0, 1, 2, 5, 6, 7}
         num_layers = 8
@@ -1012,6 +1044,7 @@ class TestSandwichStorage:
     def test_keep_layers_empty_fallback(self):
         """When keep_layers is empty (bottom=0, top=0), fallback to top-1."""
         from vllm_ascend.simllm.sandwich import SandwichConfig
+
         cfg = SandwichConfig(bottom_layers=0, top_layers=0, num_layers=8)
         keep = cfg.keep_layers
         num_layers = 8
@@ -1023,10 +1056,9 @@ class TestSandwichStorage:
     def test_matched_vs_unmatched_layer_selection(self):
         """Unmatched gathers from 6 layers; matched from 1 (top) layer."""
         from vllm_ascend.simllm.sandwich import SandwichConfig
+
         cfg = SandwichConfig(bottom_layers=3, top_layers=3, num_layers=32)
-        keep_layers = sorted(
-            {idx for idx in cfg.keep_layers if 0 <= idx < 32}
-        )
+        keep_layers = sorted({idx for idx in cfg.keep_layers if 0 <= idx < 32})
         assert len(keep_layers) == 6  # unmatched: 6 layers
         top_only = [31]  # matched: 1 layer
         assert top_only[0] not in keep_layers[:3]  # top layer is in the top-3

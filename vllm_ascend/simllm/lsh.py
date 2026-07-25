@@ -68,7 +68,8 @@ class SimHashHasher:
         # Pack bits: bit i → value 2^i
         if self._powers is None or self._powers.device != embeddings.device:
             self._powers = 2 ** torch.arange(
-                self.num_bits, device=embeddings.device,
+                self.num_bits,
+                device=embeddings.device,
             )
         powers = self._powers
         return (bits * powers).sum(dim=1)  # [B] int64
