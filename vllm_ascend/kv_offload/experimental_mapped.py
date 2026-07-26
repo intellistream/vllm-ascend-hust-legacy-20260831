@@ -283,7 +283,7 @@ class MappedOffloadingHandler(OffloadingHandler):
         self._gather_op = None
         self._unregister_op = None
 
-    @override
+    @override  # type: ignore[misc]  # mypy skips the external vLLM base
     def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
         src_spec, dst_spec = transfer_spec
         if isinstance(src_spec, GPULoadStoreSpec) and isinstance(dst_spec, CPULoadStoreSpec):
@@ -873,7 +873,7 @@ class MappedOffloadingHandler(OffloadingHandler):
 class MappedOffloadingSpec(CPUOffloadingSpec):
     """Explicit factory entry for selecting the fail-fast mapped handler."""
 
-    @override
+    @override  # type: ignore[misc]  # mypy skips the external vLLM base
     def get_handlers(
         self, kv_caches: CanonicalKVCaches
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
