@@ -1,5 +1,5 @@
 {
-  "entry_id": "d7d6814d-1bc1-4521-9867-7f01ed31a0cb",
+  "entry_id": "32280dfe-e0d0-40c0-8566-49d3e102bcee",
   "engine": "vllm-hust",
   "engine_version": "0.23.1.post1.dev1+ge4ce336",
   "config_type": "single_gpu",
@@ -30,9 +30,9 @@
     "dataset": "random"
   },
   "metrics": {
-    "ttft_ms": 16755.579260614468,
-    "tbt_ms": 435.6861105246935,
-    "throughput_tps": 2.225650724373876,
+    "ttft_ms": 643.9516286336584,
+    "tbt_ms": 433.7763218752419,
+    "throughput_tps": 2.207082045402775,
     "peak_mem_mb": 0,
     "error_rate": 0.0
   },
@@ -56,9 +56,9 @@
       "long_context_length": 256,
       "long_context_throughput_stable": true,
       "long_context_ttft_p95_ms": null,
-      "long_context_ttft_p99_ms": 22409.07074673567,
+      "long_context_ttft_p99_ms": 707.1139995241538,
       "long_context_tpot_p95_ms": null,
-      "long_context_tpot_p99_ms": 460.4082635750529,
+      "long_context_tpot_p99_ms": 459.6608788969461,
       "long_context_ttft_p95_stable": null,
       "long_context_ttft_p99_stable": true,
       "long_context_tpot_p95_stable": null,
@@ -70,7 +70,7 @@
   "cluster": null,
   "versions": {
     "protocol": "N/A",
-    "backend": "0.19.1.post1.dev417+g0f38988f",
+    "backend": "0.19.1.post1.dev417+g0f38988f.dirty",
     "core": "0.23.1.post1.dev1+ge4ce336",
     "benchmark": "0.1.0"
   },
@@ -83,7 +83,7 @@
     "driver_version": null
   },
   "metadata": {
-    "submitted_at": "2026-07-25T23:25:02Z",
+    "submitted_at": "2026-07-26T00:00:46Z",
     "submitter": "ShuhaoZhangTony",
     "data_source": "vllm-ascend-hust-ci-same-spec",
     "engine": "vllm-hust",
@@ -101,7 +101,7 @@
     "changelog_url": null,
     "notes": null,
     "verified": null,
-    "idempotency_key": "423d199ca82ab4d801e2780ec6c4e0dbe998792b7f8a776538fba4057655b5fd",
+    "idempotency_key": "f5ff16e91cb08aa9f2fe1d20ae9f03d099ca6434cc53b408a60b0115614fbfd1",
     "manifest_source": "generated-by-vllm-hust-benchmark/0.1.0",
     "runtime_provenance": {
       "python": "/root/miniconda3/envs/vllm-hust-dev/bin/python",
@@ -122,7 +122,7 @@
     "schema_version": "benchmark-same-spec/v1",
     "spec_id": "perfgate-ascend-qwen25-3b-910b2",
     "spec_label": "Performance gate Ascend baseline for Qwen2.5-3B on 910B2",
-    "spec_source": "/data/actions-runners/poy-112-21rc-npu1/_work/vllm-ascend-hust/vllm-ascend-hust/vllm-hust-benchmark/docs/official-baselines/perfgate-ascend-qwen25-3b-910b2.json",
+    "spec_source": "/data/actions-runners/poy-112-21rc-npu0/_work/vllm-ascend-hust/vllm-ascend-hust-ci-state/benchmarks/ci/ci-30179950869-1-0f38988f/pr-preview-same-spec.compat.json",
     "scenario": "random-online",
     "model": "Qwen/Qwen2.5-3B-Instruct",
     "model_parameters": "3B",
@@ -132,7 +132,7 @@
     "hardware_chip_model": "910B2",
     "chip_count": 1,
     "node_count": 1,
-    "resolved_spec_hash": "379d9398be48555d34279fd106dd20fbb9dcc0c70e032501d7a349450546f6ad",
+    "resolved_spec_hash": "39ca7aff7710225208f482d49c9402a256e44277aa10ebf482fe47b3d983ec46",
     "resolved_server_parameters": {
       "tensor_parallel_size": 1,
       "enforce_eager": "",
@@ -140,10 +140,12 @@
       "disable_log_stats": "",
       "disable_log_requests": "",
       "host": "0.0.0.0",
-      "port": 52937,
+      "port": 60365,
       "dtype": "bfloat16",
       "max_model_len": 256,
       "max_num_seqs": 1,
+      "no_enable_chunked_prefill": true,
+      "no_enable_prefix_caching": true,
       "model": "Qwen/Qwen2.5-3B-Instruct"
     },
     "resolved_client_parameters": {
@@ -151,10 +153,11 @@
       "endpoint": "/v1/completions",
       "dataset_name": "random",
       "num_prompts": 8,
-      "request_rate": "inf",
-      "max_concurrency": 4,
+      "request_rate": 1,
+      "max_concurrency": 1,
       "host": "127.0.0.1",
-      "port": 52937,
+      "port": 60365,
+      "temperature": 0,
       "model": "Qwen/Qwen2.5-3B-Instruct",
       "random_input_len": 64,
       "random_output_len": 16
