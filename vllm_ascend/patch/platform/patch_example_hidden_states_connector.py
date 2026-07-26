@@ -20,6 +20,7 @@ from typing import Any
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
 )
+from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
 
 
@@ -52,7 +53,68 @@ def _find_hidden_state_group_id(kv_cache_config: Any | None) -> int:
     )
 
 
+def _patch_hidden_state_block_tracking() -> None:
+    """Backport vLLM #45849 block tracking without double-appending.
+
+    Deferred extraction consumes the block IDs allocated since the previous
+    scheduler step. Older paired cores only record attention-cache blocks, so
+    the hidden-state group receives an empty list and the connector saves
+    zeros. The before/after check also makes this wrapper safe on cores that
+    already include the upstream fix.
+    """
+    manager_cls = SingleTypeKVCacheManager
+    if getattr(manager_cls, "_ascend_hidden_state_block_tracking_patch", False):
+        return
+
+    original_allocate_new_blocks = manager_cls.allocate_new_blocks
+    original_allocate_new_computed_blocks = manager_cls.allocate_new_computed_blocks
+
+    def _patched_allocate_new_blocks(self: Any, *args: Any, **kwargs: Any) -> Any:
+        tracked_before = len(self.new_block_ids)
+        new_blocks = original_allocate_new_blocks(self, *args, **kwargs)
+        if type(self.kv_cache_spec) is HiddenStateCacheSpec and len(self.new_block_ids) == tracked_before:
+            self.new_block_ids.extend(block.block_id for block in new_blocks)
+        return new_blocks
+
+    def _patched_allocate_new_computed_blocks(
+        self: Any,
+        request_id: str,
+        new_computed_blocks: Any,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> Any:
+        tracked_before = len(self.new_block_ids)
+        req_blocks = self.req_to_blocks[request_id]
+        existing_blocks = {id(block) for block in req_blocks}
+        computed_blocks = {id(block) for block in new_computed_blocks}
+        result = original_allocate_new_computed_blocks(
+            self,
+            request_id,
+            new_computed_blocks,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+        if (
+            type(self.kv_cache_spec) is HiddenStateCacheSpec
+            and num_external_computed_tokens > 0
+            and len(self.new_block_ids) == tracked_before
+        ):
+            self.new_block_ids.extend(
+                block.block_id
+                for block in self.req_to_blocks[request_id]
+                if id(block) not in existing_blocks
+                and id(block) not in computed_blocks
+                and block is not self._null_block
+            )
+        return result
+
+    manager_cls.allocate_new_blocks = _patched_allocate_new_blocks  # type: ignore[method-assign]
+    manager_cls.allocate_new_computed_blocks = _patched_allocate_new_computed_blocks  # type: ignore[method-assign]
+    manager_cls._ascend_hidden_state_block_tracking_patch = True  # type: ignore[attr-defined]
+
+
 def _apply_patch() -> None:
+    _patch_hidden_state_block_tracking()
     connector_cls = example_hidden_states_connector.ExampleHiddenStatesConnector
 
     # vLLM #46301 already provides the complete fix.
