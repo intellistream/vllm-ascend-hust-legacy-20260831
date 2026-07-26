@@ -67,7 +67,7 @@ def _patch_hidden_state_block_tracking() -> None:
         return
 
     original_allocate_new_blocks = manager_cls.allocate_new_blocks
-    original_allocate_new_computed_blocks = manager_cls.allocate_new_computed_blocks
+    original_allocate_new_computed_blocks = getattr(manager_cls, "allocate_new_computed_blocks", None)
 
     def _patched_allocate_new_blocks(self: Any, *args: Any, **kwargs: Any) -> Any:
         tracked_before = len(self.new_block_ids)
@@ -76,40 +76,45 @@ def _patch_hidden_state_block_tracking() -> None:
             self.new_block_ids.extend(block.block_id for block in new_blocks)
         return new_blocks
 
-    def _patched_allocate_new_computed_blocks(
-        self: Any,
-        request_id: str,
-        new_computed_blocks: Any,
-        num_local_computed_tokens: int,
-        num_external_computed_tokens: int,
-    ) -> Any:
-        tracked_before = len(self.new_block_ids)
-        req_blocks = self.req_to_blocks[request_id]
-        existing_blocks = {id(block) for block in req_blocks}
-        computed_blocks = {id(block) for block in new_computed_blocks}
-        result = original_allocate_new_computed_blocks(
-            self,
-            request_id,
-            new_computed_blocks,
-            num_local_computed_tokens,
-            num_external_computed_tokens,
-        )
-        if (
-            type(self.kv_cache_spec) is HiddenStateCacheSpec
-            and num_external_computed_tokens > 0
-            and len(self.new_block_ids) == tracked_before
-        ):
-            self.new_block_ids.extend(
-                block.block_id
-                for block in self.req_to_blocks[request_id]
-                if id(block) not in existing_blocks
-                and id(block) not in computed_blocks
-                and block is not self._null_block
+    if original_allocate_new_computed_blocks is not None:
+
+        def _patched_allocate_new_computed_blocks(
+            self: Any,
+            request_id: str,
+            new_computed_blocks: Any,
+            num_local_computed_tokens: int,
+            num_external_computed_tokens: int,
+        ) -> Any:
+            tracked_before = len(self.new_block_ids)
+            req_blocks = self.req_to_blocks[request_id]
+            existing_blocks = {id(block) for block in req_blocks}
+            computed_blocks = {id(block) for block in new_computed_blocks}
+            result = original_allocate_new_computed_blocks(
+                self,
+                request_id,
+                new_computed_blocks,
+                num_local_computed_tokens,
+                num_external_computed_tokens,
             )
-        return result
+            if (
+                type(self.kv_cache_spec) is HiddenStateCacheSpec
+                and num_external_computed_tokens > 0
+                and len(self.new_block_ids) == tracked_before
+            ):
+                self.new_block_ids.extend(
+                    block.block_id
+                    for block in self.req_to_blocks[request_id]
+                    if id(block) not in existing_blocks
+                    and id(block) not in computed_blocks
+                    and block is not self._null_block
+                )
+            return result
 
     manager_cls.allocate_new_blocks = _patched_allocate_new_blocks  # type: ignore[method-assign]
-    manager_cls.allocate_new_computed_blocks = _patched_allocate_new_computed_blocks  # type: ignore[method-assign]
+    if original_allocate_new_computed_blocks is not None:
+        manager_cls.allocate_new_computed_blocks = (  # type: ignore[attr-defined]
+            _patched_allocate_new_computed_blocks
+        )
     manager_cls._ascend_hidden_state_block_tracking_patch = True  # type: ignore[attr-defined]
 
 
