@@ -24,6 +24,13 @@
 #include "torch_npu/csrc/aten/common/from_blob.h"
 
 namespace vllm_ascend {
+  at::Tensor mlp_boundary_writeback_elision(
+    const at::Tensor &hidden_states,
+    const at::Tensor &gate_up_weight,
+    const c10::optional<at::Tensor> &gate_up_bias,
+    const at::Tensor &down_weight,
+    const c10::optional<at::Tensor> &down_bias);
+
   extern void get_masked_input_and_mask_impl(
     void* stream,
     void* input,

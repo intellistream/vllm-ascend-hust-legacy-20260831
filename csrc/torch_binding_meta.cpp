@@ -120,6 +120,30 @@ void device_print_tensor_meta(const at::Tensor& tensor)
     (void)tensor;
 }
 
+at::Tensor mlp_boundary_writeback_elision_meta(
+    const at::Tensor &hidden_states,
+    const at::Tensor &gate_up_weight,
+    const c10::optional<at::Tensor> &gate_up_bias,
+    const at::Tensor &down_weight,
+    const c10::optional<at::Tensor> &down_bias)
+{
+    (void)gate_up_weight;
+    (void)gate_up_bias;
+    (void)down_bias;
+
+    TORCH_CHECK(hidden_states.dim() == 2,
+        "mlp_boundary_writeback_elision meta expects rank-2 hidden_states, got dim=",
+        hidden_states.dim());
+    TORCH_CHECK(down_weight.dim() == 2,
+        "mlp_boundary_writeback_elision meta expects rank-2 down_weight, got dim=",
+        down_weight.dim());
+    std::vector<c10::SymInt> output_shape = {
+        hidden_states.sym_size(0),
+        down_weight.sym_size(0),
+    };
+    return at::empty_symint(output_shape, hidden_states.options());
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale, const at::Tensor &x_scale,
     const at::Tensor &group_list, const c10::optional<at::Tensor> &bias, const c10::optional<at::Tensor> &offset,
@@ -1703,6 +1727,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors
     ops.impl("device_print_tensor", &vllm_ascend::meta::device_print_tensor_meta);
+    // MLP materialization writeback-elision skeleton meta implementation
+    ops.impl("mlp_boundary_writeback_elision", &vllm_ascend::meta::mlp_boundary_writeback_elision_meta);
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel meta implementations
     ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);

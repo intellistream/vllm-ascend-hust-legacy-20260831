@@ -18,7 +18,11 @@
 #include <torch/library.h>
 #include <torch/version.h>
 #include <torch/torch.h>
+#include <ATen/record_function.h>
+#include <ATen/ops/linear.h>
+#include <ATen/ops/silu.h>
 #include <ATen/core/Formatting.h>
+#include <ATen/core/dispatch/Dispatcher.h>
 #include "acl/acl.h"
 #include "acl/acl_rt.h"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
@@ -56,11 +60,13 @@
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
 #include <array>
+#include <cstdlib>
 #include <cmath>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -119,6 +125,125 @@ void enqueue_device_print(std::unique_ptr<DevicePrintPayload> payload,
         delete raw_payload;
     }
     TORCH_CHECK(ret == ACL_SUCCESS, "aclrtLaunchHostFunc failed, error code: ", ret);
+}
+
+at::Tensor swiglu_fallback(const at::Tensor& gate_up)
+{
+    const int64_t gate_up_width = gate_up.size(-1);
+    const int64_t half_width = gate_up_width / 2;
+    const at::Tensor gate = gate_up.slice(-1, 0, half_width);
+    const at::Tensor up = gate_up.slice(-1, half_width, gate_up_width);
+    return at::silu(gate) * up;
+}
+
+at::Tensor dispatch_npu_swiglu_or_fallback(const at::Tensor& gate_up)
+{
+    if (gate_up.device().type() == c10::DeviceType::PrivateUse1) {
+        try {
+            static auto op = c10::Dispatcher::singleton()
+                .findSchemaOrThrow("npu::npu_swiglu", "")
+                .typed<at::Tensor(const at::Tensor&, int64_t)>();
+            return op.call(gate_up, -1);
+        } catch (const c10::Error&) {
+            return swiglu_fallback(gate_up);
+        }
+    }
+    return swiglu_fallback(gate_up);
+}
+
+std::string mlp_writeback_lowering_mode()
+{
+    const char* mode = std::getenv("VLLM_ASCEND_MLP_WRITEBACK_ELISION_LOWERING");
+    if (mode == nullptr || std::string(mode).empty()) {
+        return "composite_fallback";
+    }
+    return std::string(mode);
+}
+
+bool mlp_writeback_true_lowering_requested(const std::string& mode)
+{
+    return mode == "true_dense_bf16" || mode == "true_writeback_elision";
+}
+
+void check_optional_mlp_bias(
+    const c10::optional<at::Tensor>& bias,
+    int64_t expected_width,
+    const char* name)
+{
+    if (!bias.has_value()) {
+        return;
+    }
+    const at::Tensor& tensor = bias.value();
+    TORCH_CHECK(tensor.dim() == 1,
+        "mlp_boundary_writeback_elision expects ", name,
+        " to be rank-1 when present, got dim=", tensor.dim());
+    TORCH_CHECK(tensor.size(0) == expected_width,
+        "mlp_boundary_writeback_elision expects ", name,
+        ".shape[0] to be ", expected_width, ", got ", tensor.size(0));
+    TORCH_CHECK(tensor.scalar_type() == at::kBFloat16,
+        "mlp_boundary_writeback_elision expects ", name,
+        " to be BF16, got ", tensor.scalar_type());
+    TORCH_CHECK(tensor.device().type() == c10::DeviceType::PrivateUse1,
+        "mlp_boundary_writeback_elision expects ", name,
+        " to be an NPU/PrivateUse1 tensor, got ", tensor.device());
+}
+
+void validate_mlp_boundary_dense_bf16_contract(
+    const at::Tensor& hidden_states,
+    const at::Tensor& gate_up_weight,
+    const c10::optional<at::Tensor>& gate_up_bias,
+    const at::Tensor& down_weight,
+    const c10::optional<at::Tensor>& down_bias,
+    bool require_contiguous)
+{
+    TORCH_CHECK(hidden_states.dim() == 2,
+        "mlp_boundary_writeback_elision expects rank-2 hidden_states, got dim=",
+        hidden_states.dim());
+    TORCH_CHECK(gate_up_weight.dim() == 2,
+        "mlp_boundary_writeback_elision expects rank-2 gate_up_weight, got dim=",
+        gate_up_weight.dim());
+    TORCH_CHECK(down_weight.dim() == 2,
+        "mlp_boundary_writeback_elision expects rank-2 down_weight, got dim=",
+        down_weight.dim());
+    TORCH_CHECK(hidden_states.device().type() == c10::DeviceType::PrivateUse1,
+        "mlp_boundary_writeback_elision expects hidden_states on NPU/PrivateUse1, got ",
+        hidden_states.device());
+    TORCH_CHECK(gate_up_weight.device().type() == c10::DeviceType::PrivateUse1,
+        "mlp_boundary_writeback_elision expects gate_up_weight on NPU/PrivateUse1, got ",
+        gate_up_weight.device());
+    TORCH_CHECK(down_weight.device().type() == c10::DeviceType::PrivateUse1,
+        "mlp_boundary_writeback_elision expects down_weight on NPU/PrivateUse1, got ",
+        down_weight.device());
+    TORCH_CHECK(hidden_states.scalar_type() == at::kBFloat16,
+        "mlp_boundary_writeback_elision is admitted only for BF16 hidden_states, got ",
+        hidden_states.scalar_type());
+    TORCH_CHECK(gate_up_weight.scalar_type() == at::kBFloat16,
+        "mlp_boundary_writeback_elision is admitted only for BF16 gate_up_weight, got ",
+        gate_up_weight.scalar_type());
+    TORCH_CHECK(down_weight.scalar_type() == at::kBFloat16,
+        "mlp_boundary_writeback_elision is admitted only for BF16 down_weight, got ",
+        down_weight.scalar_type());
+    TORCH_CHECK(gate_up_weight.size(1) == hidden_states.size(1),
+        "mlp_boundary_writeback_elision expects gate_up_weight.shape[1] to match "
+        "hidden_states.shape[1], got ", gate_up_weight.size(1), " vs ",
+        hidden_states.size(1));
+    TORCH_CHECK(gate_up_weight.size(0) % 2 == 0,
+        "mlp_boundary_writeback_elision expects gate_up_weight.shape[0] to be even, got ",
+        gate_up_weight.size(0));
+    TORCH_CHECK(down_weight.size(1) * 2 == gate_up_weight.size(0),
+        "mlp_boundary_writeback_elision expects down_weight.shape[1] * 2 to match "
+        "gate_up_weight.shape[0], got ", down_weight.size(1), " and ",
+        gate_up_weight.size(0));
+    check_optional_mlp_bias(gate_up_bias, gate_up_weight.size(0), "gate_up_bias");
+    check_optional_mlp_bias(down_bias, down_weight.size(0), "down_bias");
+    if (require_contiguous) {
+        TORCH_CHECK(hidden_states.is_contiguous(),
+            "true dense BF16 MLP lowering currently requires contiguous hidden_states");
+        TORCH_CHECK(gate_up_weight.is_contiguous(),
+            "true dense BF16 MLP lowering currently requires contiguous gate_up_weight");
+        TORCH_CHECK(down_weight.is_contiguous(),
+            "true dense BF16 MLP lowering currently requires contiguous down_weight");
+    }
 }
 
 }
@@ -2204,6 +2329,67 @@ std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
     return std::vector<int64_t>(desc.storage_sizes_.begin(), desc.storage_sizes_.end());
 }
 
+at::Tensor mlp_boundary_writeback_elision(
+    const at::Tensor &hidden_states,
+    const at::Tensor &gate_up_weight,
+    const c10::optional<at::Tensor> &gate_up_bias,
+    const at::Tensor &down_weight,
+    const c10::optional<at::Tensor> &down_bias)
+{
+    const std::string lowering_mode = mlp_writeback_lowering_mode();
+    validate_mlp_boundary_dense_bf16_contract(
+        hidden_states,
+        gate_up_weight,
+        gate_up_bias,
+        down_weight,
+        down_bias,
+        lowering_mode == "strict_composite_fallback" ||
+            mlp_writeback_true_lowering_requested(lowering_mode));
+
+    if (mlp_writeback_true_lowering_requested(lowering_mode)) {
+        RECORD_FUNCTION(
+            "mlp_boundary_writeback_elision: true_dense_bf16_no_public_lowering",
+            c10::ArrayRef<c10::IValue>({}));
+        TORCH_CHECK(false,
+            "NO_GO: dense BF16 writeback-eliding MLP lowering is not "
+            "implementable with the currently exposed torch_npu/ACL public "
+            "operator contract. npu::npu_swiglu returns a standalone Tensor; "
+            "npu::npu_fused_matmul only supports single-matmul epilogues such "
+            "as gelu/add/mul; grouped_matmul_swiglu_quant* is quantized/grouped "
+            "and does not match the dense BF16 Qwen2 MLP contract. Required "
+            "next layer: a custom CANN/AscendC/Triton-style kernel or compiler "
+            "lowering that keeps the SwiGLU activation private to the carrier "
+            "or stages it directly into the down projection input.");
+    }
+
+    RECORD_FUNCTION(
+        "mlp_boundary_writeback_elision: fused_activation_composite_fallback",
+        c10::ArrayRef<c10::IValue>({}));
+
+    at::Tensor gate_up;
+    {
+        RECORD_FUNCTION(
+            "mlp_boundary_writeback_elision: gate_up_linear",
+            c10::ArrayRef<c10::IValue>({}));
+        gate_up = at::linear(hidden_states, gate_up_weight, gate_up_bias);
+    }
+
+    at::Tensor activated;
+    {
+        RECORD_FUNCTION(
+            "mlp_boundary_writeback_elision: fused_swiglu_fallback",
+            c10::ArrayRef<c10::IValue>({}));
+        activated = dispatch_npu_swiglu_or_fallback(gate_up);
+    }
+
+    {
+        RECORD_FUNCTION(
+            "mlp_boundary_writeback_elision: down_linear",
+            c10::ArrayRef<c10::IValue>({}));
+        return at::linear(activated, down_weight, down_bias);
+    }
+}
+
 
 } // namespace vllm_ascend
 
@@ -2211,6 +2397,15 @@ std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
 // Pybind on Ascend 310P
 TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
+    ops.def(
+        "mlp_boundary_writeback_elision(Tensor hidden_states, "
+        "                               Tensor gate_up_weight, "
+        "                               Tensor? gate_up_bias, "
+        "                               Tensor down_weight, "
+        "                               Tensor? down_bias) -> Tensor");
+    ops.impl("mlp_boundary_writeback_elision", torch::kPrivateUse1,
+             &vllm_ascend::mlp_boundary_writeback_elision);
+
     ops.def(
         "npu_causal_conv1d_310(Tensor x, "
         "                         Tensor weight, "
@@ -2255,6 +2450,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
 
     // vLLM-Ascend custom ops
+    ops.def(
+        "mlp_boundary_writeback_elision(Tensor hidden_states, "
+        "                               Tensor gate_up_weight, "
+        "                               Tensor? gate_up_bias, "
+        "                               Tensor down_weight, "
+        "                               Tensor? down_bias) -> Tensor");
+    ops.impl("mlp_boundary_writeback_elision", torch::kPrivateUse1,
+             &vllm_ascend::mlp_boundary_writeback_elision);
+
     // Gemma RmsNorm
     ops.def(
         "npu_gemma_rms_norm(Tensor x, "
