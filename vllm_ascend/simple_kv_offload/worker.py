@@ -165,6 +165,11 @@ class SimpleCPUOffloadNPUWorker(SimpleCPUOffloadWorker):
 
     def _flush_and_sync_all(self) -> None:
         self._backend.check_health()
+        # The NPU backend accepts work on a background queue. Wait until every
+        # accepted job has recorded and published its completion event before
+        # the parent walks the event lists; otherwise preemption can observe
+        # empty lists and reuse a block still touched by the copy thread.
+        self._backend.drain()
         super()._flush_and_sync_all()
         self._backend.check_health()
 

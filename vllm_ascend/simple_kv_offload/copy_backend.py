@@ -42,8 +42,10 @@ class NPUDmaCopyBackend:
         self._queue: queue.SimpleQueue | None = None
         self._thread: threading.Thread | None = None
         self._state_lock = threading.Lock()
+        self._idle_condition = threading.Condition(self._state_lock)
         self._shutdown_lock = threading.Lock()
         self._background_error: Exception | None = None
+        self._outstanding_jobs: int = 0
         self._shutdown: bool = False
         self._shutdown_complete: bool = False
 
@@ -96,21 +98,45 @@ class NPUDmaCopyBackend:
             copy_queue = self._queue
             if params is None or copy_queue is None:
                 raise RuntimeError("NPU KV offload copy backend is not initialized")
-            copy_queue.put(
-                (
-                    src_blocks,
-                    dst_blocks,
-                    params,
-                    is_store,
-                    event_idx,
-                    events_list,
-                    wait_event,
+            self._outstanding_jobs += 1
+            try:
+                copy_queue.put(
+                    (
+                        src_blocks,
+                        dst_blocks,
+                        params,
+                        is_store,
+                        event_idx,
+                        events_list,
+                        wait_event,
+                    )
                 )
-            )
+            except Exception:
+                self._outstanding_jobs -= 1
+                self._idle_condition.notify_all()
+                raise
 
     def check_health(self) -> None:
         with self._state_lock:
             self._raise_if_failed_locked()
+
+    def drain(self, timeout: float = _SHUTDOWN_TIMEOUT_SECONDS) -> None:
+        """Wait until every copy accepted before this barrier is observable.
+
+        Completion events are appended by the background thread only after it
+        has issued the copy and recorded the event. Waiting on the accepted-job
+        count closes the interval where the parent's event lists are still
+        empty even though a queued or in-flight transfer is accessing blocks.
+        The backend remains usable after this non-terminal barrier.
+        """
+        with self._idle_condition:
+            drained = self._idle_condition.wait_for(
+                lambda: self._outstanding_jobs == 0 or self._background_error is not None,
+                timeout=timeout,
+            )
+            self._raise_if_failed_locked()
+            if not drained:
+                raise RuntimeError(f"NPU KV offload copy backend did not drain within {timeout:.1f} seconds")
 
     def shutdown(self, timeout: float = _SHUTDOWN_TIMEOUT_SECONDS) -> None:
         with self._shutdown_lock:
@@ -175,18 +201,24 @@ class NPUDmaCopyBackend:
                     wait_event,
                 ) = item
 
-                stream = self._store_stream if is_store else self._load_stream
-                with torch.npu.stream(stream):
-                    if wait_event is not None:
-                        stream.wait_event(wait_event)
-                    copy_blocks(src_blocks, dst_blocks, params)
-                    event = torch.npu.Event()
-                    event.record(stream)
-                events_list.append((event_idx, event))
+                try:
+                    stream = self._store_stream if is_store else self._load_stream
+                    with torch.npu.stream(stream):
+                        if wait_event is not None:
+                            stream.wait_event(wait_event)
+                        copy_blocks(src_blocks, dst_blocks, params)
+                        event = torch.npu.Event()
+                        event.record(stream)
+                    events_list.append((event_idx, event))
+                finally:
+                    with self._idle_condition:
+                        self._outstanding_jobs -= 1
+                        self._idle_condition.notify_all()
         except Exception as exc:
-            with self._state_lock:
+            with self._idle_condition:
                 if self._background_error is None:
                     self._background_error = exc
+                self._idle_condition.notify_all()
 
     def _raise_if_failed_locked(self) -> None:
         if self._background_error is not None:

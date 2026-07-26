@@ -171,6 +171,66 @@ def test_shutdown_drains_queued_and_inflight_copies() -> None:
     backend._store_stream.synchronize.assert_called_once_with()
 
 
+def test_non_terminal_drain_waits_for_queued_and_inflight_copies() -> None:
+    backend = _make_backend()
+    copy_started = threading.Event()
+    release_copy = threading.Event()
+    drain_returned = threading.Event()
+    completion_events = [MagicMock(), MagicMock(), MagicMock()]
+    recorded_events: list[tuple[int, torch.npu.Event]] = []
+    copy_calls = []
+
+    def blocking_copy(*args) -> None:
+        copy_calls.append(args)
+        if len(copy_calls) == 1:
+            copy_started.set()
+            assert release_copy.wait(timeout=2.0)
+
+    with (
+        patch("vllm_ascend.simple_kv_offload.copy_backend.torch.npu.set_device"),
+        patch(
+            "vllm_ascend.simple_kv_offload.copy_backend.torch.npu.stream",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "vllm_ascend.simple_kv_offload.copy_backend.copy_blocks",
+            side_effect=blocking_copy,
+        ),
+        patch(
+            "vllm_ascend.simple_kv_offload.copy_backend.torch.npu.Event",
+            side_effect=completion_events,
+        ),
+    ):
+        backend._thread = threading.Thread(target=backend._copy_loop)
+        backend._thread.start()
+        backend.launch_copy([1], [2], True, 1, recorded_events)
+        assert copy_started.wait(timeout=2.0)
+        backend.launch_copy([3], [4], True, 2, recorded_events)
+
+        def run_drain() -> None:
+            backend.drain(timeout=2.0)
+            drain_returned.set()
+
+        drain_thread = threading.Thread(target=run_drain)
+        drain_thread.start()
+        assert not drain_returned.wait(timeout=0.1)
+        assert recorded_events == []
+
+        release_copy.set()
+        drain_thread.join(timeout=2.0)
+
+        assert not drain_thread.is_alive()
+        assert drain_returned.is_set()
+        assert len(copy_calls) == 2
+        assert recorded_events == [(1, completion_events[0]), (2, completion_events[1])]
+
+        # A non-terminal drain is a barrier, not shutdown.
+        backend.launch_copy([5], [6], False, 3, recorded_events)
+        backend.shutdown(timeout=2.0)
+
+    assert recorded_events[-1] == (3, completion_events[2])
+
+
 def test_shutdown_rejects_new_submissions() -> None:
     backend = _make_backend()
     backend.shutdown()
