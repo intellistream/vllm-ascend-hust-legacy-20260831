@@ -158,3 +158,22 @@ def test_hidden_state_manager_patch_does_not_double_track_upstream_fix(monkeypat
     _patch_hidden_state_block_tracking()
     hidden_manager.allocate_new_blocks("request", 1, 1)
     assert hidden_manager.new_block_ids == [7]
+
+
+def test_hidden_state_manager_patch_accepts_refactored_current_core(monkeypatch):
+    from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+
+    monkeypatch.delattr(
+        SingleTypeKVCacheManager,
+        "_ascend_hidden_state_block_tracking_patch",
+        raising=False,
+    )
+    monkeypatch.delattr(
+        SingleTypeKVCacheManager,
+        "allocate_new_computed_blocks",
+        raising=False,
+    )
+
+    _patch_hidden_state_block_tracking()
+
+    assert SingleTypeKVCacheManager._ascend_hidden_state_block_tracking_patch is True
