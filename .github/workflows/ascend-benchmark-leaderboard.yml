@@ -292,7 +292,7 @@ jobs:
       issues: write
     runs-on:
       - self-hosted
-      - linux-aarch64-a2b3-0
+      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'ascend-runner-01' }}
       - ascend-benchmark
     timeout-minutes: 60
     env:
@@ -1320,6 +1320,32 @@ jobs:
               api_call('POST', f'{api_url}/repos/{owner}/{repo}/issues/{issue_number}/comments', {'body': body})
               print('Created benchmark PR comment')
           PY
+
+  cleanup-ascend-benchmark:
+    name: Cleanup timed-out Ascend benchmark
+    needs: ascend-benchmark
+    if: ${{ always() && needs.ascend-benchmark.result != 'skipped' }}
+    runs-on:
+      - self-hosted
+      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'ascend-runner-01' }}
+      - ascend-benchmark
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout cleanup scripts
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Cleanup benchmark job processes
+        env:
+          ASCEND_BENCHMARK_CLEANUP_TARGET_JOB: ascend-benchmark
+          ASCEND_BENCHMARK_CLEANUP_MARKER_FILE: ${{ github.workspace }}/../vllm-ascend-hust-ci-state/runtime/process-markers/ascend-benchmark-server.pid
+          ASCEND_BENCHMARK_USE_SUDO: ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_USE_SUDO || 'auto' }}
+          ASCEND_BENCHMARK_ROOT_HELPER: ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_ROOT_HELPER || '' }}
+        run: bash .github/workflows/scripts/cleanup_ascend_benchmark_processes.sh current
 
   store-main-perfgate-baseline:
     name: Store main perfgate baseline

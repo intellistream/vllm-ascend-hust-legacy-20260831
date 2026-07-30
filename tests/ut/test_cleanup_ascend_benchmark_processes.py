@@ -453,6 +453,7 @@ def test_main_fails_when_only_ambiguous_processes_are_found(
             marker_file=None,
             record_marker=None,
             pid=None,
+            target_job=None,
         ),
     )
     monkeypatch.setattr(cleanup, "validate_context", lambda _environment: {})
@@ -466,6 +467,33 @@ def test_main_fails_when_only_ambiguous_processes_are_found(
 
     assert result == 2
     assert "PID 811 lacks stable runner metadata" in capsys.readouterr().err
+
+
+def test_target_job_overrides_cleanup_job_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = SimpleNamespace(
+        mode="current",
+        proc_root=Path("/proc"),
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        marker_file=None,
+        record_marker=None,
+        pid=None,
+        target_job="ascend-benchmark",
+    )
+    captured: list[dict[str, str]] = []
+    monkeypatch.setattr(cleanup, "parse_args", lambda: args)
+    monkeypatch.setattr(cleanup, "validate_context", lambda _environment: {"GITHUB_JOB": "cleanup-ascend-benchmark"})
+
+    def fake_cleanup(**kwargs: object) -> tuple[list[int], list[int], list[int], list[str]]:
+        captured.append(kwargs["context"])
+        return [], [], [], []
+
+    monkeypatch.setattr(cleanup, "cleanup_processes", fake_cleanup)
+
+    assert cleanup.main() == 0
+    assert captured == [{"GITHUB_JOB": "ascend-benchmark"}]
 
 
 def test_incomplete_metadata_with_known_repository_mismatch_is_ignored(tmp_path: Path, context: dict[str, str]) -> None:

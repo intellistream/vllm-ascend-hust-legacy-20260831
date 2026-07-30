@@ -462,6 +462,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--marker-file", type=Path)
     parser.add_argument("--record-marker", type=Path)
     parser.add_argument("--pid", type=int)
+    parser.add_argument("--target-job")
     return parser.parse_args()
 
 
@@ -469,6 +470,8 @@ def main() -> int:
     args = parse_args()
     try:
         context = validate_context(os.environ)
+        if args.target_job:
+            context["GITHUB_JOB"] = args.target_job
         if args.record_marker:
             if args.pid is None:
                 raise ValueError("--pid is required with --record-marker")

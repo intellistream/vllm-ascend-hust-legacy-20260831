@@ -83,6 +83,13 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     assert "grep -E 'vllm|python|pytest'" not in runner_script
     assert 'ASCEND_BENCHMARK_CLEANUP_MARKER_FILE="$SERVER_PID_MARKER"' in runner_script
     assert 'kill -TERM -- "-$server_group_pid"' not in runner_script
+    assert "VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL" in workflow
+    assert "cleanup-ascend-benchmark:" in workflow
+    assert "needs: ascend-benchmark" in workflow
+    assert "if: ${{ always() && needs.ascend-benchmark.result != 'skipped' }}" in workflow
+    assert "ASCEND_BENCHMARK_CLEANUP_TARGET_JOB: ascend-benchmark" in workflow
+    assert "ASCEND_BENCHMARK_CLEANUP_MARKER_FILE:" in workflow
+    assert "timeout-minutes: 10" in workflow
 
 
 def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
@@ -91,7 +98,12 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "PERFGATE_MODE" in workflow
     assert "PERFGATE_SPEC_FILE" in workflow
     assert "SOC_VERSION: ascend910b2" in workflow
-    assert ("runs-on:\n      - self-hosted\n      - linux-aarch64-a2b3-0\n      - ascend-benchmark") in workflow
+    assert (
+        "runs-on:\n"
+        "      - self-hosted\n"
+        "      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'ascend-runner-01' }}\n"
+        "      - ascend-benchmark"
+    ) in workflow
     assert (
         "HARDWARE_CHIP_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_chip_model || '910B2' }}"
         in workflow

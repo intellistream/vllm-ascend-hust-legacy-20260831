@@ -71,6 +71,9 @@ cleanup_args=(
   --term-timeout-seconds "${ASCEND_BENCHMARK_CLEANUP_TERM_TIMEOUT_SECONDS:-10}"
   --kill-timeout-seconds "${ASCEND_BENCHMARK_CLEANUP_KILL_TIMEOUT_SECONDS:-5}"
 )
+if [[ -n "${ASCEND_BENCHMARK_CLEANUP_TARGET_JOB:-}" ]]; then
+  cleanup_args+=(--target-job "$ASCEND_BENCHMARK_CLEANUP_TARGET_JOB")
+fi
 if [[ -n "${ASCEND_BENCHMARK_CLEANUP_PROC_ROOT:-}" ]]; then
   cleanup_args+=(--proc-root "$ASCEND_BENCHMARK_CLEANUP_PROC_ROOT")
 fi
