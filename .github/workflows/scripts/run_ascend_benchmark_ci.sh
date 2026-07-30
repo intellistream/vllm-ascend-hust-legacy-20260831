@@ -176,83 +176,6 @@ server_pid=""
 server_group_pid=""
 cleanup_ran=0
 
-find_orphaned_engine_pids() {
-  "$PYTHON_BIN" - <<'PY'
-import os
-
-
-def read_proc_bytes(path: str) -> bytes:
-    try:
-        with open(path, "rb") as proc_file:
-            return proc_file.read()
-    except OSError:
-        return b""
-
-
-def read_environ(pid: str) -> dict[str, str]:
-    env = {}
-    for item in read_proc_bytes(f"/proc/{pid}/environ").split(b"\0"):
-        if b"=" not in item:
-            continue
-        key, value = item.split(b"=", 1)
-        env[key.decode(errors="ignore")] = value.decode(errors="ignore")
-    return env
-
-
-run_id = os.environ.get("GITHUB_RUN_ID", "")
-job_name = os.environ.get("GITHUB_JOB", "")
-repository = os.environ.get("GITHUB_REPOSITORY", "")
-workspace = os.environ.get("RUNNER_WORKSPACE", "")
-current_pid = str(os.getpid())
-matches = []
-
-if not run_id or not job_name or not repository:
-    print("")
-    raise SystemExit(0)
-
-for entry in os.listdir("/proc"):
-    if not entry.isdigit() or entry == current_pid:
-        continue
-
-    status_text = read_proc_bytes(f"/proc/{entry}/status").decode(errors="ignore")
-    status_name = ""
-    for line in status_text.splitlines():
-        if line.startswith("Name:\t"):
-            status_name = line.split("\t", 1)[1].strip()
-            break
-
-    if status_name != "VLLM::EngineCor":
-        cmdline_text = read_proc_bytes(f"/proc/{entry}/cmdline").replace(b"\0", b" ").decode(errors="ignore")
-        if "VLLM::EngineCore" not in cmdline_text:
-            continue
-
-    proc_env = read_environ(entry)
-    if proc_env.get("GITHUB_RUN_ID") != run_id:
-        continue
-    if proc_env.get("GITHUB_JOB") != job_name:
-        continue
-    if proc_env.get("GITHUB_REPOSITORY") != repository:
-        continue
-    if workspace and proc_env.get("RUNNER_WORKSPACE") != workspace:
-        continue
-
-    matches.append(entry)
-
-print(" ".join(matches))
-PY
-}
-
-kill_matching_pids() {
-  local signal="$1"
-  shift
-
-  if [[ "$#" -eq 0 ]]; then
-    return
-  fi
-
-  kill "-$signal" "$@" 2>/dev/null || true
-}
-
 SUDO_PRESERVE_ENV_VARS=(
   ASCEND_AICPU_PATH
   ASCEND_BENCHMARK_USE_SUDO
@@ -318,6 +241,11 @@ SUDO_PRESERVE_ENV_VARS=(
   DTYPE
   GITHUB_ACTOR
   GITHUB_EVENT_NAME
+  GITHUB_JOB
+  GITHUB_REPOSITORY
+  GITHUB_RUN_ATTEMPT
+  GITHUB_RUN_ID
+  GITHUB_WORKFLOW
   HCCL_CONNECT_TIMEOUT
   HCCL_EXEC_TIMEOUT
   HF_HOME
@@ -339,6 +267,8 @@ SUDO_PRESERVE_ENV_VARS=(
   RESULT_DIR
   RESULT_ROOT
   RUN_ID
+  RUNNER_NAME
+  RUNNER_WORKSPACE
   SAME_SPEC_CONSTRAINTS_FILE
   SAME_SPEC_CLIENT_READY_TIMEOUT_SECONDS
   SAME_SPEC_PR_PREVIEW_COMPAT
@@ -514,32 +444,12 @@ cleanup() {
     wait "$server_pid" || true
   fi
 
-  # GitHub Actions cancellation can outlive the vLLM launcher and leave
-  # EngineCore workers behind, so sweep matching leftovers by run metadata.
-  local orphaned_engine_pids
-  orphaned_engine_pids="$(find_orphaned_engine_pids)"
-  if [[ -n "$orphaned_engine_pids" ]]; then
-    kill_matching_pids TERM $orphaned_engine_pids
-    for _ in $(seq 1 10); do
-      local remaining_engine_pids=()
-      local orphaned_pid
-      for orphaned_pid in $orphaned_engine_pids; do
-        if kill -0 "$orphaned_pid" 2>/dev/null; then
-          remaining_engine_pids+=("$orphaned_pid")
-        fi
-      done
-      if [[ "${#remaining_engine_pids[@]}" -eq 0 ]]; then
-        orphaned_engine_pids=""
-        break
-      fi
-      orphaned_engine_pids="${remaining_engine_pids[*]}"
-      sleep 1
-    done
-
-    if [[ -n "$orphaned_engine_pids" ]]; then
-      kill_matching_pids KILL $orphaned_engine_pids
-    fi
-  fi
+  # EngineCore workers can escape the launcher's process group. The shared
+  # cleanup utility verifies complete job ownership before signaling them.
+  VLLM_ASCEND_HUST_REPO="$VLLM_ASCEND_HUST_REPO" \
+    PYTHON_BIN="$PYTHON_BIN" \
+    bash "$SCRIPT_DIR/cleanup_ascend_benchmark_processes.sh" current || \
+    echo "Warning: final EngineCore cleanup did not complete" >&2
 
   server_pid=""
   server_group_pid=""
@@ -581,56 +491,9 @@ runtime_ready_log_indicates_node_env_failure() {
 }
 
 cleanup_previous_ci_processes() {
-  local marker_pgid marker_pid remaining_matches remaining_pids
-
-  if [[ -f "$SERVER_PGID_MARKER" ]]; then
-    marker_pgid=$(tr -d '[:space:]' <"$SERVER_PGID_MARKER")
-    if [[ -n "$marker_pgid" ]] && kill -0 "$marker_pgid" 2>/dev/null; then
-      echo "Cleaning leftover Ascend benchmark process group: $marker_pgid"
-      kill -TERM -- "-$marker_pgid" 2>/dev/null || true
-      for _ in $(seq 1 10); do
-        if ! kill -0 "$marker_pgid" 2>/dev/null; then
-          break
-        fi
-        sleep 1
-      done
-      kill -KILL -- "-$marker_pgid" 2>/dev/null || true
-    fi
-  fi
-
-  if [[ -f "$SERVER_PID_MARKER" ]]; then
-    marker_pid=$(tr -d '[:space:]' <"$SERVER_PID_MARKER")
-    if [[ -n "$marker_pid" ]] && kill -0 "$marker_pid" 2>/dev/null; then
-      echo "Cleaning leftover Ascend benchmark process: $marker_pid"
-      kill "$marker_pid" 2>/dev/null || true
-    fi
-  fi
-
-  remaining_matches=$(ps -eo pid,ppid,pgid,sid,etimes,args \
-    | grep -F "$WORKSPACE_ROOT" \
-    | grep -E 'vllm|python|pytest' \
-    | grep -v grep || true)
-  if [[ -n "$remaining_matches" ]]; then
-    echo "Remaining workspace-scoped vLLM/Python processes before benchmark:"
-    echo "$remaining_matches"
-    remaining_pids=$(printf '%s\n' "$remaining_matches" | awk '{print $1}')
-    if [[ -n "$remaining_pids" ]]; then
-      echo "Cleaning workspace-scoped leftover process(es): $remaining_pids"
-      # shellcheck disable=SC2086
-      kill -TERM $remaining_pids 2>/dev/null || true
-      for _ in $(seq 1 10); do
-        if ! ps -p "$(printf '%s' "$remaining_pids" | paste -sd, -)" >/dev/null 2>&1; then
-          break
-        fi
-        sleep 1
-      done
-      # shellcheck disable=SC2086
-      kill -KILL $remaining_pids 2>/dev/null || true
-    fi
-  else
-    echo "No leftover workspace-scoped vLLM/Python processes detected before benchmark."
-  fi
-
+  VLLM_ASCEND_HUST_REPO="$VLLM_ASCEND_HUST_REPO" \
+    PYTHON_BIN="$PYTHON_BIN" \
+    bash "$SCRIPT_DIR/cleanup_ascend_benchmark_processes.sh" current
   rm -f "$SERVER_PID_MARKER" "$SERVER_PGID_MARKER"
 }
 

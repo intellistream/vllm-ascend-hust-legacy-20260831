@@ -748,6 +748,9 @@ jobs:
       - name: Acquire Ascend hardware lock
         run: bash .github/workflows/scripts/acquire_ascend_hardware_lock.sh
 
+      - name: Cleanup stale Ascend benchmark processes
+        run: bash .github/workflows/scripts/cleanup_ascend_benchmark_processes.sh stale
+
       - name: Prepare Ascend runtime and install repos
         env:
           VLLM_HUST_REPO: ${{ github.workspace }}/vllm-hust
@@ -948,6 +951,10 @@ jobs:
           export CURRENT_SUBMISSION_DIR="${SUBMISSION_DIR}"
           export SNAPSHOT_COMMIT_MESSAGE="chore: sync vllm-ascend benchmark snapshots ${RUN_ID}"
           bash .github/workflows/scripts/sync_benchmark_snapshots_to_github.sh
+
+      - name: Cleanup current Ascend benchmark processes
+        if: always()
+        run: bash .github/workflows/scripts/cleanup_ascend_benchmark_processes.sh current
 
       - name: Release Ascend hardware lock
         if: always()

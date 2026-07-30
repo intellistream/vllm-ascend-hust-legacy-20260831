@@ -24,6 +24,7 @@ INSTALL_PLUGIN_SCRIPT = REPO_ROOT / "scripts/install_local_ascend_plugin.sh"
 INSTALL_DEV_HUB_SCRIPT = SCRIPT_DIR / "install_ascend_benchmark_with_dev_hub.sh"
 USE_SINGLE_ASCEND_ENV_SCRIPT = REPO_ROOT / "scripts/use_single_ascend_env.sh"
 PERFGATE_VALIDATE_REQUIRED_SCRIPT = SCRIPT_DIR / "perfgate_validate_required.sh"
+PROCESS_CLEANUP_SCRIPT = SCRIPT_DIR / "cleanup_ascend_benchmark_processes.sh"
 
 
 def test_perfgate_scripts_are_present() -> None:
@@ -38,8 +39,46 @@ def test_perfgate_scripts_are_present() -> None:
         "parse_ascend_comment_command.py",
         "resolve_ascend_benchmark_scenario.py",
         "resolve_perfgate_spec_file.py",
+        "cleanup_ascend_benchmark_processes.py",
+        "cleanup_ascend_benchmark_processes.sh",
     ):
         assert (SCRIPT_DIR / script_name).is_file()
+
+
+def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    runner_script = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
+    root_helper = (SCRIPT_DIR / "run_ascend_benchmark_root_helper.sh").read_text(encoding="utf-8")
+    cleanup_wrapper = PROCESS_CLEANUP_SCRIPT.read_text(encoding="utf-8")
+
+    acquire_index = workflow.index("- name: Acquire Ascend hardware lock")
+    stale_index = workflow.index("- name: Cleanup stale Ascend benchmark processes")
+    current_index = workflow.index("- name: Cleanup current Ascend benchmark processes")
+    release_index = workflow.index("- name: Release Ascend hardware lock")
+    assert acquire_index < stale_index < current_index < release_index
+
+    current_step = workflow[current_index:release_index]
+    assert "if: always()" in current_step
+    assert "cleanup_ascend_benchmark_processes.sh current" in current_step
+    assert "cleanup_ascend_benchmark_processes.sh stale" in workflow[stale_index:current_index]
+
+    preserve_block = runner_script[runner_script.index("SUDO_PRESERVE_ENV_VARS=(") :]
+    for variable in (
+        "GITHUB_REPOSITORY",
+        "GITHUB_WORKFLOW",
+        "GITHUB_JOB",
+        "GITHUB_RUN_ID",
+        "GITHUB_RUN_ATTEMPT",
+        "RUNNER_NAME",
+        "RUNNER_WORKSPACE",
+    ):
+        assert variable in preserve_block
+        assert variable in cleanup_wrapper
+
+    assert "cleanup-processes)" in root_helper
+    assert "cleanup_ascend_benchmark_processes.py" in root_helper
+    assert "pkill" not in cleanup_wrapper
+    assert "grep -E 'vllm|python|pytest'" not in runner_script
 
 
 def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
