@@ -47,7 +47,14 @@ def context() -> dict[str, str]:
     }
 
 
-def create_process(proc_root: Path, pid: int, environment: dict[str, str], *, engine_core: bool = True) -> None:
+def create_process(
+    proc_root: Path,
+    pid: int,
+    environment: dict[str, str],
+    *,
+    engine_core: bool = True,
+    start_time: int | None = None,
+) -> None:
     process_dir = proc_root / str(pid)
     process_dir.mkdir(parents=True, exist_ok=True)
     name = "VLLM::EngineCor" if engine_core else "python3"
@@ -56,6 +63,8 @@ def create_process(proc_root: Path, pid: int, environment: dict[str, str], *, en
     (process_dir / "cmdline").write_bytes(cmdline)
     environ = b"\0".join(f"{key}={value}".encode() for key, value in environment.items()) + b"\0"
     (process_dir / "environ").write_bytes(environ)
+    stat_suffix = ["S", *("0" for _ in range(18)), str(start_time if start_time is not None else pid * 100)]
+    (process_dir / "stat").write_text(f"{pid} ({name}) {' '.join(stat_suffix)}\n", encoding="utf-8")
 
 
 def matching_pids(proc_root: Path, context: dict[str, str], mode: str) -> list[int]:
@@ -185,6 +194,39 @@ def test_cleanup_rescans_ownership_before_kill(tmp_path: Path, context: dict[str
     assert matched == [501]
     assert remaining == []
     assert signals == [(501, signal.SIGTERM)]
+
+
+def test_cleanup_rescans_start_time_before_term(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_process(tmp_path, 502, context, start_time=1000)
+    signals: list[tuple[int, int]] = []
+    original_find_matching_processes = cleanup.find_matching_processes
+    first_scan = True
+
+    def replace_process_after_scan(proc_root: Path, owner: dict[str, str], mode: str) -> list[object]:
+        nonlocal first_scan
+        matches = original_find_matching_processes(proc_root, owner, mode)
+        if first_scan:
+            first_scan = False
+            create_process(tmp_path, 502, {**context, "GITHUB_JOB": "another-job"}, start_time=2000)
+        return matches
+
+    monkeypatch.setattr(cleanup, "find_matching_processes", replace_process_after_scan)
+
+    matched, remaining = cleanup.cleanup_processes(
+        tmp_path,
+        context,
+        "current",
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        kill=lambda pid, signum: signals.append((pid, signum)),
+        sleep=lambda _: None,
+    )
+
+    assert matched == [502]
+    assert remaining == []
+    assert signals == []
 
 
 def test_unreadable_engine_core_environment_fails_closed(

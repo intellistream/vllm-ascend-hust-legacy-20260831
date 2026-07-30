@@ -47,6 +47,7 @@ class ProcessInspectionError(RuntimeError):
 @dataclass(frozen=True)
 class ProcessInfo:
     pid: int
+    start_time: int
 
 
 def read_bytes(path: Path) -> bytes:
@@ -68,6 +69,23 @@ def read_environment(path: Path) -> dict[str, str]:
         key, value = item.split(b"=", 1)
         environment[key.decode(errors="replace")] = value.decode(errors="replace")
     return environment
+
+
+def read_start_time(process_dir: Path) -> int:
+    stat = read_bytes(process_dir / "stat")
+    command_end = stat.rfind(b")")
+    if command_end < 0:
+        raise ProcessInspectionError(f"malformed process stat: {process_dir / 'stat'}")
+
+    # Fields after the command name begin at field 3 (state). Linux starttime
+    # is field 22, so it is index 19 in this suffix.
+    fields = stat[command_end + 1 :].split()
+    if len(fields) <= 19:
+        raise ProcessInspectionError(f"process stat lacks start time: {process_dir / 'stat'}")
+    try:
+        return int(fields[19])
+    except ValueError as exc:
+        raise ProcessInspectionError(f"invalid process start time: {process_dir / 'stat'}") from exc
 
 
 def is_engine_core(process_dir: Path) -> bool:
@@ -105,6 +123,29 @@ def belongs_to_context(process_environment: Mapping[str, str], context: Mapping[
     raise ValueError(f"unsupported cleanup mode: {mode}")
 
 
+def inspect_process(process_dir: Path, context: Mapping[str, str], mode: str) -> ProcessInfo | None:
+    start_time = read_start_time(process_dir)
+    if not is_engine_core(process_dir):
+        return None
+    environment = read_environment(process_dir / "environ")
+    if read_start_time(process_dir) != start_time:
+        return None
+
+    # A known mismatch is enough to establish that this process belongs to
+    # another workload. Otherwise incomplete stable metadata is ambiguous and
+    # must fail closed instead of being reported as "no processes".
+    if any(environment.get(key) and environment[key] != context[key] for key in LEGACY_OWNER_KEYS):
+        return None
+    missing_legacy_keys = [key for key in LEGACY_OWNER_KEYS if not environment.get(key)]
+    if missing_legacy_keys:
+        raise ProcessInspectionError(
+            f"EngineCore PID {process_dir.name} lacks ownership metadata: {', '.join(missing_legacy_keys)}"
+        )
+    if not belongs_to_context(environment, context, mode):
+        return None
+    return ProcessInfo(pid=int(process_dir.name), start_time=start_time)
+
+
 def find_matching_processes(proc_root: Path, context: Mapping[str, str], mode: str) -> list[ProcessInfo]:
     matches: list[ProcessInfo] = []
     try:
@@ -116,24 +157,11 @@ def find_matching_processes(proc_root: Path, context: Mapping[str, str], mode: s
         if not process_dir.name.isdigit():
             continue
         try:
-            if not is_engine_core(process_dir):
-                continue
-            environment = read_environment(process_dir / "environ")
+            process = inspect_process(process_dir, context, mode)
         except ProcessDisappeared:
             continue
-
-        # A known mismatch is enough to establish that this process belongs to
-        # another workload. Otherwise incomplete stable metadata is ambiguous
-        # and must fail closed instead of being reported as "no processes".
-        if any(environment.get(key) and environment[key] != context[key] for key in LEGACY_OWNER_KEYS):
-            continue
-        missing_legacy_keys = [key for key in LEGACY_OWNER_KEYS if not environment.get(key)]
-        if missing_legacy_keys:
-            raise ProcessInspectionError(
-                f"EngineCore PID {process_dir.name} lacks ownership metadata: {', '.join(missing_legacy_keys)}"
-            )
-        if belongs_to_context(environment, context, mode):
-            matches.append(ProcessInfo(pid=int(process_dir.name)))
+        if process is not None:
+            matches.append(process)
     return sorted(matches, key=lambda process: process.pid)
 
 
@@ -141,8 +169,17 @@ def signal_processes(
     processes: Sequence[ProcessInfo],
     signum: signal.Signals,
     kill: Callable[[int, int], None],
+    proc_root: Path,
+    context: Mapping[str, str],
+    mode: str,
 ) -> None:
     for process in processes:
+        try:
+            current = inspect_process(proc_root / str(process.pid), context, mode)
+        except ProcessDisappeared:
+            continue
+        if current != process:
+            continue
         try:
             kill(process.pid, signum)
         except ProcessLookupError:
@@ -181,12 +218,10 @@ def cleanup_processes(
     if not initial:
         return [], []
 
-    signal_processes(initial, signal.SIGTERM, kill)
+    signal_processes(initial, signal.SIGTERM, kill, proc_root, context, mode)
     remaining = wait_for_exit(proc_root, context, mode, term_timeout_seconds, poll_seconds, sleep)
     if remaining:
-        # Rescanning ownership before SIGKILL prevents signaling an unrelated
-        # process if a PID was reused after the TERM phase.
-        signal_processes(remaining, signal.SIGKILL, kill)
+        signal_processes(remaining, signal.SIGKILL, kill, proc_root, context, mode)
         remaining = wait_for_exit(proc_root, context, mode, kill_timeout_seconds, poll_seconds, sleep)
     return [process.pid for process in initial], [process.pid for process in remaining]
 
