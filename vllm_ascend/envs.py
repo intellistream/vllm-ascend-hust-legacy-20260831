@@ -214,6 +214,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_SIMLLM_MAX_DEFERRALS": lambda: int(
         os.getenv("VLLM_ASCEND_SIMLLM_MAX_DEFERRALS", "3")
     ),
+    # Rank-local output directory for ADM runtime observations. Empty disables
+    # tracing. The value is a local path and is not sensitive.
+    "VLLM_ASCEND_ADM_TRACE_DIR": lambda: os.getenv(
+        "VLLM_ASCEND_ADM_TRACE_DIR", ""
+    ),
+    # Maximum ADM observations retained per worker. It must be a positive
+    # integer. The value is not sensitive.
+    "VLLM_ASCEND_ADM_TRACE_MAX_SAMPLES": lambda: int(
+        os.getenv("VLLM_ASCEND_ADM_TRACE_MAX_SAMPLES", "4096")
+    ),
 }
 
 # end-env-vars-definition

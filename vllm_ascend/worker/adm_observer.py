@@ -1,7 +1,11 @@
 import json
+import os
+import socket
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from vllm_ascend import envs
 
 
 SCHEMA_VERSION = "adm-runtime-observation/v1"
@@ -163,6 +167,25 @@ class ADMRuntimeObserver:
         self._dropped_samples = 0
         self._trace_error_count = 0
         self._last_event_index: int | None = None
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        rank: int,
+        dp_size: int,
+    ) -> "ADMRuntimeObserver | None":
+        trace_dir = envs.VLLM_ASCEND_ADM_TRACE_DIR
+        if not trace_dir:
+            return None
+        return cls(
+            trace_dir=trace_dir,
+            rank=rank,
+            dp_size=dp_size,
+            max_samples=envs.VLLM_ASCEND_ADM_TRACE_MAX_SAMPLES,
+            host_id=socket.gethostname(),
+            pid=os.getpid(),
+        )
 
     @classmethod
     def disabled(cls) -> "ADMRuntimeObserver":
