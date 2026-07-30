@@ -958,7 +958,7 @@ jobs:
           PERFGATE_SPEC_FILE: ${{ vars.VLLM_ASCEND_HUST_PERFGATE_SPEC_FILE || '' }}
           PERFGATE_WARMUP_RUNS: "1"
           PERFGATE_MEASURED_RUNS: "3"
-          PERFGATE_AGGREGATION: median
+          PERFGATE_AGGREGATION: "primary-median-run"
           SAME_SPEC_PR_PREVIEW_COMPAT: "0"
           PUBLISH_TO_BENCHMARK_REPO: "0"
           PUBLISH_TO_HF: "0"
@@ -1060,7 +1060,9 @@ jobs:
           PERFGATE_BASELINE_BRANCH: ${{ vars.VLLM_ASCEND_HUST_PERFGATE_BASELINE_BRANCH || 'benchmark-baselines' }}
           PERFGATE_EXPECTED_WARMUP_RUNS: "1"
           PERFGATE_EXPECTED_MEASURED_RUNS: "3"
-          PERFGATE_EXPECTED_AGGREGATION: median
+          PERFGATE_EXPECTED_SCHEMA_VERSION: "perfgate-measurement/v2"
+          PERFGATE_EXPECTED_STRATEGY: "warmup+primary-median-run"
+          PERFGATE_EXPECTED_AGGREGATION: "primary-median-run"
         run: bash .github/workflows/scripts/perfgate_store_baseline.sh
 
       - name: Run benchmark CI and optional HF sync

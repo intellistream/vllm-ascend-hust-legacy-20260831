@@ -511,7 +511,7 @@ def test_main_perfgate_producer_is_reachable_and_pins_dependencies() -> None:
     producer = producer[: producer.index("- name: Run benchmark CI and optional HF sync")]
     assert 'PERFGATE_WARMUP_RUNS: "1"' in producer
     assert 'PERFGATE_MEASURED_RUNS: "3"' in producer
-    assert "PERFGATE_AGGREGATION: median" in producer
+    assert 'PERFGATE_AGGREGATION: "primary-median-run"' in producer
     assert 'SAME_SPEC_PR_PREVIEW_COMPAT: "0"' in producer
     assert "prepare_plugin_perfgate_artifact.py" in producer
     assert 'echo "RUN_ID=$RUN_ID"' in producer
@@ -571,6 +571,31 @@ def test_plugin_producer_preserves_measurement_and_provenance_evidence() -> None
     producer = producer[: producer.index("- name: Run benchmark CI and optional HF sync")]
     assert "cleanup_ascend_benchmark_processes.sh current" in producer
     assert "cleanup_ascend_ci_processes.sh" not in workflow
+
+
+def test_plugin_scheme_c_is_producer_only() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    runner = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
+    store = (SCRIPT_DIR / "perfgate_store_baseline.sh").read_text(encoding="utf-8")
+
+    formal_step = workflow.index("- name: Run benchmark CI and optional HF sync")
+    stage1_step = workflow.index("- name: Performance gate - Stage 1 comparison")
+    stage2_step = workflow.index("- name: Performance gate - Stage 2 trial rebase and benchmark")
+    final_compare_step = workflow.index("- name: Performance gate - two-stage comparison", stage2_step)
+    for block in (
+        workflow[formal_step:stage1_step],
+        workflow[stage2_step:final_compare_step],
+    ):
+        assert "PERFGATE_WARMUP_RUNS:" not in block
+        assert "PERFGATE_MEASURED_RUNS:" not in block
+        assert "PERFGATE_AGGREGATION:" not in block
+
+    assert "PERFGATE_WARMUP_RUNS=${PERFGATE_WARMUP_RUNS:-0}" in runner
+    assert "PERFGATE_MEASURED_RUNS=${PERFGATE_MEASURED_RUNS:-1}" in runner
+    assert "PERFGATE_AGGREGATION=${PERFGATE_AGGREGATION:-primary-median-run}" in runner
+    assert "perfgate-measurement/v2" in store
+    assert "warmup+primary-median-run" in store
+    assert 'secondary_sort_key == "run_index"' in store
 
 
 def test_benchmark_disables_huggingface_xet_download_path() -> None:
