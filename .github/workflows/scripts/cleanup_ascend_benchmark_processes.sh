@@ -47,11 +47,23 @@ done
 if [[ "$use_sudo" == "auto" ]]; then
   if [[ "$(id -u)" == "0" ]]; then
     use_sudo=0
-  elif command -v sudo >/dev/null 2>&1 && [[ -x "$root_helper" ]]; then
-    use_sudo=1
   else
-    use_sudo=0
+    if ! command -v sudo >/dev/null 2>&1; then
+      echo "Ascend benchmark cleanup requires sudo when not running as root, but sudo is unavailable." >&2
+      exit 1
+    fi
+    if [[ ! -x "$root_helper" ]]; then
+      echo "Ascend benchmark cleanup requires an executable root helper: $root_helper" >&2
+      echo "Install it with: sudo RUNNER_USER=${USER:-grunner} bash $VLLM_ASCEND_HUST_REPO/scripts/install_ascend_benchmark_root_helper.sh" >&2
+      exit 1
+    fi
+    use_sudo=1
   fi
+fi
+
+if [[ "$use_sudo" != "0" && "$use_sudo" != "1" ]]; then
+  echo "ASCEND_BENCHMARK_USE_SUDO must be auto, 0, or 1; got: $use_sudo" >&2
+  exit 2
 fi
 
 cleanup_args=(
@@ -59,6 +71,9 @@ cleanup_args=(
   --term-timeout-seconds "${ASCEND_BENCHMARK_CLEANUP_TERM_TIMEOUT_SECONDS:-10}"
   --kill-timeout-seconds "${ASCEND_BENCHMARK_CLEANUP_KILL_TIMEOUT_SECONDS:-5}"
 )
+if [[ -n "${ASCEND_BENCHMARK_CLEANUP_PROC_ROOT:-}" ]]; then
+  cleanup_args+=(--proc-root "$ASCEND_BENCHMARK_CLEANUP_PROC_ROOT")
+fi
 
 if [[ "$use_sudo" == "1" ]]; then
   preserve_list=$(IFS=,; printf '%s' "${ownership_vars[*]}")

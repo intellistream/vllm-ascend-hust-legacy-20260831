@@ -25,6 +25,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CLEANUP_SCRIPT = REPO_ROOT / ".github/workflows/scripts/cleanup_ascend_benchmark_processes.py"
+CLEANUP_WRAPPER = REPO_ROOT / ".github/workflows/scripts/cleanup_ascend_benchmark_processes.sh"
+ROOT_HELPER = REPO_ROOT / ".github/workflows/scripts/run_ascend_benchmark_root_helper.sh"
 SPEC = importlib.util.spec_from_file_location("cleanup_ascend_benchmark_processes", CLEANUP_SCRIPT)
 assert SPEC and SPEC.loader
 cleanup = importlib.util.module_from_spec(SPEC)
@@ -60,6 +62,28 @@ def matching_pids(proc_root: Path, context: dict[str, str], mode: str) -> list[i
     return [process.pid for process in cleanup.find_matching_processes(proc_root, context, mode)]
 
 
+def wrapper_environment(context: dict[str, str], tmp_path: Path) -> dict[str, str]:
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir(exist_ok=True)
+    return {
+        **os.environ,
+        **context,
+        "PYTHON_BIN": sys.executable,
+        "VLLM_ASCEND_HUST_REPO": str(REPO_ROOT),
+        "ASCEND_BENCHMARK_CLEANUP_PROC_ROOT": str(proc_root),
+        "ASCEND_BENCHMARK_CLEANUP_TERM_TIMEOUT_SECONDS": "0",
+        "ASCEND_BENCHMARK_CLEANUP_KILL_TIMEOUT_SECONDS": "0",
+    }
+
+
+def install_fake_command(directory: Path, name: str, content: str) -> Path:
+    directory.mkdir(exist_ok=True)
+    command = directory / name
+    command.write_text(f"#!/bin/bash\nset -euo pipefail\n{content}\n", encoding="utf-8")
+    command.chmod(0o755)
+    return command
+
+
 def test_current_mode_matches_only_exact_run(tmp_path: Path, context: dict[str, str]) -> None:
     create_process(tmp_path, 101, context)
     create_process(tmp_path, 102, {**context, "GITHUB_RUN_ATTEMPT": "1"})
@@ -74,6 +98,28 @@ def test_stale_mode_matches_previous_run_or_attempt(tmp_path: Path, context: dic
     create_process(tmp_path, 203, {**context, "GITHUB_RUN_ATTEMPT": "1"})
 
     assert matching_pids(tmp_path, context, "stale") == [202, 203]
+
+
+def test_stale_mode_matches_legacy_process_without_runner_or_run_metadata(
+    tmp_path: Path, context: dict[str, str]
+) -> None:
+    legacy_environment = {key: context[key] for key in cleanup.LEGACY_OWNER_KEYS}
+    create_process(tmp_path, 204, legacy_environment)
+
+    matches = cleanup.find_matching_processes(tmp_path, context, "stale")
+
+    assert [process.pid for process in matches] == [204]
+    assert matching_pids(tmp_path, context, "current") == []
+
+
+def test_stale_mode_rejects_explicit_runner_mismatch_in_legacy_process(tmp_path: Path, context: dict[str, str]) -> None:
+    legacy_environment = {
+        **{key: context[key] for key in cleanup.LEGACY_OWNER_KEYS},
+        "RUNNER_NAME": "another-runner",
+    }
+    create_process(tmp_path, 205, legacy_environment)
+
+    assert matching_pids(tmp_path, context, "stale") == []
 
 
 @pytest.mark.parametrize(
@@ -141,6 +187,54 @@ def test_cleanup_rescans_ownership_before_kill(tmp_path: Path, context: dict[str
     assert signals == [(501, signal.SIGTERM)]
 
 
+def test_unreadable_engine_core_environment_fails_closed(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_process(tmp_path, 601, context)
+    original_read_bytes = Path.read_bytes
+
+    def deny_environment(path: Path) -> bytes:
+        if path.name == "environ":
+            raise PermissionError(path)
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", deny_environment)
+
+    with pytest.raises(cleanup.ProcessInspectionError, match="permission denied reading"):
+        cleanup.find_matching_processes(tmp_path, context, "current")
+
+
+def test_engine_core_without_stable_ownership_metadata_fails_closed(tmp_path: Path, context: dict[str, str]) -> None:
+    create_process(tmp_path, 602, {"GITHUB_REPOSITORY": context["GITHUB_REPOSITORY"]})
+
+    with pytest.raises(cleanup.ProcessInspectionError, match="lacks ownership metadata"):
+        cleanup.find_matching_processes(tmp_path, context, "stale")
+
+
+def test_incomplete_metadata_with_known_repository_mismatch_is_ignored(tmp_path: Path, context: dict[str, str]) -> None:
+    create_process(tmp_path, 604, {"GITHUB_REPOSITORY": "another/repository"})
+
+    assert matching_pids(tmp_path, context, "stale") == []
+
+
+def test_signal_permission_failure_is_reported(tmp_path: Path, context: dict[str, str]) -> None:
+    create_process(tmp_path, 603, context)
+
+    def deny_signal(_pid: int, _signum: int) -> None:
+        raise PermissionError
+
+    with pytest.raises(RuntimeError, match="permission denied signaling PID 603"):
+        cleanup.cleanup_processes(
+            tmp_path,
+            context,
+            "current",
+            term_timeout_seconds=0,
+            kill_timeout_seconds=0,
+            kill=deny_signal,
+            sleep=lambda _: None,
+        )
+
+
 def test_missing_context_fails_closed() -> None:
     result = subprocess.run(
         [sys.executable, str(CLEANUP_SCRIPT), "--mode", "current"],
@@ -152,3 +246,88 @@ def test_missing_context_fails_closed() -> None:
 
     assert result.returncode == 2
     assert "missing required ownership context" in result.stderr
+
+
+def test_auto_mode_fails_when_non_root_helper_is_missing(tmp_path: Path, context: dict[str, str]) -> None:
+    fake_bin = tmp_path / "bin"
+    install_fake_command(fake_bin, "id", '[[ "${1:-}" == "-u" ]] && echo 1000')
+    install_fake_command(fake_bin, "sudo", "exit 99")
+    env = wrapper_environment(context, tmp_path)
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "ASCEND_BENCHMARK_USE_SUDO": "auto",
+            "ASCEND_BENCHMARK_ROOT_HELPER": str(tmp_path / "missing-helper"),
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(CLEANUP_WRAPPER), "stale"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 1
+    assert "requires an executable root helper" in result.stderr
+    assert "No stale" not in result.stdout
+
+
+def test_old_root_helper_failure_is_not_silently_ignored(tmp_path: Path, context: dict[str, str]) -> None:
+    fake_bin = tmp_path / "bin"
+    install_fake_command(fake_bin, "id", '[[ "${1:-}" == "-u" ]] && echo 1000')
+    install_fake_command(
+        fake_bin,
+        "sudo",
+        'while [[ "$#" -gt 0 && "$1" == -* ]]; do shift; done\nexec "$@"',
+    )
+    old_helper = install_fake_command(tmp_path, "old-root-helper", 'echo "Unsupported subcommand" >&2\nexit 2')
+    env = wrapper_environment(context, tmp_path)
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "ASCEND_BENCHMARK_USE_SUDO": "auto",
+            "ASCEND_BENCHMARK_ROOT_HELPER": str(old_helper),
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(CLEANUP_WRAPPER), "stale"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 1
+    assert "root cleanup failed" in result.stderr
+    assert "Unsupported subcommand" in result.stderr
+
+
+def test_wrapper_invokes_current_root_helper_end_to_end(tmp_path: Path, context: dict[str, str]) -> None:
+    fake_bin = tmp_path / "bin"
+    install_fake_command(
+        fake_bin,
+        "sudo",
+        'while [[ "$#" -gt 0 && "$1" == -* ]]; do shift; done\nexec "$@"',
+    )
+    env = wrapper_environment(context, tmp_path)
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "ASCEND_BENCHMARK_USE_SUDO": "1",
+            "ASCEND_BENCHMARK_ROOT_HELPER": str(ROOT_HELPER),
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(CLEANUP_WRAPPER), "current"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "No current Ascend benchmark EngineCore processes found." in result.stdout

@@ -23,28 +23,41 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-OWNER_KEYS = (
+LEGACY_OWNER_KEYS = (
     "GITHUB_REPOSITORY",
     "GITHUB_WORKFLOW",
     "GITHUB_JOB",
+)
+RUNNER_KEYS = (
     "RUNNER_NAME",
     "RUNNER_WORKSPACE",
 )
 RUN_KEYS = ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")
-REQUIRED_KEYS = OWNER_KEYS + RUN_KEYS
+REQUIRED_CONTEXT_KEYS = LEGACY_OWNER_KEYS + RUNNER_KEYS + RUN_KEYS
+
+
+class ProcessDisappeared(Exception):
+    """The process exited while its procfs metadata was being inspected."""
+
+
+class ProcessInspectionError(RuntimeError):
+    """A process exists but cannot be inspected safely."""
 
 
 @dataclass(frozen=True)
 class ProcessInfo:
     pid: int
-    environment: Mapping[str, str]
 
 
 def read_bytes(path: Path) -> bytes:
     try:
         return path.read_bytes()
-    except OSError:
-        return b""
+    except (FileNotFoundError, ProcessLookupError) as exc:
+        raise ProcessDisappeared from exc
+    except PermissionError as exc:
+        raise ProcessInspectionError(f"permission denied reading {path}") from exc
+    except OSError as exc:
+        raise ProcessInspectionError(f"cannot read {path}: {exc}") from exc
 
 
 def read_environment(path: Path) -> dict[str, str]:
@@ -68,22 +81,27 @@ def is_engine_core(process_dir: Path) -> bool:
 
 
 def validate_context(environment: Mapping[str, str]) -> dict[str, str]:
-    missing = [key for key in REQUIRED_KEYS if not environment.get(key)]
+    missing = [key for key in REQUIRED_CONTEXT_KEYS if not environment.get(key)]
     if missing:
         raise ValueError(f"missing required ownership context: {', '.join(missing)}")
-    return {key: environment[key] for key in REQUIRED_KEYS}
+    return {key: environment[key] for key in REQUIRED_CONTEXT_KEYS}
 
 
 def belongs_to_context(process_environment: Mapping[str, str], context: Mapping[str, str], mode: str) -> bool:
-    if any(process_environment.get(key) != context[key] for key in OWNER_KEYS):
+    if any(process_environment.get(key) != context[key] for key in LEGACY_OWNER_KEYS):
         return False
 
-    process_run = tuple(process_environment.get(key) for key in RUN_KEYS)
-    current_run = tuple(context[key] for key in RUN_KEYS)
     if mode == "current":
-        return process_run == current_run
+        return all(process_environment.get(key) == context[key] for key in RUNNER_KEYS + RUN_KEYS)
     if mode == "stale":
-        return all(process_run) and process_run != current_run
+        # Old sudo helpers did not preserve runner or attempt metadata. Reject
+        # an explicit runner mismatch, but accept missing legacy fields while
+        # the workflow holds the host-local Ascend hardware lock.
+        if any(process_environment.get(key) not in (None, "", context[key]) for key in RUNNER_KEYS):
+            return False
+        process_run_id = process_environment.get("GITHUB_RUN_ID")
+        process_attempt = process_environment.get("GITHUB_RUN_ATTEMPT")
+        return process_run_id != context["GITHUB_RUN_ID"] or process_attempt != context["GITHUB_RUN_ATTEMPT"]
     raise ValueError(f"unsupported cleanup mode: {mode}")
 
 
@@ -95,11 +113,27 @@ def find_matching_processes(proc_root: Path, context: Mapping[str, str], mode: s
         raise RuntimeError(f"cannot scan process directory {proc_root}: {exc}") from exc
 
     for process_dir in entries:
-        if not process_dir.name.isdigit() or not is_engine_core(process_dir):
+        if not process_dir.name.isdigit():
             continue
-        environment = read_environment(process_dir / "environ")
+        try:
+            if not is_engine_core(process_dir):
+                continue
+            environment = read_environment(process_dir / "environ")
+        except ProcessDisappeared:
+            continue
+
+        # A known mismatch is enough to establish that this process belongs to
+        # another workload. Otherwise incomplete stable metadata is ambiguous
+        # and must fail closed instead of being reported as "no processes".
+        if any(environment.get(key) and environment[key] != context[key] for key in LEGACY_OWNER_KEYS):
+            continue
+        missing_legacy_keys = [key for key in LEGACY_OWNER_KEYS if not environment.get(key)]
+        if missing_legacy_keys:
+            raise ProcessInspectionError(
+                f"EngineCore PID {process_dir.name} lacks ownership metadata: {', '.join(missing_legacy_keys)}"
+            )
         if belongs_to_context(environment, context, mode):
-            matches.append(ProcessInfo(pid=int(process_dir.name), environment=environment))
+            matches.append(ProcessInfo(pid=int(process_dir.name)))
     return sorted(matches, key=lambda process: process.pid)
 
 
