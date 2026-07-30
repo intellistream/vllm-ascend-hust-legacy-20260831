@@ -93,6 +93,12 @@ def install_fake_command(directory: Path, name: str, content: str) -> Path:
     return command
 
 
+@pytest.fixture(autouse=True)
+def fake_pidfds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cleanup, "open_process_handle", lambda pid: pid)
+    monkeypatch.setattr(cleanup, "close_process_handle", lambda _pidfd: None)
+
+
 def test_current_mode_matches_only_exact_run(tmp_path: Path, context: dict[str, str]) -> None:
     create_process(tmp_path, 101, context)
     create_process(tmp_path, 102, {**context, "GITHUB_RUN_ATTEMPT": "1"})
@@ -109,16 +115,12 @@ def test_stale_mode_matches_previous_run_or_attempt(tmp_path: Path, context: dic
     assert matching_pids(tmp_path, context, "stale") == [202, 203]
 
 
-def test_stale_mode_matches_legacy_process_without_runner_or_run_metadata(
-    tmp_path: Path, context: dict[str, str]
-) -> None:
+def test_stale_mode_fails_closed_without_runner_or_run_metadata(tmp_path: Path, context: dict[str, str]) -> None:
     legacy_environment = {key: context[key] for key in cleanup.LEGACY_OWNER_KEYS}
     create_process(tmp_path, 204, legacy_environment)
 
-    matches = cleanup.find_matching_processes(tmp_path, context, "stale")
-
-    assert [process.pid for process in matches] == [204]
-    assert matching_pids(tmp_path, context, "current") == []
+    with pytest.raises(cleanup.ProcessInspectionError, match="lacks stable runner metadata"):
+        cleanup.find_matching_processes(tmp_path, context, "stale")
 
 
 def test_stale_mode_rejects_explicit_runner_mismatch_in_legacy_process(tmp_path: Path, context: dict[str, str]) -> None:
@@ -148,7 +150,9 @@ def test_owner_boundary_mismatch_is_not_selected(tmp_path: Path, context: dict[s
     assert matching_pids(tmp_path, context, "stale") == []
 
 
-def test_cleanup_escalates_from_term_to_kill(tmp_path: Path, context: dict[str, str]) -> None:
+def test_cleanup_escalates_from_term_to_kill(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     create_process(tmp_path, 401, context)
     signals: list[tuple[int, int]] = []
 
@@ -157,22 +161,25 @@ def test_cleanup_escalates_from_term_to_kill(tmp_path: Path, context: dict[str, 
         if signum == signal.SIGKILL:
             shutil.rmtree(tmp_path / str(pid))
 
-    matched, remaining = cleanup.cleanup_processes(
+    monkeypatch.setattr(cleanup, "send_process_signal", fake_kill)
+    matched, signaled, remaining = cleanup.cleanup_processes(
         tmp_path,
         context,
         "current",
         term_timeout_seconds=0,
         kill_timeout_seconds=0,
-        kill=fake_kill,
         sleep=lambda _: None,
     )
 
     assert matched == [401]
+    assert signaled == [401]
     assert remaining == []
     assert signals == [(401, signal.SIGTERM), (401, signal.SIGKILL)]
 
 
-def test_cleanup_rescans_ownership_before_kill(tmp_path: Path, context: dict[str, str]) -> None:
+def test_cleanup_rescans_ownership_before_kill(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     create_process(tmp_path, 501, context)
     signals: list[tuple[int, int]] = []
 
@@ -181,17 +188,18 @@ def test_cleanup_rescans_ownership_before_kill(tmp_path: Path, context: dict[str
         if signum == signal.SIGTERM:
             create_process(tmp_path, pid, {**context, "RUNNER_NAME": "another-runner"})
 
-    matched, remaining = cleanup.cleanup_processes(
+    monkeypatch.setattr(cleanup, "send_process_signal", fake_kill)
+    matched, signaled, remaining = cleanup.cleanup_processes(
         tmp_path,
         context,
         "current",
         term_timeout_seconds=0,
         kill_timeout_seconds=0,
-        kill=fake_kill,
         sleep=lambda _: None,
     )
 
     assert matched == [501]
+    assert signaled == [501]
     assert remaining == []
     assert signals == [(501, signal.SIGTERM)]
 
@@ -214,19 +222,44 @@ def test_cleanup_rescans_start_time_before_term(
 
     monkeypatch.setattr(cleanup, "find_matching_processes", replace_process_after_scan)
 
-    matched, remaining = cleanup.cleanup_processes(
+    monkeypatch.setattr(cleanup, "send_process_signal", lambda pid, signum: signals.append((pid, signum)))
+    matched, signaled, remaining = cleanup.cleanup_processes(
         tmp_path,
         context,
         "current",
         term_timeout_seconds=0,
         kill_timeout_seconds=0,
-        kill=lambda pid, signum: signals.append((pid, signum)),
         sleep=lambda _: None,
     )
 
     assert matched == [502]
+    assert signaled == []
     assert remaining == []
     assert signals == []
+
+
+def test_signal_uses_verified_pidfd(tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    create_process(tmp_path, 503, context)
+    opened: list[int] = []
+    closed: list[int] = []
+    signals: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(cleanup, "open_process_handle", lambda pid: opened.append(pid) or 73)
+    monkeypatch.setattr(cleanup, "close_process_handle", closed.append)
+    monkeypatch.setattr(cleanup, "send_process_signal", lambda pidfd, signum: signals.append((pidfd, signum)))
+
+    signaled = cleanup.signal_processes(
+        cleanup.find_matching_processes(tmp_path, context, "current"),
+        signal.SIGTERM,
+        tmp_path,
+        context,
+        "current",
+    )
+
+    assert signaled == [503]
+    assert opened == [503]
+    assert signals == [(73, signal.SIGTERM)]
+    assert closed == [73]
 
 
 def test_unreadable_engine_core_environment_fails_closed(
@@ -259,20 +292,22 @@ def test_incomplete_metadata_with_known_repository_mismatch_is_ignored(tmp_path:
     assert matching_pids(tmp_path, context, "stale") == []
 
 
-def test_signal_permission_failure_is_reported(tmp_path: Path, context: dict[str, str]) -> None:
+def test_signal_permission_failure_is_reported(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     create_process(tmp_path, 603, context)
 
     def deny_signal(_pid: int, _signum: int) -> None:
         raise PermissionError
 
-    with pytest.raises(RuntimeError, match="permission denied signaling PID 603"):
+    monkeypatch.setattr(cleanup, "send_process_signal", deny_signal)
+    with pytest.raises(cleanup.ProcessInspectionError, match="permission denied signaling EngineCore process"):
         cleanup.cleanup_processes(
             tmp_path,
             context,
             "current",
             term_timeout_seconds=0,
             kill_timeout_seconds=0,
-            kill=deny_signal,
             sleep=lambda _: None,
         )
 

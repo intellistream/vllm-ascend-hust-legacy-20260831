@@ -88,6 +88,38 @@ def read_start_time(process_dir: Path) -> int:
         raise ProcessInspectionError(f"invalid process start time: {process_dir / 'stat'}") from exc
 
 
+def open_process_handle(pid: int) -> int:
+    pidfd_open = getattr(os, "pidfd_open", None)
+    if pidfd_open is None or not hasattr(signal, "pidfd_send_signal"):
+        raise ProcessInspectionError("pidfd support is required for safe EngineCore cleanup")
+    try:
+        return pidfd_open(pid)
+    except ProcessLookupError as exc:
+        raise ProcessDisappeared from exc
+    except PermissionError as exc:
+        raise ProcessInspectionError(f"permission denied opening PID {pid}") from exc
+    except OSError as exc:
+        raise ProcessInspectionError(f"cannot open PID {pid}: {exc}") from exc
+
+
+def send_process_signal(pidfd: int, signum: signal.Signals) -> None:
+    try:
+        signal.pidfd_send_signal(pidfd, signum)
+    except ProcessLookupError as exc:
+        raise ProcessDisappeared from exc
+    except PermissionError as exc:
+        raise ProcessInspectionError("permission denied signaling EngineCore process") from exc
+    except OSError as exc:
+        raise ProcessInspectionError(f"cannot signal EngineCore process: {exc}") from exc
+
+
+def close_process_handle(pidfd: int) -> None:
+    try:
+        os.close(pidfd)
+    except OSError:
+        pass
+
+
 def is_engine_core(process_dir: Path) -> bool:
     status = read_bytes(process_dir / "status").decode(errors="replace")
     for line in status.splitlines():
@@ -112,14 +144,9 @@ def belongs_to_context(process_environment: Mapping[str, str], context: Mapping[
     if mode == "current":
         return all(process_environment.get(key) == context[key] for key in RUNNER_KEYS + RUN_KEYS)
     if mode == "stale":
-        # Old sudo helpers did not preserve runner or attempt metadata. Reject
-        # an explicit runner mismatch, but accept missing legacy fields while
-        # the workflow holds the host-local Ascend hardware lock.
-        if any(process_environment.get(key) not in (None, "", context[key]) for key in RUNNER_KEYS):
-            return False
-        process_run_id = process_environment.get("GITHUB_RUN_ID")
-        process_attempt = process_environment.get("GITHUB_RUN_ATTEMPT")
-        return process_run_id != context["GITHUB_RUN_ID"] or process_attempt != context["GITHUB_RUN_ATTEMPT"]
+        return all(process_environment.get(key) == context[key] for key in RUNNER_KEYS) and any(
+            process_environment.get(key) != context[key] for key in RUN_KEYS
+        )
     raise ValueError(f"unsupported cleanup mode: {mode}")
 
 
@@ -140,6 +167,14 @@ def inspect_process(process_dir: Path, context: Mapping[str, str], mode: str) ->
     if missing_legacy_keys:
         raise ProcessInspectionError(
             f"EngineCore PID {process_dir.name} lacks ownership metadata: {', '.join(missing_legacy_keys)}"
+        )
+    ownership_keys = RUNNER_KEYS + RUN_KEYS
+    if any(environment.get(key) and environment[key] != context[key] for key in RUNNER_KEYS):
+        return None
+    missing_ownership_keys = [key for key in ownership_keys if not environment.get(key)]
+    if missing_ownership_keys:
+        raise ProcessInspectionError(
+            f"EngineCore PID {process_dir.name} lacks stable runner metadata: {', '.join(missing_ownership_keys)}"
         )
     if not belongs_to_context(environment, context, mode):
         return None
@@ -168,24 +203,30 @@ def find_matching_processes(proc_root: Path, context: Mapping[str, str], mode: s
 def signal_processes(
     processes: Sequence[ProcessInfo],
     signum: signal.Signals,
-    kill: Callable[[int, int], None],
     proc_root: Path,
     context: Mapping[str, str],
     mode: str,
-) -> None:
+) -> list[int]:
+    signaled: list[int] = []
     for process in processes:
         try:
-            current = inspect_process(proc_root / str(process.pid), context, mode)
+            pidfd = open_process_handle(process.pid)
         except ProcessDisappeared:
             continue
-        if current != process:
-            continue
         try:
-            kill(process.pid, signum)
-        except ProcessLookupError:
+            current = inspect_process(proc_root / str(process.pid), context, mode)
+            if current != process:
+                continue
+            send_process_signal(pidfd, signum)
+            if process.pid not in signaled:
+                signaled.append(process.pid)
+        except ProcessDisappeared:
             continue
         except PermissionError as exc:
-            raise RuntimeError(f"permission denied signaling PID {process.pid}") from exc
+            raise ProcessInspectionError("permission denied signaling EngineCore process") from exc
+        finally:
+            close_process_handle(pidfd)
+    return signaled
 
 
 def wait_for_exit(
@@ -211,19 +252,20 @@ def cleanup_processes(
     term_timeout_seconds: float,
     kill_timeout_seconds: float,
     poll_seconds: float = 0.2,
-    kill: Callable[[int, int], None] = os.kill,
     sleep: Callable[[float], None] = time.sleep,
-) -> tuple[list[int], list[int]]:
+) -> tuple[list[int], list[int], list[int]]:
     initial = find_matching_processes(proc_root, context, mode)
     if not initial:
-        return [], []
+        return [], [], []
 
-    signal_processes(initial, signal.SIGTERM, kill, proc_root, context, mode)
+    signaled = signal_processes(initial, signal.SIGTERM, proc_root, context, mode)
     remaining = wait_for_exit(proc_root, context, mode, term_timeout_seconds, poll_seconds, sleep)
     if remaining:
-        signal_processes(remaining, signal.SIGKILL, kill, proc_root, context, mode)
+        for pid in signal_processes(remaining, signal.SIGKILL, proc_root, context, mode):
+            if pid not in signaled:
+                signaled.append(pid)
         remaining = wait_for_exit(proc_root, context, mode, kill_timeout_seconds, poll_seconds, sleep)
-    return [process.pid for process in initial], [process.pid for process in remaining]
+    return [process.pid for process in initial], signaled, [process.pid for process in remaining]
 
 
 def parse_args() -> argparse.Namespace:
@@ -239,7 +281,7 @@ def main() -> int:
     args = parse_args()
     try:
         context = validate_context(os.environ)
-        matched, remaining = cleanup_processes(
+        matched, signaled, remaining = cleanup_processes(
             proc_root=args.proc_root,
             context=context,
             mode=args.mode,
@@ -260,7 +302,10 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"Cleaned {args.mode} Ascend benchmark EngineCore process(es): {matched}")
+    skipped = [pid for pid in matched if pid not in signaled]
+    if skipped:
+        print(f"Skipped changed {args.mode} Ascend benchmark EngineCore process(es): {skipped}")
+    print(f"Cleaned {args.mode} Ascend benchmark EngineCore process(es): {signaled}")
     return 0
 
 
