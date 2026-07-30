@@ -54,6 +54,7 @@ def create_process(
     *,
     engine_core: bool = True,
     start_time: int | None = None,
+    process_group: int | None = None,
 ) -> None:
     process_dir = proc_root / str(pid)
     process_dir.mkdir(parents=True, exist_ok=True)
@@ -63,7 +64,13 @@ def create_process(
     (process_dir / "cmdline").write_bytes(cmdline)
     environ = b"\0".join(f"{key}={value}".encode() for key, value in environment.items()) + b"\0"
     (process_dir / "environ").write_bytes(environ)
-    stat_suffix = ["S", *("0" for _ in range(18)), str(start_time if start_time is not None else pid * 100)]
+    stat_suffix = [
+        "S",
+        "0",
+        str(process_group if process_group is not None else pid),
+        *("0" for _ in range(16)),
+        str(start_time if start_time is not None else pid * 100),
+    ]
     (process_dir / "stat").write_text(f"{pid} ({name}) {' '.join(stat_suffix)}\n", encoding="utf-8")
 
 
@@ -119,8 +126,11 @@ def test_stale_mode_fails_closed_without_runner_or_run_metadata(tmp_path: Path, 
     legacy_environment = {key: context[key] for key in cleanup.LEGACY_OWNER_KEYS}
     create_process(tmp_path, 204, legacy_environment)
 
-    with pytest.raises(cleanup.ProcessInspectionError, match="lacks stable runner metadata"):
-        cleanup.find_matching_processes(tmp_path, context, "stale")
+    matches, ambiguities = cleanup.find_matching_processes_with_ambiguities(tmp_path, context, "stale")
+
+    assert matches == []
+    assert len(ambiguities) == 1
+    assert "lacks stable runner metadata" in ambiguities[0]
 
 
 def test_stale_mode_rejects_explicit_runner_mismatch_in_legacy_process(tmp_path: Path, context: dict[str, str]) -> None:
@@ -162,7 +172,7 @@ def test_cleanup_escalates_from_term_to_kill(
             shutil.rmtree(tmp_path / str(pid))
 
     monkeypatch.setattr(cleanup, "send_process_signal", fake_kill)
-    matched, signaled, remaining = cleanup.cleanup_processes(
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_processes(
         tmp_path,
         context,
         "current",
@@ -174,6 +184,7 @@ def test_cleanup_escalates_from_term_to_kill(
     assert matched == [401]
     assert signaled == [401]
     assert remaining == []
+    assert ambiguities == []
     assert signals == [(401, signal.SIGTERM), (401, signal.SIGKILL)]
 
 
@@ -189,7 +200,7 @@ def test_cleanup_rescans_ownership_before_kill(
             create_process(tmp_path, pid, {**context, "RUNNER_NAME": "another-runner"})
 
     monkeypatch.setattr(cleanup, "send_process_signal", fake_kill)
-    matched, signaled, remaining = cleanup.cleanup_processes(
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_processes(
         tmp_path,
         context,
         "current",
@@ -201,6 +212,7 @@ def test_cleanup_rescans_ownership_before_kill(
     assert matched == [501]
     assert signaled == [501]
     assert remaining == []
+    assert ambiguities == []
     assert signals == [(501, signal.SIGTERM)]
 
 
@@ -209,10 +221,10 @@ def test_cleanup_rescans_start_time_before_term(
 ) -> None:
     create_process(tmp_path, 502, context, start_time=1000)
     signals: list[tuple[int, int]] = []
-    original_find_matching_processes = cleanup.find_matching_processes
+    original_find_matching_processes = cleanup.find_matching_processes_with_ambiguities
     first_scan = True
 
-    def replace_process_after_scan(proc_root: Path, owner: dict[str, str], mode: str) -> list[object]:
+    def replace_process_after_scan(proc_root: Path, owner: dict[str, str], mode: str) -> tuple[list[object], list[str]]:
         nonlocal first_scan
         matches = original_find_matching_processes(proc_root, owner, mode)
         if first_scan:
@@ -220,10 +232,10 @@ def test_cleanup_rescans_start_time_before_term(
             create_process(tmp_path, 502, {**context, "GITHUB_JOB": "another-job"}, start_time=2000)
         return matches
 
-    monkeypatch.setattr(cleanup, "find_matching_processes", replace_process_after_scan)
+    monkeypatch.setattr(cleanup, "find_matching_processes_with_ambiguities", replace_process_after_scan)
 
     monkeypatch.setattr(cleanup, "send_process_signal", lambda pid, signum: signals.append((pid, signum)))
-    matched, signaled, remaining = cleanup.cleanup_processes(
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_processes(
         tmp_path,
         context,
         "current",
@@ -235,6 +247,7 @@ def test_cleanup_rescans_start_time_before_term(
     assert matched == [502]
     assert signaled == []
     assert remaining == []
+    assert ambiguities == []
     assert signals == []
 
 
@@ -262,6 +275,77 @@ def test_signal_uses_verified_pidfd(tmp_path: Path, context: dict[str, str], mon
     assert closed == [73]
 
 
+def test_marker_cleanup_signals_owned_process_group_members_before_reporting_ambiguity(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker_file = tmp_path / "server.marker"
+    create_process(tmp_path, 701, context, engine_core=False, start_time=7001, process_group=701)
+    create_process(tmp_path, 702, context, engine_core=False, process_group=701)
+    create_process(
+        tmp_path,
+        703,
+        {"GITHUB_REPOSITORY": context["GITHUB_REPOSITORY"]},
+        engine_core=False,
+        process_group=701,
+    )
+    cleanup.record_process_marker(marker_file, 701, tmp_path, context)
+    signals: list[tuple[int, int]] = []
+
+    def fake_signal(pid: int, signum: int) -> None:
+        signals.append((pid, signum))
+        shutil.rmtree(tmp_path / str(pid))
+
+    monkeypatch.setattr(cleanup, "send_process_signal", fake_signal)
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_marker_group(
+        marker_file,
+        tmp_path,
+        context,
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        sleep=lambda _: None,
+    )
+
+    assert matched == [701, 702]
+    assert signaled == [701, 702]
+    assert remaining == []
+    assert signals == [(701, signal.SIGTERM), (702, signal.SIGTERM)]
+    assert len(ambiguities) == 1
+    assert "PID 703 lacks ownership metadata" in ambiguities[0]
+    assert marker_file.exists()
+
+
+def test_marker_cleanup_handles_children_after_launcher_exits(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker_file = tmp_path / "server.marker"
+    create_process(tmp_path, 711, context, engine_core=False, start_time=7101, process_group=711)
+    create_process(tmp_path, 712, context, engine_core=False, process_group=711)
+    cleanup.record_process_marker(marker_file, 711, tmp_path, context)
+    shutil.rmtree(tmp_path / "711")
+    signals: list[tuple[int, int]] = []
+
+    def fake_signal(pid: int, signum: int) -> None:
+        signals.append((pid, signum))
+        shutil.rmtree(tmp_path / str(pid))
+
+    monkeypatch.setattr(cleanup, "send_process_signal", fake_signal)
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_marker_group(
+        marker_file,
+        tmp_path,
+        context,
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        sleep=lambda _: None,
+    )
+
+    assert matched == [712]
+    assert signaled == [712]
+    assert remaining == []
+    assert ambiguities == []
+    assert signals == [(712, signal.SIGTERM)]
+    assert not marker_file.exists()
+
+
 def test_unreadable_engine_core_environment_fails_closed(
     tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -275,15 +359,50 @@ def test_unreadable_engine_core_environment_fails_closed(
 
     monkeypatch.setattr(Path, "read_bytes", deny_environment)
 
-    with pytest.raises(cleanup.ProcessInspectionError, match="permission denied reading"):
-        cleanup.find_matching_processes(tmp_path, context, "current")
+    matches, ambiguities = cleanup.find_matching_processes_with_ambiguities(tmp_path, context, "current")
+
+    assert matches == []
+    assert len(ambiguities) == 1
+    assert "permission denied reading" in ambiguities[0]
 
 
 def test_engine_core_without_stable_ownership_metadata_fails_closed(tmp_path: Path, context: dict[str, str]) -> None:
     create_process(tmp_path, 602, {"GITHUB_REPOSITORY": context["GITHUB_REPOSITORY"]})
 
-    with pytest.raises(cleanup.ProcessInspectionError, match="lacks ownership metadata"):
-        cleanup.find_matching_processes(tmp_path, context, "stale")
+    matches, ambiguities = cleanup.find_matching_processes_with_ambiguities(tmp_path, context, "stale")
+
+    assert matches == []
+    assert len(ambiguities) == 1
+    assert "lacks ownership metadata" in ambiguities[0]
+
+
+def test_cleanup_signals_proven_processes_before_reporting_ambiguous_process(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_process(tmp_path, 610, context)
+    create_process(tmp_path, 611, {"GITHUB_REPOSITORY": context["GITHUB_REPOSITORY"]})
+    signals: list[tuple[int, int]] = []
+
+    def fake_signal(pid: int, signum: int) -> None:
+        signals.append((pid, signum))
+        shutil.rmtree(tmp_path / str(pid))
+
+    monkeypatch.setattr(cleanup, "send_process_signal", fake_signal)
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_processes(
+        tmp_path,
+        context,
+        "current",
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        sleep=lambda _: None,
+    )
+
+    assert matched == [610]
+    assert signaled == [610]
+    assert remaining == []
+    assert signals == [(610, signal.SIGTERM)]
+    assert len(ambiguities) == 1
+    assert "PID 611 lacks ownership metadata" in ambiguities[0]
 
 
 def test_incomplete_metadata_with_known_repository_mismatch_is_ignored(tmp_path: Path, context: dict[str, str]) -> None:

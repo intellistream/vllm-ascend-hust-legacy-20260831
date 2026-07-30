@@ -427,33 +427,21 @@ cleanup() {
   fi
   cleanup_ran=1
 
-  if [[ -n "$server_group_pid" ]]; then
-    kill -TERM -- "-$server_group_pid" 2>/dev/null || true
-    for _ in $(seq 1 10); do
-      if ! kill -0 -- "-$server_group_pid" 2>/dev/null; then
-        break
-      fi
-      sleep 1
-    done
-    kill -KILL -- "-$server_group_pid" 2>/dev/null || true
-  elif [[ -n "$server_pid" ]] && kill -0 "$server_pid" 2>/dev/null; then
-    kill "$server_pid" 2>/dev/null || true
-  fi
+  # The marker records the launcher's stable identity. The shared utility then
+  # verifies and signals every current-job member of its process group by pidfd.
+  VLLM_ASCEND_HUST_REPO="$VLLM_ASCEND_HUST_REPO" \
+    PYTHON_BIN="$PYTHON_BIN" \
+    ASCEND_BENCHMARK_CLEANUP_MARKER_FILE="$SERVER_PID_MARKER" \
+    bash "$SCRIPT_DIR/cleanup_ascend_benchmark_processes.sh" current || \
+    echo "Warning: final EngineCore cleanup did not complete" >&2
 
   if [[ -n "$server_pid" ]]; then
     wait "$server_pid" || true
   fi
 
-  # EngineCore workers can escape the launcher's process group. The shared
-  # cleanup utility verifies complete job ownership before signaling them.
-  VLLM_ASCEND_HUST_REPO="$VLLM_ASCEND_HUST_REPO" \
-    PYTHON_BIN="$PYTHON_BIN" \
-    bash "$SCRIPT_DIR/cleanup_ascend_benchmark_processes.sh" current || \
-    echo "Warning: final EngineCore cleanup did not complete" >&2
-
   server_pid=""
   server_group_pid=""
-  rm -f "$SERVER_PID_MARKER" "$SERVER_PGID_MARKER"
+  rm -f "$SERVER_PGID_MARKER"
 }
 
 same_spec_server_log_indicates_resource_busy() {
@@ -493,8 +481,15 @@ runtime_ready_log_indicates_node_env_failure() {
 cleanup_previous_ci_processes() {
   VLLM_ASCEND_HUST_REPO="$VLLM_ASCEND_HUST_REPO" \
     PYTHON_BIN="$PYTHON_BIN" \
+    ASCEND_BENCHMARK_CLEANUP_MARKER_FILE="$SERVER_PID_MARKER" \
     bash "$SCRIPT_DIR/cleanup_ascend_benchmark_processes.sh" current
-  rm -f "$SERVER_PID_MARKER" "$SERVER_PGID_MARKER"
+  rm -f "$SERVER_PGID_MARKER"
+}
+
+record_server_marker() {
+  "$PYTHON_BIN" "$SCRIPT_DIR/cleanup_ascend_benchmark_processes.py" \
+    --record-marker "$SERVER_PID_MARKER" \
+    --pid "$server_pid"
 }
 
 wait_for_ascend_runtime_ready() {
@@ -600,6 +595,7 @@ start_server() {
     server_group_pid=$server_pid
     printf '%s\n' "$server_pid" >"$SERVER_PID_MARKER"
     printf '%s\n' "$server_group_pid" >"$SERVER_PGID_MARKER"
+    record_server_marker
   else
     if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
       run_ascend_root_helper serve >"$SERVER_LOG" 2>&1 &
@@ -615,6 +611,7 @@ start_server() {
     fi
     server_pid=$!
     printf '%s\n' "$server_pid" >"$SERVER_PID_MARKER"
+    record_server_marker
   fi
 }
 

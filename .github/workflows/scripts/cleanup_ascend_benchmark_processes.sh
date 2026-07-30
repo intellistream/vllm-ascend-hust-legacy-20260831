@@ -74,6 +74,9 @@ cleanup_args=(
 if [[ -n "${ASCEND_BENCHMARK_CLEANUP_PROC_ROOT:-}" ]]; then
   cleanup_args+=(--proc-root "$ASCEND_BENCHMARK_CLEANUP_PROC_ROOT")
 fi
+if [[ -n "${ASCEND_BENCHMARK_CLEANUP_MARKER_FILE:-}" ]]; then
+  cleanup_args+=(--marker-file "$ASCEND_BENCHMARK_CLEANUP_MARKER_FILE")
+fi
 
 if [[ "$use_sudo" == "1" ]]; then
   preserve_list=$(IFS=,; printf '%s' "${ownership_vars[*]}")
