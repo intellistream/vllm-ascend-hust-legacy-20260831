@@ -270,6 +270,7 @@ def cleanup_marker_group(
     marker_file: Path,
     proc_root: Path,
     context: Mapping[str, str],
+    mode: str,
     term_timeout_seconds: float,
     kill_timeout_seconds: float,
     poll_seconds: float = 0.2,
@@ -285,42 +286,62 @@ def cleanup_marker_group(
         start_time = int(marker["start_time"])
     except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         return [], [], [], [f"invalid benchmark process marker {marker_file}: {exc}"]
-    if marker_context != dict(context):
-        return [], [], [], [f"benchmark process marker {marker_file} belongs to another job"]
+    try:
+        marker_context = validate_context(marker_context)
+    except ValueError as exc:
+        return [], [], [], [f"invalid benchmark process marker {marker_file} context: {exc}"]
+
+    if mode == "current":
+        if marker_context != dict(context):
+            return [], [], [], [f"benchmark process marker {marker_file} belongs to another job"]
+    elif mode == "stale":
+        if any(marker_context[key] != context[key] for key in LEGACY_OWNER_KEYS + RUNNER_KEYS):
+            return [], [], [], [f"stale benchmark process marker {marker_file} belongs to another runner/job"]
+        if all(marker_context[key] == context[key] for key in RUN_KEYS):
+            return [], [], [], [f"benchmark process marker {marker_file} is not stale"]
+    else:
+        return [], [], [], [f"unsupported marker cleanup mode: {mode}"]
+
+    process_context = marker_context if mode == "stale" else context
 
     leader_dir = proc_root / str(pid)
     try:
         leader_is_current = (
             read_start_time(leader_dir) == start_time
             and read_process_group(leader_dir) == process_group
-            and inspect_process(leader_dir, context, "current", require_engine_core=False) is not None
+            and inspect_process(leader_dir, process_context, "current", require_engine_core=False) is not None
         )
     except ProcessDisappeared:
         leader_is_current = False
     except ProcessInspectionError:
         leader_is_current = False
 
-    initial, ambiguities = find_marker_group_processes(proc_root, process_group, context)
+    initial, ambiguities = find_marker_group_processes(proc_root, process_group, process_context)
     if not leader_is_current and not initial and not ambiguities:
         marker_file.unlink(missing_ok=True)
         return [], [], [], []
-    signaled = signal_processes(initial, signal.SIGTERM, proc_root, context, "current", require_engine_core=False)
+    signaled, signal_ambiguities = signal_processes(
+        initial, signal.SIGTERM, proc_root, process_context, "current", require_engine_core=False
+    )
+    ambiguities.extend(signal_ambiguities)
     deadline = time.monotonic() + term_timeout_seconds
     while True:
-        remaining, later_ambiguities = find_marker_group_processes(proc_root, process_group, context)
+        remaining, later_ambiguities = find_marker_group_processes(proc_root, process_group, process_context)
         ambiguities.extend(later_ambiguities)
         if not remaining or time.monotonic() >= deadline:
             break
         sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
     if remaining:
-        for process_id in signal_processes(
-            remaining, signal.SIGKILL, proc_root, context, "current", require_engine_core=False
-        ):
+        kill_signaled, kill_ambiguities = signal_processes(
+            remaining, signal.SIGKILL, proc_root, process_context, "current", require_engine_core=False
+        )
+        for process_id in kill_signaled:
             if process_id not in signaled:
                 signaled.append(process_id)
+        ambiguities.extend(kill_ambiguities)
         deadline = time.monotonic() + kill_timeout_seconds
         while True:
-            remaining, later_ambiguities = find_marker_group_processes(proc_root, process_group, context)
+            remaining, later_ambiguities = find_marker_group_processes(proc_root, process_group, process_context)
             ambiguities.extend(later_ambiguities)
             if not remaining or time.monotonic() >= deadline:
                 break
@@ -343,12 +364,16 @@ def signal_processes(
     mode: str,
     *,
     require_engine_core: bool = True,
-) -> list[int]:
+) -> tuple[list[int], list[str]]:
     signaled: list[int] = []
+    ambiguities: list[str] = []
     for process in processes:
         try:
             pidfd = open_process_handle(process.pid)
         except ProcessDisappeared:
+            continue
+        except ProcessInspectionError as exc:
+            ambiguities.append(str(exc))
             continue
         try:
             current = inspect_process(
@@ -361,11 +386,15 @@ def signal_processes(
                 signaled.append(process.pid)
         except ProcessDisappeared:
             continue
+        except ProcessInspectionError as exc:
+            ambiguities.append(str(exc))
+            continue
         except PermissionError as exc:
-            raise ProcessInspectionError("permission denied signaling EngineCore process") from exc
+            ambiguities.append(f"permission denied signaling EngineCore process: {exc}")
+            continue
         finally:
             close_process_handle(pidfd)
-    return signaled
+    return signaled, ambiguities
 
 
 def wait_for_exit(
@@ -402,13 +431,16 @@ def cleanup_processes(
     if not initial:
         return [], [], [], ambiguities
 
-    signaled = signal_processes(initial, signal.SIGTERM, proc_root, context, mode)
+    signaled, signal_ambiguities = signal_processes(initial, signal.SIGTERM, proc_root, context, mode)
+    ambiguities.extend(signal_ambiguities)
     remaining, later_ambiguities = wait_for_exit(proc_root, context, mode, term_timeout_seconds, poll_seconds, sleep)
     ambiguities.extend(later_ambiguities)
     if remaining:
-        for pid in signal_processes(remaining, signal.SIGKILL, proc_root, context, mode):
+        kill_signaled, kill_ambiguities = signal_processes(remaining, signal.SIGKILL, proc_root, context, mode)
+        for pid in kill_signaled:
             if pid not in signaled:
                 signaled.append(pid)
+        ambiguities.extend(kill_ambiguities)
         remaining, later_ambiguities = wait_for_exit(
             proc_root, context, mode, kill_timeout_seconds, poll_seconds, sleep
         )
@@ -457,16 +489,13 @@ def main() -> int:
                 args.marker_file,
                 args.proc_root,
                 context,
+                args.mode,
                 max(0.0, args.term_timeout_seconds),
                 max(0.0, args.kill_timeout_seconds),
             )
     except (RuntimeError, ValueError) as exc:
         print(f"Ascend benchmark process cleanup failed: {exc}", file=sys.stderr)
         return 2
-
-    if not matched:
-        print(f"No {args.mode} Ascend benchmark EngineCore processes found.")
-        return 0
 
     remaining = sorted(set(remaining + marker_remaining))
     ambiguities = sorted(set(ambiguities + marker_ambiguities))
@@ -483,6 +512,9 @@ def main() -> int:
         for ambiguity in ambiguities:
             print(f"- {ambiguity}", file=sys.stderr)
         return 2
+    if not matched:
+        print(f"No {args.mode} Ascend benchmark EngineCore processes found.")
+        return 0
     skipped = [pid for pid in matched if pid not in signaled]
     if skipped:
         print(f"Skipped changed {args.mode} Ascend benchmark EngineCore process(es): {skipped}")

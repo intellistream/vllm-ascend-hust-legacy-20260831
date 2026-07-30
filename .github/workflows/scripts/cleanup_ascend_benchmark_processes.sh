@@ -76,6 +76,9 @@ if [[ -n "${ASCEND_BENCHMARK_CLEANUP_PROC_ROOT:-}" ]]; then
 fi
 if [[ -n "${ASCEND_BENCHMARK_CLEANUP_MARKER_FILE:-}" ]]; then
   cleanup_args+=(--marker-file "$ASCEND_BENCHMARK_CLEANUP_MARKER_FILE")
+elif [[ "$mode" == "stale" ]]; then
+  state_root=${CI_STATE_ROOT:-${VLLM_ASCEND_HUST_REPO}/../vllm-ascend-hust-ci-state}
+  cleanup_args+=(--marker-file "$state_root/runtime/process-markers/ascend-benchmark-server.pid")
 fi
 
 if [[ "$use_sudo" == "1" ]]; then

@@ -20,6 +20,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -261,7 +262,7 @@ def test_signal_uses_verified_pidfd(tmp_path: Path, context: dict[str, str], mon
     monkeypatch.setattr(cleanup, "close_process_handle", closed.append)
     monkeypatch.setattr(cleanup, "send_process_signal", lambda pidfd, signum: signals.append((pidfd, signum)))
 
-    signaled = cleanup.signal_processes(
+    signaled, ambiguities = cleanup.signal_processes(
         cleanup.find_matching_processes(tmp_path, context, "current"),
         signal.SIGTERM,
         tmp_path,
@@ -270,6 +271,7 @@ def test_signal_uses_verified_pidfd(tmp_path: Path, context: dict[str, str], mon
     )
 
     assert signaled == [503]
+    assert ambiguities == []
     assert opened == [503]
     assert signals == [(73, signal.SIGTERM)]
     assert closed == [73]
@@ -300,6 +302,7 @@ def test_marker_cleanup_signals_owned_process_group_members_before_reporting_amb
         marker_file,
         tmp_path,
         context,
+        "current",
         term_timeout_seconds=0,
         kill_timeout_seconds=0,
         sleep=lambda _: None,
@@ -333,6 +336,7 @@ def test_marker_cleanup_handles_children_after_launcher_exits(
         marker_file,
         tmp_path,
         context,
+        "current",
         term_timeout_seconds=0,
         kill_timeout_seconds=0,
         sleep=lambda _: None,
@@ -343,6 +347,36 @@ def test_marker_cleanup_handles_children_after_launcher_exits(
     assert remaining == []
     assert ambiguities == []
     assert signals == [(712, signal.SIGTERM)]
+    assert not marker_file.exists()
+
+
+def test_stale_marker_cleanup_uses_marker_run_context(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker_file = tmp_path / "server.marker"
+    old_context = {**context, "GITHUB_RUN_ID": "1779", "GITHUB_RUN_ATTEMPT": "1"}
+    create_process(tmp_path, 721, old_context, engine_core=False, start_time=7201, process_group=721)
+    cleanup.record_process_marker(marker_file, 721, tmp_path, old_context)
+
+    def fake_signal(pid: int, signum: int) -> None:
+        assert signum == signal.SIGTERM
+        shutil.rmtree(tmp_path / str(pid))
+
+    monkeypatch.setattr(cleanup, "send_process_signal", fake_signal)
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_marker_group(
+        marker_file,
+        tmp_path,
+        context,
+        "stale",
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        sleep=lambda _: None,
+    )
+
+    assert matched == [721]
+    assert signaled == [721]
+    assert remaining == []
+    assert ambiguities == []
     assert not marker_file.exists()
 
 
@@ -405,6 +439,35 @@ def test_cleanup_signals_proven_processes_before_reporting_ambiguous_process(
     assert "PID 611 lacks ownership metadata" in ambiguities[0]
 
 
+def test_main_fails_when_only_ambiguous_processes_are_found(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        cleanup,
+        "parse_args",
+        lambda: SimpleNamespace(
+            mode="current",
+            proc_root=Path("/proc"),
+            term_timeout_seconds=0,
+            kill_timeout_seconds=0,
+            marker_file=None,
+            record_marker=None,
+            pid=None,
+        ),
+    )
+    monkeypatch.setattr(cleanup, "validate_context", lambda _environment: {})
+    monkeypatch.setattr(
+        cleanup,
+        "cleanup_processes",
+        lambda **_kwargs: ([], [], [], ["PID 811 lacks stable runner metadata"]),
+    )
+
+    result = cleanup.main()
+
+    assert result == 2
+    assert "PID 811 lacks stable runner metadata" in capsys.readouterr().err
+
+
 def test_incomplete_metadata_with_known_repository_mismatch_is_ignored(tmp_path: Path, context: dict[str, str]) -> None:
     create_process(tmp_path, 604, {"GITHUB_REPOSITORY": "another/repository"})
 
@@ -420,15 +483,18 @@ def test_signal_permission_failure_is_reported(
         raise PermissionError
 
     monkeypatch.setattr(cleanup, "send_process_signal", deny_signal)
-    with pytest.raises(cleanup.ProcessInspectionError, match="permission denied signaling EngineCore process"):
-        cleanup.cleanup_processes(
-            tmp_path,
-            context,
-            "current",
-            term_timeout_seconds=0,
-            kill_timeout_seconds=0,
-            sleep=lambda _: None,
-        )
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_processes(
+        tmp_path,
+        context,
+        "current",
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        sleep=lambda _: None,
+    )
+    assert matched == [603]
+    assert signaled == []
+    assert remaining == [603]
+    assert any("permission denied signaling" in ambiguity for ambiguity in ambiguities)
 
 
 def test_missing_context_fails_closed() -> None:

@@ -77,9 +77,11 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
 
     assert "cleanup-processes)" in root_helper
     assert "cleanup_ascend_benchmark_processes.py" in root_helper
+    assert 'elif [[ "$mode" == "stale" ]]' in cleanup_wrapper
+    assert "ascend-benchmark-server.pid" in cleanup_wrapper
     assert "pkill" not in cleanup_wrapper
     assert "grep -E 'vllm|python|pytest'" not in runner_script
-    assert "ASCEND_BENCHMARK_CLEANUP_MARKER_FILE=\"$SERVER_PID_MARKER\"" in runner_script
+    assert 'ASCEND_BENCHMARK_CLEANUP_MARKER_FILE="$SERVER_PID_MARKER"' in runner_script
     assert 'kill -TERM -- "-$server_group_pid"' not in runner_script
 
 
