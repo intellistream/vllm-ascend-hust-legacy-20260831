@@ -12,12 +12,17 @@ class RecordingObserver:
     def __init__(self):
         self.records = []
         self.error_count = 0
+        self.flush_reasons = []
 
     def record(self, **fields):
         self.records.append(fields)
 
     def note_error(self):
         self.error_count += 1
+
+    def flush(self, reason):
+        self.flush_reasons.append(reason)
+        return True
 
 
 def make_runner(*, dp_size=2, dp_rank=0, on_npu=False):
@@ -86,3 +91,17 @@ def test_collective_failure_is_observed_and_original_error_propagates():
         runner._sync_metadata_across_dp(17)
     assert runner._adm_observer.records == []
     assert runner._adm_observer.error_count == 1
+
+def test_shutdown_flushes_runtime_observer():
+    runner = make_runner(dp_size=1)
+
+    runner.shutdown()
+
+    assert runner._adm_observer.flush_reasons == ["shutdown"]
+
+
+def test_shutdown_without_runtime_observer_is_safe():
+    runner = make_runner(dp_size=1)
+    runner._adm_observer = None
+
+    runner.shutdown()

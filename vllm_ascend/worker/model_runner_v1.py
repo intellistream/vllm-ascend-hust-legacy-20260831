@@ -741,6 +741,11 @@ class NPUModelRunner(GPUModelRunner):
         )
         self._adm_event_index = event_index + 1
 
+    def shutdown(self) -> None:
+        observer = getattr(self, "_adm_observer", None)
+        if observer is not None:
+            observer.flush("shutdown")
+
     def _sync_metadata_across_dp(
         self,
         num_tokens: int,
