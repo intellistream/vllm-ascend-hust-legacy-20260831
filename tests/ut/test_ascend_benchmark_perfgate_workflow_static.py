@@ -550,6 +550,16 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
     assert "VLLM_HUST_PYTHON_BIN" in prepare_step
 
 
+def test_benchmark_bootstrap_supports_container_native_python() -> None:
+    install_script = INSTALL_DEV_HUB_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'CONDA_BIN="$(resolve_conda_bin 2>/dev/null || true)"' in install_script
+    assert 'VLLM_HUST_PYTHON_BIN:-$(command -v python3' in install_script
+    assert "Conda is unavailable; reusing container Python" in install_script
+    assert "Skipping conda runtime library installation in container-native Python mode" in install_script
+    assert 'marker_root="${CI_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}}/ascend-benchmark"' in install_script
+
+
 def test_benchmark_verify_uses_resolved_python_not_conda_lookup() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     verify_step = workflow[workflow.index("Verify installation") :]
