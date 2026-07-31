@@ -466,19 +466,21 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
         "float16、float32 or bfloat16 tensor expected but got a tensor with dtype: ",
         x.scalar_type());
 
-    auto x_size = x.sizes();
-    auto rows = x_size[0];
-    auto expert_num = x_size[1];
+    auto x_size = x.sym_sizes();
+    const c10::SymInt rows = x_size[0];
+    const c10::SymInt expert_num = x_size[1];
     const at::Tensor &bias = c10::value_or_else(bias_opt, [] { return at::Tensor(); });
     if (bias.defined()) {
         TORCH_CHECK(x.scalar_type() == bias.scalar_type(), "The dtype of x and bias should be same");
         TORCH_CHECK(bias.dim() == 1, "The bias should be 1D");
-        auto bias_size = bias.sizes();
+        auto bias_size = bias.sym_sizes();
         TORCH_CHECK(bias_size[0] == expert_num, "The bias first dim should be same as x second dim");
     }
-    at::Tensor y = at::empty({rows, k}, x.options());
-    at::Tensor expert_idx = at::empty({rows, k}, x.options().dtype(at::kInt));
-    at::Tensor out = at::empty({rows, expert_num}, x.options().dtype(at::kFloat));
+    const c10::SymDimVector topk_shape = {rows, c10::SymInt(k)};
+    const c10::SymDimVector score_shape = {rows, expert_num};
+    at::Tensor y = at::empty_symint(topk_shape, x.options());
+    at::Tensor expert_idx = at::empty_symint(topk_shape, x.options().dtype(at::kInt));
+    at::Tensor out = at::empty_symint(score_shape, x.options().dtype(at::kFloat));
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y,expert_idx,out);
 }
