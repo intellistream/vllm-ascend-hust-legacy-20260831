@@ -1198,9 +1198,6 @@ PY
 }
 
 configure_single_card_ascend_device() {
-  local start_attempt="${1:-1}"
-  local selected_device_info=""
-
   if [[ "$USER_PROVIDED_ASCEND_VISIBLE_DEVICES" == "1" ]]; then
     export VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE="${VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE:-npu:0}"
     echo "using explicit Ascend visible devices from environment: $ASCEND_RT_VISIBLE_DEVICES"
@@ -1208,17 +1205,10 @@ configure_single_card_ascend_device() {
     return 0
   fi
 
-  selected_device_info="$(select_ascend_device "$start_attempt" "$NPU_SMI_BIN")"
-  if [[ -n "$selected_device_info" ]]; then
-    IFS=$'\t' read -r SELECTED_ASCEND_DEVICE SELECTED_ASCEND_DEVICE_SOURCE <<<"$selected_device_info"
-    export ASCEND_RT_VISIBLE_DEVICES="$SELECTED_ASCEND_DEVICE"
-    export VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE="npu:0"
-    echo "selected single-card Ascend device: $ASCEND_RT_VISIBLE_DEVICES (${SELECTED_ASCEND_DEVICE_SOURCE})"
-  else
-    unset ASCEND_RT_VISIBLE_DEVICES
-    unset VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE
-    echo "Could not resolve a single-card Ascend device; probing runtime without device scoping"
-  fi
+  # Dedicated runner containers provide the physical-device isolation. Do not
+  # run host-level npu-smi selection or invent a physical device id here.
+  export VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE="npu:0"
+  echo "using container-provided Ascend device visibility"
 }
 
 echo "== Ascend benchmark CI =="

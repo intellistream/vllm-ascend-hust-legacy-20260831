@@ -86,6 +86,10 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     assert "if ! command -v setsid >/dev/null 2>&1; then" in runner_script
     assert "setsid is required to launch the benchmark with an isolated process group" in runner_script
     assert "VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL" in workflow
+    assert "linux-aarch64-a2b3-pool" in workflow
+    assert "vllm-ascend-0-21-0rc1" in workflow
+    assert "      - ascend\n      - 910b\n      - docker" in workflow
+    assert 'ASCEND_RT_VISIBLE_DEVICES:' not in workflow
     assert "cleanup-ascend-benchmark:" in workflow
     assert "needs: ascend-benchmark" in workflow
     assert "if: ${{ always() && needs.ascend-benchmark.result != 'skipped' }}" in workflow
@@ -105,8 +109,11 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert (
         "runs-on:\n"
         "      - self-hosted\n"
-        "      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-0' }}\n"
-        "      - ascend-benchmark"
+        "      - ascend\n"
+        "      - 910b\n"
+        "      - docker\n"
+        "      - vllm-ascend-0-21-0rc1\n"
+        "      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-pool' }}"
     ) in workflow
     assert (
         "HARDWARE_CHIP_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_chip_model || '910B2' }}"
