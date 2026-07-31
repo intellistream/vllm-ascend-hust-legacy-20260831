@@ -654,3 +654,12 @@ def test_benchmark_repo_publish_is_gated_and_reported() -> None:
     assert "VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY" in sync_script
     assert "VLLM_HUST_BENCHMARK_GH_TOKEN" in sync_script
     assert "Benchmark repo publish target:" in sync_script
+    assert "PUBLIC_SNAPSHOT_VALIDATOR=" in sync_script
+    assert "public snapshot validator not found:" in sync_script
+    validator_call = sync_script.index(
+        '"$PYTHON_BIN" "$PUBLIC_SNAPSHOT_VALIDATOR"'
+    )
+    git_add = sync_script.index('git -C "$BENCHMARK_REPO_DIR" add')
+    git_commit = sync_script.index('git -C "$BENCHMARK_REPO_DIR" commit')
+    git_push = sync_script.index('git -C "$BENCHMARK_REPO_DIR" push')
+    assert validator_call < git_add < git_commit < git_push

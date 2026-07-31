@@ -12,6 +12,7 @@ LOCAL_SNAPSHOT_OUTPUT_DIR=${LOCAL_SNAPSHOT_OUTPUT_DIR:-}
 SNAPSHOT_MAX_PUSH_ATTEMPTS=${SNAPSHOT_MAX_PUSH_ATTEMPTS:-4}
 SNAPSHOT_PUSH_RETRY_SECONDS=${SNAPSHOT_PUSH_RETRY_SECONDS:-5}
 SNAPSHOT_COMMIT_MESSAGE=${SNAPSHOT_COMMIT_MESSAGE:-chore(data): sync benchmark publication}
+PUBLIC_SNAPSHOT_VALIDATOR=${PUBLIC_SNAPSHOT_VALIDATOR:-$BENCHMARK_REPO_DIR/scripts/validate_public_leaderboard_snapshots.py}
 GIT_COMMITTER_NAME=${GIT_COMMITTER_NAME:-vLLM-HUST Benchmark Bot}
 GIT_COMMITTER_EMAIL=${GIT_COMMITTER_EMAIL:-benchmark-bot@vllm-hust.local}
 BENCHMARK_REPO_REMOTE=${BENCHMARK_REPO_REMOTE:-origin}
@@ -84,6 +85,11 @@ if [[ ! -f "$VLLM_HUST_REPO_DIR/pyproject.toml" ]]; then
   exit 2
 fi
 
+if [[ ! -f "$PUBLIC_SNAPSHOT_VALIDATOR" ]]; then
+  echo "public snapshot validator not found: $PUBLIC_SNAPSHOT_VALIDATOR" >&2
+  exit 2
+fi
+
 if [[ "${GITHUB_ACTIONS:-}" != "true" && "${ALLOW_LOCAL_GIT_RESET:-0}" != "1" ]]; then
   echo "refusing to reset a local checkout outside GitHub Actions; set ALLOW_LOCAL_GIT_RESET=1 to override" >&2
   exit 2
@@ -126,6 +132,10 @@ prepare_publication_commit() {
       exit 2
     fi
   done
+
+  echo "Validating staged public snapshots before benchmark repository write"
+  "$PYTHON_BIN" "$PUBLIC_SNAPSHOT_VALIDATOR" \
+    --snapshot-dir "$SNAPSHOT_OUTPUT_DIR"
 
   if [[ -n "$LOCAL_SNAPSHOT_OUTPUT_DIR" ]]; then
     mkdir -p "$LOCAL_SNAPSHOT_OUTPUT_DIR"
