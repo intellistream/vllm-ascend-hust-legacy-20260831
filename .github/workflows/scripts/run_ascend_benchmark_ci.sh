@@ -571,48 +571,35 @@ start_server() {
     serve_extra_args+=(--enforce-eager)
   fi
 
-  if command -v setsid >/dev/null 2>&1; then
-    if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
-      local preserve_list
-      export_sudo_preserved_env_vars
-      preserve_list=$(build_sudo_env_preserve_list)
-      if [[ -n "$preserve_list" ]]; then
-        setsid sudo --preserve-env="$preserve_list" -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
-      else
-        setsid sudo -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
-      fi
-    else
-      setsid env VLLM_ASCEND_TORCH_PREFLIGHT=0 "${VLLM_SERVE[@]}" \
-        --model "$MODEL_NAME" \
-        --host "$HOST" \
-        --port "$PORT" \
-        --dtype "$DTYPE" \
-        "${max_model_len_args[@]}" \
-        --max-num-seqs "$MAX_NUM_SEQS" \
-        "${serve_extra_args[@]}" >"$SERVER_LOG" 2>&1 &
-    fi
-    server_pid=$!
-    server_group_pid=$server_pid
-    printf '%s\n' "$server_pid" >"$SERVER_PID_MARKER"
-    printf '%s\n' "$server_group_pid" >"$SERVER_PGID_MARKER"
-    record_server_marker
-  else
-    if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
-      run_ascend_root_helper serve >"$SERVER_LOG" 2>&1 &
-    else
-      env VLLM_ASCEND_TORCH_PREFLIGHT=0 "${VLLM_SERVE[@]}" \
-        --model "$MODEL_NAME" \
-        --host "$HOST" \
-        --port "$PORT" \
-        --dtype "$DTYPE" \
-        "${max_model_len_args[@]}" \
-        --max-num-seqs "$MAX_NUM_SEQS" \
-        "${serve_extra_args[@]}" >"$SERVER_LOG" 2>&1 &
-    fi
-    server_pid=$!
-    printf '%s\n' "$server_pid" >"$SERVER_PID_MARKER"
-    record_server_marker
+  if ! command -v setsid >/dev/null 2>&1; then
+    echo "setsid is required to launch the benchmark with an isolated process group" >&2
+    return 2
   fi
+
+  if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
+    local preserve_list
+    export_sudo_preserved_env_vars
+    preserve_list=$(build_sudo_env_preserve_list)
+    if [[ -n "$preserve_list" ]]; then
+      setsid sudo --preserve-env="$preserve_list" -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
+    else
+      setsid sudo -E -n "$ASCEND_BENCHMARK_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
+    fi
+  else
+    setsid env VLLM_ASCEND_TORCH_PREFLIGHT=0 "${VLLM_SERVE[@]}" \
+      --model "$MODEL_NAME" \
+      --host "$HOST" \
+      --port "$PORT" \
+      --dtype "$DTYPE" \
+      "${max_model_len_args[@]}" \
+      --max-num-seqs "$MAX_NUM_SEQS" \
+      "${serve_extra_args[@]}" >"$SERVER_LOG" 2>&1 &
+  fi
+  server_pid=$!
+  server_group_pid=$server_pid
+  printf '%s\n' "$server_pid" >"$SERVER_PID_MARKER"
+  printf '%s\n' "$server_group_pid" >"$SERVER_PGID_MARKER"
+  record_server_marker
 }
 
 run_completions_smoke() {

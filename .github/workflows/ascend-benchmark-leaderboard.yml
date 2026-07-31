@@ -292,7 +292,7 @@ jobs:
       issues: write
     runs-on:
       - self-hosted
-      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'ascend-runner-01' }}
+      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-0' }}
       - ascend-benchmark
     timeout-minutes: 60
     env:
@@ -1327,7 +1327,7 @@ jobs:
     if: ${{ always() && needs.ascend-benchmark.result != 'skipped' }}
     runs-on:
       - self-hosted
-      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'ascend-runner-01' }}
+      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-0' }}
       - ascend-benchmark
     timeout-minutes: 10
     permissions:

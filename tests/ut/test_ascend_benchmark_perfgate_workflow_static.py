@@ -83,6 +83,8 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     assert "grep -E 'vllm|python|pytest'" not in runner_script
     assert 'ASCEND_BENCHMARK_CLEANUP_MARKER_FILE="$SERVER_PID_MARKER"' in runner_script
     assert 'kill -TERM -- "-$server_group_pid"' not in runner_script
+    assert "if ! command -v setsid >/dev/null 2>&1; then" in runner_script
+    assert "setsid is required to launch the benchmark with an isolated process group" in runner_script
     assert "VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL" in workflow
     assert "cleanup-ascend-benchmark:" in workflow
     assert "needs: ascend-benchmark" in workflow
@@ -103,7 +105,7 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert (
         "runs-on:\n"
         "      - self-hosted\n"
-        "      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'ascend-runner-01' }}\n"
+        "      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-0' }}\n"
         "      - ascend-benchmark"
     ) in workflow
     assert (
@@ -578,7 +580,7 @@ def test_benchmark_server_uses_inferred_max_model_len_by_default() -> None:
     assert "MAX_MODEL_LEN=${MAX_MODEL_LEN:-}" in runner_script
     assert "max_model_len_args=()" in runner_script
     assert '"${max_model_len_args[@]}"' in runner_script
-    assert runner_script.count('"${max_model_len_args[@]}"') == 2
+    assert runner_script.count('"${max_model_len_args[@]}"') == 1
     assert "max_model_len_args=()" in root_helper
     assert '"${max_model_len_args[@]}"' in root_helper
     assert "MAX_MODEL_LEN must be set" not in root_helper
