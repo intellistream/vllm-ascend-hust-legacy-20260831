@@ -41,6 +41,7 @@ for var_name in "${ownership_vars[@]}"; do
     echo "Missing required Ascend benchmark cleanup context: $var_name" >&2
     exit 2
   fi
+  # shellcheck disable=SC2163 # Export the variable selected by the allowlist.
   export "$var_name"
 done
 
