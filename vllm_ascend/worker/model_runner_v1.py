@@ -162,6 +162,7 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
 )
+from vllm_ascend.worker.adm_observer import ADMRuntimeObserver
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
@@ -322,6 +323,11 @@ class NPUModelRunner(GPUModelRunner):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self._adm_observer = ADMRuntimeObserver.from_env(
+            rank=self.dp_rank,
+            dp_size=self.dp_size,
+        )
+        self._adm_event_index = 0
         self._init_dp_metadata_buffers()
 
         self.sampler = AscendSampler()
@@ -704,6 +710,37 @@ class NPUModelRunner(GPUModelRunner):
             and not self.model_config.enforce_eager
         )
 
+    def _record_adm_runtime_observation(
+        self,
+        *,
+        path: str,
+        snapshot_scope: str,
+        num_tokens: list[int],
+        cudagraph_mode: list[int],
+        collective_enter_ns: int | None,
+        pack_ns: int,
+        collective_ns: int | None,
+        copy_to_host_ns: int | None,
+        total_ns: int,
+    ) -> None:
+        observer = getattr(self, "_adm_observer", None)
+        if observer is None:
+            return
+        event_index = getattr(self, "_adm_event_index", 0)
+        observer.record(
+            event_index=event_index,
+            path=path,
+            snapshot_scope=snapshot_scope,
+            num_tokens=num_tokens,
+            cudagraph_mode=cudagraph_mode,
+            collective_enter_ns=collective_enter_ns,
+            pack_ns=pack_ns,
+            collective_ns=collective_ns,
+            copy_to_host_ns=copy_to_host_ns,
+            total_ns=total_ns,
+        )
+        self._adm_event_index = event_index + 1
+
     def _sync_metadata_across_dp(
         self,
         num_tokens: int,
@@ -717,18 +754,46 @@ class NPUModelRunner(GPUModelRunner):
         # even if we are running in eager mode, which harms performance.
         # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
         # immediately once the other two flags are no longer needed.
+        observer = getattr(self, "_adm_observer", None)
+        total_start_ns = time.perf_counter_ns() if observer is not None else 0
         if self.dp_size == 1:
+            if observer is not None:
+                self._record_adm_runtime_observation(
+                    path="dp1",
+                    snapshot_scope="local",
+                    num_tokens=[num_tokens],
+                    cudagraph_mode=[cudagraph_mode.value],
+                    collective_enter_ns=None,
+                    pack_ns=0,
+                    collective_ns=None,
+                    copy_to_host_ns=None,
+                    total_ns=time.perf_counter_ns() - total_start_ns,
+                )
             return num_tokens, None, cudagraph_mode
 
         packed_tensor, num_tokens_after_padding = self._get_dp_metadata_buffers()
 
         if should_skip_allreduce_across_dp_group(self.vllm_config, is_draft_model):
+            pack_start_ns = time.perf_counter_ns() if observer is not None else 0
             num_tokens_after_padding.fill_(num_tokens)
+            if observer is not None:
+                self._record_adm_runtime_observation(
+                    path="skip",
+                    snapshot_scope="local",
+                    num_tokens=[num_tokens],
+                    cudagraph_mode=[cudagraph_mode.value],
+                    collective_enter_ns=None,
+                    pack_ns=time.perf_counter_ns() - pack_start_ns,
+                    collective_ns=None,
+                    copy_to_host_ns=None,
+                    total_ns=time.perf_counter_ns() - total_start_ns,
+                )
             return num_tokens, num_tokens_after_padding, cudagraph_mode
 
         # On certain devices, CPU-side all_reduce may return dirty data.
         # When dp_allreduce_on_npu is True, route DP metadata
         # synchronization through the NPU device group to avoid data corruption.
+        pack_start_ns = time.perf_counter_ns() if observer is not None else 0
         device_str, group = (
             ("npu", get_dp_group().device_group)
             if self.ascend_config.dp_allreduce_on_npu
@@ -742,9 +807,32 @@ class NPUModelRunner(GPUModelRunner):
             packed_tensor.zero_()
             packed_tensor[0, self.dp_rank] = num_tokens
             packed_tensor[1, self.dp_rank] = cudagraph_mode.value
-        dist.all_reduce(packed_tensor, group=group)
+        pack_ns = (
+            time.perf_counter_ns() - pack_start_ns
+            if observer is not None
+            else 0
+        )
+        collective_enter_ns = (
+            time.perf_counter_ns() if observer is not None else None
+        )
+        collective_start_ns = collective_enter_ns or 0
+        try:
+            dist.all_reduce(packed_tensor, group=group)
+        except Exception:
+            if observer is not None:
+                observer.note_error()
+            raise
+        collective_ns = (
+            time.perf_counter_ns() - collective_start_ns
+            if observer is not None
+            else None
+        )
+        copy_to_host_ns = None
         if device_str == "npu":
+            copy_start_ns = time.perf_counter_ns() if observer is not None else 0
             packed_tensor = packed_tensor.cpu()
+            if observer is not None:
+                copy_to_host_ns = time.perf_counter_ns() - copy_start_ns
 
         # Unpack the results
         num_tokens_across_dp = packed_tensor[0, :]
@@ -756,7 +844,20 @@ class NPUModelRunner(GPUModelRunner):
             num_tokens_after_padding.fill_(max_tokens_across_dp)
         else:
             num_tokens_after_padding.copy_(num_tokens_across_dp)
-
+        if observer is not None:
+            self._record_adm_runtime_observation(
+                path=device_str,
+                snapshot_scope="global",
+                num_tokens=[int(value) for value in packed_tensor[0, :].tolist()],
+                cudagraph_mode=[
+                    int(value) for value in packed_tensor[1, :].tolist()
+                ],
+                collective_enter_ns=collective_enter_ns,
+                pack_ns=pack_ns,
+                collective_ns=collective_ns,
+                copy_to_host_ns=copy_to_host_ns,
+                total_ns=time.perf_counter_ns() - total_start_ns,
+            )
         return max_tokens_across_dp, num_tokens_after_padding, synced_cudagraph_mode
 
     def get_model(self) -> nn.Module:
