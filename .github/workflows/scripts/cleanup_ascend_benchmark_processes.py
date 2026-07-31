@@ -463,6 +463,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--record-marker", type=Path)
     parser.add_argument("--pid", type=int)
     parser.add_argument("--target-job")
+    parser.add_argument("--target-run-id")
+    parser.add_argument("--target-run-attempt")
     return parser.parse_args()
 
 
@@ -470,8 +472,12 @@ def main() -> int:
     args = parse_args()
     try:
         context = validate_context(os.environ)
-        if args.target_job:
+        if getattr(args, "target_job", None):
             context["GITHUB_JOB"] = args.target_job
+        if getattr(args, "target_run_id", None):
+            context["GITHUB_RUN_ID"] = args.target_run_id
+        if getattr(args, "target_run_attempt", None):
+            context["GITHUB_RUN_ATTEMPT"] = args.target_run_attempt
         if args.record_marker:
             if args.pid is None:
                 raise ValueError("--pid is required with --record-marker")

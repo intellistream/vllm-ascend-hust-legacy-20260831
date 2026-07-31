@@ -1342,6 +1342,8 @@ jobs:
       - name: Cleanup benchmark job processes
         env:
           ASCEND_BENCHMARK_CLEANUP_TARGET_JOB: ascend-benchmark
+          ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ID: ${{ github.run_id }}
+          ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ATTEMPT: ${{ github.run_attempt }}
           ASCEND_BENCHMARK_CLEANUP_MARKER_FILE: ${{ github.workspace }}/../vllm-ascend-hust-ci-state/runtime/process-markers/ascend-benchmark-server.pid
           ASCEND_BENCHMARK_USE_SUDO: ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_USE_SUDO || 'auto' }}
           ASCEND_BENCHMARK_ROOT_HELPER: ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_ROOT_HELPER || '' }}

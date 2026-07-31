@@ -481,6 +481,8 @@ def test_target_job_overrides_cleanup_job_identity(
         record_marker=None,
         pid=None,
         target_job="ascend-benchmark",
+        target_run_id="1780",
+        target_run_attempt="2",
     )
     captured: list[dict[str, str]] = []
     monkeypatch.setattr(cleanup, "parse_args", lambda: args)
@@ -493,7 +495,13 @@ def test_target_job_overrides_cleanup_job_identity(
     monkeypatch.setattr(cleanup, "cleanup_processes", fake_cleanup)
 
     assert cleanup.main() == 0
-    assert captured == [{"GITHUB_JOB": "ascend-benchmark"}]
+    assert captured == [
+        {
+            "GITHUB_JOB": "ascend-benchmark",
+            "GITHUB_RUN_ID": "1780",
+            "GITHUB_RUN_ATTEMPT": "2",
+        }
+    ]
 
 
 def test_incomplete_metadata_with_known_repository_mismatch_is_ignored(tmp_path: Path, context: dict[str, str]) -> None:

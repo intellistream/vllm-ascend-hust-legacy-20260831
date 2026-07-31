@@ -88,6 +88,8 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     assert "needs: ascend-benchmark" in workflow
     assert "if: ${{ always() && needs.ascend-benchmark.result != 'skipped' }}" in workflow
     assert "ASCEND_BENCHMARK_CLEANUP_TARGET_JOB: ascend-benchmark" in workflow
+    assert "ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ID: ${{ github.run_id }}" in workflow
+    assert "ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ATTEMPT: ${{ github.run_attempt }}" in workflow
     assert "ASCEND_BENCHMARK_CLEANUP_MARKER_FILE:" in workflow
     assert "timeout-minutes: 10" in workflow
 

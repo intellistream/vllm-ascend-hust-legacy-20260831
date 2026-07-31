@@ -74,6 +74,12 @@ cleanup_args=(
 if [[ -n "${ASCEND_BENCHMARK_CLEANUP_TARGET_JOB:-}" ]]; then
   cleanup_args+=(--target-job "$ASCEND_BENCHMARK_CLEANUP_TARGET_JOB")
 fi
+if [[ -n "${ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ID:-}" ]]; then
+  cleanup_args+=(--target-run-id "$ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ID")
+fi
+if [[ -n "${ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ATTEMPT:-}" ]]; then
+  cleanup_args+=(--target-run-attempt "$ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ATTEMPT")
+fi
 if [[ -n "${ASCEND_BENCHMARK_CLEANUP_PROC_ROOT:-}" ]]; then
   cleanup_args+=(--proc-root "$ASCEND_BENCHMARK_CLEANUP_PROC_ROOT")
 fi
