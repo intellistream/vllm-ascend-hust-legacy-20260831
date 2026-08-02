@@ -139,7 +139,7 @@ class VllmEplbAdaptor:
                 param_key = f"{local_idx}.{name}"
                 # Inspect the attribute without invoking __getattr__. Besides
                 # avoiding side effects from dynamic proxies, this prevents an
-                # unspecced MagicMock from fabricating the optional accessor.
+                # unspecified MagicMock from fabricating the optional accessor.
                 # The refactored MoERunner declares the accessor because its
                 # RoutedExperts child owns weights; legacy layers expose them
                 # directly.
