@@ -1,6 +1,6 @@
 """Experimental, fail-fast worker-local mapped KV offload handler.
 
-This module targets vLLM's :class:`OffloadingHandler` contract and keeps one
+This module targets vLLM's :class:`OffloadingWorker` contract and keeps one
 object responsible for tensors, registrations, and both transfer directions.
 It is selected explicitly through
 ``vllm_ascend.kv_offload.npu.MappedOffloadingSpec``:
@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -32,17 +31,13 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     GPULoadStoreSpec,
     LoadStoreSpec,
+    OffloadingWorker,
+    TransferResult,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-from vllm.v1.kv_offload.worker.worker import (
-    OffloadingHandler,
-    TransferResult,
-    TransferSpec,
-)
 
 from vllm_ascend.custom_op_package import activate_kv_cache_block_gather_runtime
-from vllm_ascend.kv_offload.cpu_npu import compute_sub_block_ptrs
 
 DIRECTION_D2H = 1
 MAPPED_GATHER_ALIGNMENT_BYTES = 32
@@ -125,6 +120,32 @@ def _new_descriptor_buffers(
     )
 
 
+def compute_sub_block_ptrs(
+    block_ids: np.ndarray,
+    block_size_factor: int,
+    output: np.ndarray,
+    tensor: torch.Tensor,
+    skip_count: int = 0,
+) -> None:
+    """Compute byte pointers for sub-blocks of the given block IDs."""
+    assert skip_count < block_size_factor
+
+    num_sub_blocks = len(output)
+    base_ptr = tensor.data_ptr()
+    row_stride = tensor.stride(0)
+
+    if block_size_factor == 1:
+        output[:] = base_ptr + block_ids.astype(np.uint64)[:num_sub_blocks] * row_stride
+        return
+
+    assert tensor.shape[1] % block_size_factor == 0
+    sub_block_size = tensor.shape[1] // block_size_factor
+    sub_offsets = np.arange(block_size_factor, dtype=np.uint64) * sub_block_size
+    all_ptrs = (base_ptr + block_ids.astype(np.uint64)[:, np.newaxis] * row_stride) + sub_offsets[np.newaxis, :]
+    flat = all_ptrs.ravel()
+    output[:] = flat[skip_count : skip_count + num_sub_blocks]
+
+
 @dataclass
 class _MappedIDBuffers:
     """One ID bundle whose lifetime is tied to one in-flight H2D job."""
@@ -147,7 +168,6 @@ class _Transfer:
     batch_dst: torch.Tensor | None
     batch_sizes: torch.Tensor | None
     mapped_id_buffers: _MappedIDBuffers | None
-    transfer_type: tuple[str, str]
     success: bool = True
     needs_stream_sync: bool = False
 
@@ -163,7 +183,7 @@ class _AsyncState:
     poisoned: bool = False
 
 
-class MappedOffloadingHandler(OffloadingHandler):
+class MappedOffloadingHandler(OffloadingWorker):
     """Worker-local offload with mandatory mapped gather for CPU-to-NPU loads."""
 
     def __init__(
@@ -283,14 +303,36 @@ class MappedOffloadingHandler(OffloadingHandler):
         self._gather_op = None
         self._unregister_op = None
 
-    @override  # type: ignore[misc]  # mypy skips the external vLLM base
-    def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
+    def transfer_async(
+        self,
+        job_id: int,
+        transfer_spec: tuple[LoadStoreSpec, LoadStoreSpec],
+    ) -> bool:
+        """Compatibility wrapper for the pre-worker vLLM offload API."""
         src_spec, dst_spec = transfer_spec
         if isinstance(src_spec, GPULoadStoreSpec) and isinstance(dst_spec, CPULoadStoreSpec):
-            return self._submit_store(job_id, src_spec, dst_spec)
+            return self.submit_store(job_id, src_spec, dst_spec)
         if isinstance(src_spec, CPULoadStoreSpec) and isinstance(dst_spec, GPULoadStoreSpec):
-            return self._submit_load(job_id, src_spec, dst_spec)
+            return self.submit_load(job_id, src_spec, dst_spec)
         raise TypeError("mapped offload supports only NPU-to-CPU stores and CPU-to-NPU loads")
+
+    @override
+    def submit_store(
+        self,
+        job_id: int,
+        src_spec: GPULoadStoreSpec,
+        dst_spec: LoadStoreSpec,
+    ) -> bool:
+        return self._submit_store(job_id, src_spec, dst_spec)
+
+    @override
+    def submit_load(
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: GPULoadStoreSpec,
+    ) -> bool:
+        return self._submit_load(job_id, src_spec, dst_spec)
 
     def _submit_store(
         self,
@@ -340,7 +382,6 @@ class MappedOffloadingHandler(OffloadingHandler):
             batch_dst=batch_dst,
             batch_sizes=batch_sizes,
             mapped_id_buffers=None,
-            transfer_type=("NPU", "CPU"),
         )
 
         work_may_be_inflight = False
@@ -418,7 +459,6 @@ class MappedOffloadingHandler(OffloadingHandler):
             batch_dst=None,
             batch_sizes=None,
             mapped_id_buffers=mapped_id_buffers,
-            transfer_type=("CPU", "NPU"),
         )
 
         work_may_be_inflight = False
@@ -812,7 +852,6 @@ class MappedOffloadingHandler(OffloadingHandler):
                         success=transfer.success,
                         transfer_size=transfer.num_bytes,
                         transfer_time=transfer_time,
-                        transfer_type=transfer.transfer_type,
                     )
                 )
                 self._recycle_transfer_resources(state, transfer)
@@ -874,9 +913,7 @@ class MappedOffloadingSpec(CPUOffloadingSpec):
     """Explicit factory entry for selecting the fail-fast mapped handler."""
 
     @override  # type: ignore[misc]  # mypy skips the external vLLM base
-    def get_handlers(
-        self, kv_caches: CanonicalKVCaches
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         handler = getattr(self, "_mapped_handler", None)
         if handler is None:
             handler = MappedOffloadingHandler(
@@ -886,5 +923,4 @@ class MappedOffloadingSpec(CPUOffloadingSpec):
             )
             self._mapped_handler = handler
 
-        yield GPULoadStoreSpec, CPULoadStoreSpec, handler
-        yield CPULoadStoreSpec, GPULoadStoreSpec, handler
+        return handler

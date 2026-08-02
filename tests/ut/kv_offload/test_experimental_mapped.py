@@ -110,7 +110,6 @@ def _fake_transfer(
         batch_dst=None,
         batch_sizes=None,
         mapped_id_buffers=None,
-        transfer_type=("CPU", "NPU"),
     )
 
 
@@ -209,7 +208,7 @@ def test_mapped_layout_rejects_unaligned_pages():
         )
 
 
-def test_mapped_spec_registers_one_handler_for_both_directions(monkeypatch):
+def test_mapped_spec_creates_one_worker_for_both_directions(monkeypatch):
     calls = []
     sentinel = object()
 
@@ -227,13 +226,10 @@ def test_mapped_spec_registers_one_handler_for_both_directions(monkeypatch):
     spec.num_blocks = 17
     caches = _canonical_caches()
 
-    routes = list(spec.get_handlers(caches))
+    worker = spec.create_worker(caches)
 
-    assert routes == [
-        (GPULoadStoreSpec, CPULoadStoreSpec, sentinel),
-        (CPULoadStoreSpec, GPULoadStoreSpec, sentinel),
-    ]
-    assert list(spec.get_handlers(caches)) == routes
+    assert worker is sentinel
+    assert spec.create_worker(caches) is worker
     assert calls == [(caches, 1, 17)]
 
 
@@ -448,7 +444,7 @@ def test_store_descriptor_plan_covers_each_group_and_tensor(monkeypatch):
 
 def test_native_npu_spec_remains_the_default():
     assert CPUOffloadingSpec is NPUOffloadingSpec
-    assert NPUOffloadingSpec.get_handlers is not experimental_mapped.MappedOffloadingSpec.get_handlers
+    assert NPUOffloadingSpec.create_worker is not experimental_mapped.MappedOffloadingSpec.create_worker
 
 
 def test_legacy_num_blocks_translation_preserves_explicit_bytes():
