@@ -436,6 +436,23 @@ class UnifiedVictimSelector:
         return float(data[rank])
 
 
+def get_ascend_victim_selector(vllm_config, core_selector):
+    """Preserve an explicit core selector; otherwise use the legacy Ascend one.
+
+    Core owns native ``vllm.victim_selector`` plugin discovery. Ascend schedulers
+    must not replace a selector that the user explicitly selected (or disabled)
+    after the core scheduler has initialized it. When no native choice is made,
+    retain the historical Ascend utility-selector configuration path.
+    """
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    if (
+        "victim_selector_plugin" in additional_config
+        or additional_config.get("victim_selector_plugin_disabled")
+    ):
+        return core_selector
+    return UnifiedVictimSelector.from_vllm_config(vllm_config)
+
+
 def infer_kv_utilization_from_scheduler(scheduler) -> float | None:
     try:
         block_pool = scheduler.kv_cache_manager.block_pool

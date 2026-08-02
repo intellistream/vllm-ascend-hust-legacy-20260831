@@ -4,7 +4,10 @@ from types import SimpleNamespace
 
 from vllm.v1.core.sched.request_queue import SchedulingPolicy
 
-from vllm_ascend.core.victim_selector import UnifiedVictimSelector
+from vllm_ascend.core.victim_selector import (
+    UnifiedVictimSelector,
+    get_ascend_victim_selector,
+)
 
 
 def _make_request(
@@ -30,6 +33,29 @@ def _make_request(
 
 
 class TestUnifiedVictimSelector:
+    def test_explicit_core_plugin_is_preserved(self):
+        core_selector = object()
+        config = SimpleNamespace(
+            additional_config={"victim_selector_plugin": "bidkv"}
+        )
+
+        assert get_ascend_victim_selector(config, core_selector) is core_selector
+
+    def test_explicit_core_plugin_disable_is_preserved(self):
+        core_selector = object()
+        config = SimpleNamespace(
+            additional_config={"victim_selector_plugin_disabled": True}
+        )
+
+        assert get_ascend_victim_selector(config, core_selector) is core_selector
+
+    def test_legacy_ascend_selector_remains_default(self):
+        selector = get_ascend_victim_selector(
+            SimpleNamespace(additional_config={}), object()
+        )
+
+        assert isinstance(selector, UnifiedVictimSelector)
+
     def test_default_non_priority_returns_tail(self):
         selector = UnifiedVictimSelector.from_vllm_config(SimpleNamespace(additional_config={}))
         running = [_make_request("r1"), _make_request("r2"), _make_request("r3")]
