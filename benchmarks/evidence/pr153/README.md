@@ -1,5 +1,22 @@
 # PR 153 mapped-host gather evidence
 
+## 2026-08-02 pressure update
+
+[`pressure-20260802`](pressure-20260802) contains the corrected production-path
+pressure A/B requested in the latest review: three fresh lifecycles per mode,
+H2D/D2H bandwidth and device-event latency, TTFT/TPOT/p99, peak NPU memory,
+raw per-request and transfer samples, replay tooling, and source provenance.
+
+That update also corrects an intermediate local experiment which had compared
+a pinned tiering primary with a whole-primary mmap topology. PR 153 itself did
+not change D2H to mapped access: its D2H path remains asynchronous native copy,
+and only H2D restore uses mapped gather. At the corrected head, both variants
+completed the same 123 D2H jobs and 28,764,536,832 D2H bytes; aggregate D2H
+bandwidth was neutral (+1.17% mapped), while mapped H2D bandwidth improved from
+3.34 to 29.23 GB/s. The end-to-end three-run mean favored mapped, but the gain
+was not consistent across every reverse-order pair, so the feature remains
+opt-in experimental infrastructure.
+
 This directory records the focused validation used for PR 153 after addressing
 review feedback.  The code under test is the clean, detached local
 `vllm-ascend-hust` commit
