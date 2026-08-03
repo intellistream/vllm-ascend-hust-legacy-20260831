@@ -107,6 +107,24 @@ on:
         required: false
         type: string
         default: ""
+      cleanup_validation_mode:
+        description: Manual-only cleanup acceptance path; never use for benchmark publication
+        required: false
+        type: choice
+        default: normal
+        options:
+          - normal
+          - failure-after-server-ready
+          - wait-for-manual-cancel
+          - wait-for-timeout
+      cleanup_validation_timeout_minutes:
+        description: Use 5 only with wait-for-timeout; normal and other validation paths use 60
+        required: false
+        type: choice
+        default: "60"
+        options:
+          - "60"
+          - "5"
 
 concurrency:
   group: >-
@@ -298,7 +316,7 @@ jobs:
       - docker
       - vllm-ascend-0-21-0rc1
       - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-npu0' }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.cleanup_validation_timeout_minutes || '60') }}
     env:
       BENCHMARK_CHECKOUT_USE_SSH_443: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY != '' && '1' || '0' }}
       DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER: /usr/local/bin/run_ascend_benchmark_root_helper.sh
@@ -362,6 +380,8 @@ jobs:
       WEBSITE_LEADERBOARD_URL: ${{ vars.VLLM_ASCEND_HUST_LEADERBOARD_URL || vars.VLLM_HUST_LEADERBOARD_URL || '' }}
       PUBLISH_TO_BENCHMARK_REPO: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_ASCEND_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'schedule' && vars.VLLM_ASCEND_HUST_SCHEDULE_PUBLISH_BENCHMARK != '0') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && '1' || '0' }}
       PUBLISH_TO_HF: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_ASCEND_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'schedule' && vars.VLLM_ASCEND_HUST_SCHEDULE_PUBLISH_BENCHMARK != '0') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && secrets.HF_TOKEN != '') && '1' || '0' }}
+      ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.cleanup_validation_mode || 'normal' }}
+      ASCEND_BENCHMARK_CLEANUP_VALIDATION_TIMEOUT_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.cleanup_validation_timeout_minutes || '60' }}
       BENCHMARK_REPO_SLUG: vLLM-HUST/vllm-hust-benchmark
       BENCHMARK_REPO_GH_TOKEN: ${{ (github.event_name != 'pull_request' && github.event_name != 'issue_comment') && secrets.VLLM_HUST_BENCHMARK_GH_TOKEN || '' }}
       BENCHMARK_REPO_SSH_KEY: ${{ (github.event_name != 'pull_request' && github.event_name != 'issue_comment') && secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY || '' }}
@@ -765,6 +785,9 @@ jobs:
       - name: Cleanup stale Ascend benchmark processes
         run: bash .github/workflows/scripts/cleanup_ascend_benchmark_processes.sh stale
 
+      - name: Capture idle Ascend NPU diagnostics
+        run: bash .github/workflows/scripts/capture_ascend_benchmark_diagnostics.sh idle-before-benchmark
+
       - name: Prepare Ascend runtime and install repos
         env:
           VLLM_HUST_REPO: ${{ github.workspace }}/vllm-hust
@@ -969,6 +992,10 @@ jobs:
       - name: Cleanup current Ascend benchmark processes
         if: always()
         run: bash .github/workflows/scripts/cleanup_ascend_benchmark_processes.sh current
+
+      - name: Capture post-cleanup Ascend NPU diagnostics
+        if: always()
+        run: bash .github/workflows/scripts/capture_ascend_benchmark_diagnostics.sh post-benchmark-cleanup
 
       - name: Release Ascend hardware lock
         if: always()
@@ -1402,6 +1429,10 @@ jobs:
           ASCEND_BENCHMARK_USE_SUDO: ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_USE_SUDO || 'auto' }}
           ASCEND_BENCHMARK_ROOT_HELPER: ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_ROOT_HELPER || '' }}
         run: bash .github/workflows/scripts/cleanup_ascend_benchmark_processes.sh current
+
+      - name: Capture post-cleanup Ascend NPU diagnostics
+        if: always()
+        run: bash .github/workflows/scripts/capture_ascend_benchmark_diagnostics.sh post-timeout-cleanup
 
   store-main-perfgate-baseline:
     name: Store main perfgate baseline

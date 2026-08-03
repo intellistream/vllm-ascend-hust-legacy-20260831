@@ -59,6 +59,8 @@ PUBLISH_TO_HF=${PUBLISH_TO_HF:-0}
 PUBLISH_TO_BENCHMARK_REPO=${PUBLISH_TO_BENCHMARK_REPO:-0}
 HF_REPO_ID=${HF_REPO_ID:-}
 VLLM_HUST_BENCHMARK_REF=${VLLM_HUST_BENCHMARK_REF:-}
+ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE=${ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE:-normal}
+ASCEND_BENCHMARK_CLEANUP_VALIDATION_TIMEOUT_MINUTES=${ASCEND_BENCHMARK_CLEANUP_VALIDATION_TIMEOUT_MINUTES:-60}
 
 validate_benchmark_inputs() {
   if [[ -n "$VLLM_HUST_BENCHMARK_REF" && "$MODEL_NAME" == "$VLLM_HUST_BENCHMARK_REF" ]]; then
@@ -76,7 +78,40 @@ validate_benchmark_inputs() {
   fi
 }
 
+validate_cleanup_validation_mode() {
+  case "$ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE" in
+    normal)
+      return
+      ;;
+    failure-after-server-ready|wait-for-manual-cancel|wait-for-timeout)
+      ;;
+    *)
+      echo "Unsupported Ascend cleanup validation mode: $ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE" >&2
+      exit 2
+      ;;
+  esac
+
+  if [[ "${GITHUB_EVENT_NAME:-}" != "workflow_dispatch" ]]; then
+    echo "Ascend cleanup validation modes are restricted to workflow_dispatch." >&2
+    exit 2
+  fi
+  if [[ "$PUBLISH_TO_HF" == "1" || "$PUBLISH_TO_BENCHMARK_REPO" == "1" ]]; then
+    echo "Ascend cleanup validation modes cannot publish benchmark results." >&2
+    exit 2
+  fi
+  if [[ "$ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE" == "wait-for-timeout" ]]; then
+    if [[ "$ASCEND_BENCHMARK_CLEANUP_VALIDATION_TIMEOUT_MINUTES" != "5" ]]; then
+      echo "wait-for-timeout requires cleanup_validation_timeout_minutes=5." >&2
+      exit 2
+    fi
+  elif [[ "$ASCEND_BENCHMARK_CLEANUP_VALIDATION_TIMEOUT_MINUTES" != "60" ]]; then
+    echo "Only wait-for-timeout may use cleanup_validation_timeout_minutes=5." >&2
+    exit 2
+  fi
+}
+
 validate_benchmark_inputs
+validate_cleanup_validation_mode
 
 # shellcheck source=/dev/null
 source "${VLLM_ASCEND_HUST_REPO}/scripts/hust_ascend_manager_helper.sh"
@@ -434,6 +469,8 @@ cleanup() {
     ASCEND_BENCHMARK_CLEANUP_MARKER_FILE="$SERVER_PID_MARKER" \
     bash "$SCRIPT_DIR/cleanup_ascend_benchmark_processes.sh" current || \
     echo "Warning: final EngineCore cleanup did not complete" >&2
+
+  bash "$SCRIPT_DIR/capture_ascend_benchmark_diagnostics.sh" job-exit || true
 
   if [[ -n "$server_pid" ]]; then
     wait "$server_pid" || true
@@ -1453,6 +1490,23 @@ else
     fi
     exit 1
   fi
+
+  case "$ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE" in
+    normal)
+      ;;
+    failure-after-server-ready)
+      echo "CLEANUP_VALIDATION_READY mode=failure-after-server-ready runner=${RUNNER_NAME:-unknown} server_pid=$server_pid"
+      echo "Injecting requested failure after the vLLM server became ready." >&2
+      exit 1
+      ;;
+    wait-for-manual-cancel|wait-for-timeout)
+      echo "CLEANUP_VALIDATION_READY mode=$ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE runner=${RUNNER_NAME:-unknown} server_pid=$server_pid"
+      echo "Waiting for ${ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE}; cancel this workflow only for manual-cancel validation." >&2
+      while true; do
+        sleep 15
+      done
+      ;;
+  esac
 
   "${VLLM_CLI[@]}" bench serve \
     --model "$MODEL_NAME" \

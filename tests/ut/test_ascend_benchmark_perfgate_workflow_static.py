@@ -42,6 +42,7 @@ def test_perfgate_scripts_are_present() -> None:
         "resolve_perfgate_spec_file.py",
         "cleanup_ascend_benchmark_processes.py",
         "cleanup_ascend_benchmark_processes.sh",
+        "capture_ascend_benchmark_diagnostics.sh",
     ):
         assert (SCRIPT_DIR / script_name).is_file()
 
@@ -98,6 +99,13 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     assert "Verify cleanup runner identity" in workflow
     assert "Cleanup runner mismatch: expected" in workflow
     assert "ASCEND_BENCHMARK_CLEANUP_EXPECTED_RUNNER_NAME:" in workflow
+    assert "cleanup_validation_mode:" in workflow
+    assert "failure-after-server-ready" in workflow
+    assert "wait-for-manual-cancel" in workflow
+    assert "wait-for-timeout" in workflow
+    assert "cleanup_validation_timeout_minutes:" in workflow
+    assert "Capture idle Ascend NPU diagnostics" in workflow
+    assert workflow.count("Capture post-cleanup Ascend NPU diagnostics") == 2
     assert "if: ${{ always() && needs.ascend-benchmark.result != 'skipped' }}" in workflow
     assert "ASCEND_BENCHMARK_CLEANUP_TARGET_JOB: ascend-benchmark" in workflow
     assert "ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ID: ${{ github.run_id }}" in workflow
@@ -111,6 +119,18 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     assert "ssh-key: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY }}" in cleanup_job
     assert "ssh-strict: ${{ env.BENCHMARK_CHECKOUT_USE_SSH_443 != '1' }}" in cleanup_job
     assert "timeout-minutes: 10" in workflow
+
+    diagnostics = (SCRIPT_DIR / "capture_ascend_benchmark_diagnostics.sh").read_text(encoding="utf-8")
+    assert '"$npu_smi_bin" info' in diagnostics
+    assert "HBM diagnostics could not be captured" in diagnostics
+
+    assert "validate_cleanup_validation_mode()" in runner_script
+    assert "Ascend cleanup validation modes are restricted to workflow_dispatch" in runner_script
+    assert "Ascend cleanup validation modes cannot publish benchmark results" in runner_script
+    assert "CLEANUP_VALIDATION_READY mode=" in runner_script
+    assert "failure-after-server-ready" in runner_script
+    assert "wait-for-manual-cancel|wait-for-timeout" in runner_script
+    assert 'capture_ascend_benchmark_diagnostics.sh" job-exit' in runner_script
 
 
 def test_cleanup_wrapper_fails_closed_on_runner_mismatch() -> None:
@@ -193,7 +213,10 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "multi_scenario_results.tsv" in workflow
     assert "Perfgate comparison: `skipped for multi-scenario run" in workflow
     assert "os.environ.get('BENCH_SCENARIO_COUNT', '1') == '1'" in workflow
-    assert "timeout-minutes: 60" in workflow
+    assert (
+        "timeout-minutes: ${{ fromJSON(github.event_name == 'workflow_dispatch' && "
+        "inputs.cleanup_validation_timeout_minutes || '60') }}"
+    ) in workflow
     assert "VLLM_ASCEND_HUST_PUBLISH_BENCHMARK_ON_PR" not in workflow
     assert "github.event_name == 'pull_request' || github.event_name == 'issue_comment'" in workflow
     assert "Checkout dev-hub repo" not in workflow
