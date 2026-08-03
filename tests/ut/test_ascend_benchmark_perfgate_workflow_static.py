@@ -105,6 +105,7 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     assert "wait-for-timeout" in workflow
     assert "cleanup_validation_timeout_minutes:" in workflow
     assert "inputs.cleanup_validation_mode != 'normal'" in workflow
+    assert "format('{0}@{1}', github.repository, github.ref_name)" in workflow
     assert "Capture idle Ascend NPU diagnostics" in workflow
     assert workflow.count("Capture post-cleanup Ascend NPU diagnostics") == 2
     assert "if: ${{ always() && needs.ascend-benchmark.result != 'skipped' }}" in workflow
