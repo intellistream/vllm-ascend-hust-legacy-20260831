@@ -527,7 +527,7 @@ record_server_marker() {
   "$PYTHON_BIN" "$SCRIPT_DIR/cleanup_ascend_benchmark_processes.py" \
     --record-marker "$SERVER_PID_MARKER" \
     --pid "$server_pid" \
-    --isolated-process-group
+    --isolated-session
 }
 
 wait_for_ascend_runtime_ready() {

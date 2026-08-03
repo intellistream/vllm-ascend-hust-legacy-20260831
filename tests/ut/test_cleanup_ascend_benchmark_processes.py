@@ -56,6 +56,7 @@ def create_process(
     engine_core: bool = True,
     start_time: int | None = None,
     process_group: int | None = None,
+    session_id: int | None = None,
 ) -> None:
     process_dir = proc_root / str(pid)
     process_dir.mkdir(parents=True, exist_ok=True)
@@ -69,7 +70,8 @@ def create_process(
         "S",
         "0",
         str(process_group if process_group is not None else pid),
-        *("0" for _ in range(16)),
+        str(session_id if session_id is not None else process_group if process_group is not None else pid),
+        *("0" for _ in range(15)),
         str(start_time if start_time is not None else pid * 100),
     ]
     (process_dir / "stat").write_text(f"{pid} ({name}) {' '.join(stat_suffix)}\n", encoding="utf-8")
@@ -350,18 +352,26 @@ def test_marker_cleanup_handles_children_after_launcher_exits(
     assert not marker_file.exists()
 
 
-def test_marker_cleanup_trusts_verified_isolated_group_without_child_metadata(
+def test_marker_cleanup_trusts_verified_isolated_session_without_child_metadata(
     tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     marker_file = tmp_path / "server.marker"
-    create_process(tmp_path, 715, {}, engine_core=False, start_time=7151, process_group=715)
-    create_process(tmp_path, 716, {}, process_group=715)
+    create_process(
+        tmp_path,
+        715,
+        {},
+        engine_core=False,
+        start_time=7151,
+        process_group=715,
+        session_id=715,
+    )
+    create_process(tmp_path, 716, {}, process_group=716, session_id=715)
     cleanup.record_process_marker(
         marker_file,
         715,
         tmp_path,
         context,
-        isolated_process_group=True,
+        isolated_session=True,
     )
     signals: list[tuple[int, int]] = []
 
@@ -388,20 +398,36 @@ def test_marker_cleanup_trusts_verified_isolated_group_without_child_metadata(
     assert not marker_file.exists()
 
 
-def test_marker_cleanup_does_not_trust_reused_isolated_group(
+def test_marker_cleanup_does_not_trust_reused_isolated_session(
     tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     marker_file = tmp_path / "server.marker"
-    create_process(tmp_path, 717, {}, engine_core=False, start_time=7171, process_group=717)
-    create_process(tmp_path, 718, {}, process_group=717)
+    create_process(
+        tmp_path,
+        717,
+        {},
+        engine_core=False,
+        start_time=7171,
+        process_group=717,
+        session_id=717,
+    )
+    create_process(tmp_path, 718, {}, process_group=718, session_id=717)
     cleanup.record_process_marker(
         marker_file,
         717,
         tmp_path,
         context,
-        isolated_process_group=True,
+        isolated_session=True,
     )
-    create_process(tmp_path, 717, {}, engine_core=False, start_time=7172, process_group=717)
+    create_process(
+        tmp_path,
+        717,
+        {},
+        engine_core=False,
+        start_time=7172,
+        process_group=717,
+        session_id=717,
+    )
     signals: list[tuple[int, int]] = []
 
     monkeypatch.setattr(cleanup, "send_process_signal", lambda pid, signum: signals.append((pid, signum)))
@@ -418,7 +444,7 @@ def test_marker_cleanup_does_not_trust_reused_isolated_group(
     assert matched == []
     assert signaled == []
     assert remaining == []
-    assert len(ambiguities) == 2
+    assert len(ambiguities) == 1
     assert signals == []
     assert marker_file.exists()
 
@@ -427,14 +453,22 @@ def test_main_cleans_isolated_marker_group_before_global_engine_core_scan(
     tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     marker_file = tmp_path / "server.marker"
-    create_process(tmp_path, 719, {}, engine_core=False, start_time=7191, process_group=719)
-    create_process(tmp_path, 720, {}, process_group=719)
+    create_process(
+        tmp_path,
+        719,
+        {},
+        engine_core=False,
+        start_time=7191,
+        process_group=719,
+        session_id=719,
+    )
+    create_process(tmp_path, 720, {}, process_group=720, session_id=719)
     cleanup.record_process_marker(
         marker_file,
         719,
         tmp_path,
         context,
-        isolated_process_group=True,
+        isolated_session=True,
     )
 
     def fake_signal(pid: int, _signum: int) -> None:
@@ -448,7 +482,7 @@ def test_main_cleans_isolated_marker_group_before_global_engine_core_scan(
         marker_file=marker_file,
         record_marker=None,
         pid=None,
-        isolated_process_group=False,
+        isolated_session=False,
         target_job=None,
         target_run_id=None,
         target_run_attempt=None,
