@@ -1,5 +1,22 @@
 # PR 153 mapped-host gather evidence
 
+## 2026-08-03 high-prefix crossover update
+
+[`highprefix-20260803`](highprefix-20260803) contains the two-card ABBA A/B
+requested to isolate mapped restore under the repository's established
+high-prefix, severely HBM-constrained workload. Eight fresh lifecycles completed
+1,600/1,600 requests with identical workload and clean-source provenance.
+
+Mapped reduced mean fixed-workload duration by 1.88%, increased throughput by
+1.92%, reduced mean TTFT by 2.33%, and reduced p99 TTFT by 2.18%. The duration
+advantage appeared in all four reverse-order pairs and independently on both
+cards. Mapped H2D processed 0.90% more bytes while increasing pooled aggregate
+bandwidth from 0.99 to 63.85 GB/s and reducing pooled p99 device-event latency
+from 689.06 to 7.36 ms. D2H remains asynchronous native copy in both modes;
+the small scheduler-dependent D2H count and volume differences are disclosed
+rather than treated as exact parity. This supports a scoped end-to-end claim
+for this workload, not a default-path recommendation.
+
 ## 2026-08-02 pressure update
 
 [`pressure-20260802`](pressure-20260802) contains the corrected production-path
