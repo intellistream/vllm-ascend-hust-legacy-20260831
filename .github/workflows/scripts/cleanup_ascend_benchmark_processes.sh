@@ -45,6 +45,12 @@ for var_name in "${ownership_vars[@]}"; do
   export "$var_name"
 done
 
+expected_runner_name=${ASCEND_BENCHMARK_CLEANUP_EXPECTED_RUNNER_NAME:-}
+if [[ -n "$expected_runner_name" && "$RUNNER_NAME" != "$expected_runner_name" ]]; then
+  echo "Cleanup runner mismatch: expected $expected_runner_name, got $RUNNER_NAME" >&2
+  exit 2
+fi
+
 if [[ "$use_sudo" == "auto" ]]; then
   if [[ "$(id -u)" == "0" ]]; then
     use_sudo=0

@@ -90,24 +90,35 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     assert "linux-aarch64-a2b3-pool" in workflow
     assert "vllm-ascend-0-21-0rc1" in workflow
     assert "      - ascend\n      - 910b\n      - docker" in workflow
-    assert 'ASCEND_RT_VISIBLE_DEVICES:' not in workflow
+    assert "ASCEND_RT_VISIBLE_DEVICES:" not in workflow
     assert "cleanup-ascend-benchmark:" in workflow
     assert "needs: ascend-benchmark" in workflow
+    assert "runner_name: ${{ steps.runner-identity.outputs.runner_name }}" in workflow
+    assert "Capture benchmark runner identity" in workflow
+    assert "Verify cleanup runner identity" in workflow
+    assert "Cleanup runner mismatch: expected" in workflow
+    assert "ASCEND_BENCHMARK_CLEANUP_EXPECTED_RUNNER_NAME:" in workflow
     assert "if: ${{ always() && needs.ascend-benchmark.result != 'skipped' }}" in workflow
     assert "ASCEND_BENCHMARK_CLEANUP_TARGET_JOB: ascend-benchmark" in workflow
     assert "ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ID: ${{ github.run_id }}" in workflow
     assert "ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ATTEMPT: ${{ github.run_attempt }}" in workflow
     assert "ASCEND_BENCHMARK_CLEANUP_MARKER_FILE:" in workflow
     cleanup_job = workflow[
-        workflow.index("  cleanup-ascend-benchmark:") : workflow.index(
-            "  store-main-perfgate-baseline:"
-        )
+        workflow.index("  cleanup-ascend-benchmark:") : workflow.index("  store-main-perfgate-baseline:")
     ]
     assert "BENCHMARK_CHECKOUT_USE_SSH_443:" in cleanup_job
     assert "Configure GitHub SSH over 443" in cleanup_job
     assert "ssh-key: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY }}" in cleanup_job
     assert "ssh-strict: ${{ env.BENCHMARK_CHECKOUT_USE_SSH_443 != '1' }}" in cleanup_job
     assert "timeout-minutes: 10" in workflow
+
+
+def test_cleanup_wrapper_fails_closed_on_runner_mismatch() -> None:
+    cleanup_wrapper = (SCRIPT_DIR / "cleanup_ascend_benchmark_processes.sh").read_text(encoding="utf-8")
+
+    assert "ASCEND_BENCHMARK_CLEANUP_EXPECTED_RUNNER_NAME" in cleanup_wrapper
+    assert '"$RUNNER_NAME" != "$expected_runner_name"' in cleanup_wrapper
+    assert "Cleanup runner mismatch: expected" in cleanup_wrapper
 
 
 def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
@@ -564,7 +575,7 @@ def test_benchmark_bootstrap_supports_container_native_python() -> None:
     install_script = INSTALL_DEV_HUB_SCRIPT.read_text(encoding="utf-8")
 
     assert 'CONDA_BIN="$(resolve_conda_bin 2>/dev/null || true)"' in install_script
-    assert 'VLLM_HUST_PYTHON_BIN:-$(command -v python3' in install_script
+    assert "VLLM_HUST_PYTHON_BIN:-$(command -v python3" in install_script
     assert "Conda is unavailable; reusing container Python" in install_script
     assert "Skipping conda runtime library installation in container-native Python mode" in install_script
     assert 'marker_root="${CI_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}}/ascend-benchmark"' in install_script

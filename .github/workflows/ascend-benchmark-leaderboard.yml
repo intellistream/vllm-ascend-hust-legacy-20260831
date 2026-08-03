@@ -273,6 +273,7 @@ jobs:
     needs: [issue-comment-command]
     outputs:
       target_sha: ${{ steps.target-metadata.outputs.target_sha }}
+      runner_name: ${{ steps.runner-identity.outputs.runner_name }}
     if: >-
       always() &&
       (
@@ -368,6 +369,17 @@ jobs:
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
 
     steps:
+      - name: Capture benchmark runner identity
+        id: runner-identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUNNER_NAME:-}" ]]; then
+            echo "RUNNER_NAME is required for host-affine benchmark cleanup" >&2
+            exit 2
+          fi
+          echo "runner_name=$RUNNER_NAME" >> "$GITHUB_OUTPUT"
+
       - name: Mask benchmark credentials
         shell: bash
         run: |
@@ -1340,6 +1352,22 @@ jobs:
     env:
       BENCHMARK_CHECKOUT_USE_SSH_443: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY != '' && '1' || '0' }}
     steps:
+      - name: Verify cleanup runner identity
+        shell: bash
+        env:
+          ASCEND_BENCHMARK_CLEANUP_EXPECTED_RUNNER_NAME: ${{ needs.ascend-benchmark.outputs.runner_name }}
+        run: |
+          set -euo pipefail
+          expected_runner="${ASCEND_BENCHMARK_CLEANUP_EXPECTED_RUNNER_NAME:-}"
+          if [[ -z "$expected_runner" ]]; then
+            echo "Benchmark runner identity is unavailable; refusing host-local cleanup." >&2
+            exit 2
+          fi
+          if [[ "${RUNNER_NAME:-}" != "$expected_runner" ]]; then
+            echo "Cleanup runner mismatch: expected $expected_runner, got ${RUNNER_NAME:-unset}." >&2
+            exit 2
+          fi
+
       - name: Configure GitHub SSH over 443
         if: ${{ env.BENCHMARK_CHECKOUT_USE_SSH_443 == '1' }}
         shell: bash
@@ -1369,6 +1397,7 @@ jobs:
           ASCEND_BENCHMARK_CLEANUP_TARGET_JOB: ascend-benchmark
           ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ID: ${{ github.run_id }}
           ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ATTEMPT: ${{ github.run_attempt }}
+          ASCEND_BENCHMARK_CLEANUP_EXPECTED_RUNNER_NAME: ${{ needs.ascend-benchmark.outputs.runner_name }}
           ASCEND_BENCHMARK_CLEANUP_MARKER_FILE: ${{ github.workspace }}/../vllm-ascend-hust-ci-state/runtime/process-markers/ascend-benchmark-server.pid
           ASCEND_BENCHMARK_USE_SUDO: ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_USE_SUDO || 'auto' }}
           ASCEND_BENCHMARK_ROOT_HELPER: ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_ROOT_HELPER || '' }}

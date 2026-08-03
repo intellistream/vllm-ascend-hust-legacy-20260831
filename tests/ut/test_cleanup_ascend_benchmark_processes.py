@@ -546,6 +546,22 @@ def test_missing_context_fails_closed() -> None:
     assert "missing required ownership context" in result.stderr
 
 
+def test_wrapper_refuses_cleanup_on_runner_identity_mismatch(tmp_path: Path, context: dict[str, str]) -> None:
+    env = wrapper_environment(context, tmp_path)
+    env["ASCEND_BENCHMARK_CLEANUP_EXPECTED_RUNNER_NAME"] = "ascend-runner-02"
+
+    result = subprocess.run(
+        ["bash", str(CLEANUP_WRAPPER), "current"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 2
+    assert "Cleanup runner mismatch: expected ascend-runner-02" in result.stderr
+
+
 def test_auto_mode_fails_when_non_root_helper_is_missing(tmp_path: Path, context: dict[str, str]) -> None:
     fake_bin = tmp_path / "bin"
     install_fake_command(fake_bin, "id", '[[ "${1:-}" == "-u" ]] && echo 1000')
