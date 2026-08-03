@@ -1337,11 +1337,31 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    env:
+      BENCHMARK_CHECKOUT_USE_SSH_443: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY != '' && '1' || '0' }}
     steps:
+      - name: Configure GitHub SSH over 443
+        if: ${{ env.BENCHMARK_CHECKOUT_USE_SSH_443 == '1' }}
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          cat > "$HOME/.ssh/config" <<'EOF'
+          Host github.com
+            HostName ssh.github.com
+            Port 443
+            User git
+            HostKeyAlias github.com
+            IdentitiesOnly yes
+          EOF
+          chmod 600 "$HOME/.ssh/config"
+
       - name: Checkout cleanup scripts
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
+          ssh-key: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY }}
+          ssh-strict: ${{ env.BENCHMARK_CHECKOUT_USE_SSH_443 != '1' }}
           persist-credentials: false
 
       - name: Cleanup benchmark job processes

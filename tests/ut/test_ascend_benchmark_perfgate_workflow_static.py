@@ -98,6 +98,15 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     assert "ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ID: ${{ github.run_id }}" in workflow
     assert "ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ATTEMPT: ${{ github.run_attempt }}" in workflow
     assert "ASCEND_BENCHMARK_CLEANUP_MARKER_FILE:" in workflow
+    cleanup_job = workflow[
+        workflow.index("  cleanup-ascend-benchmark:") : workflow.index(
+            "  store-main-perfgate-baseline:"
+        )
+    ]
+    assert "BENCHMARK_CHECKOUT_USE_SSH_443:" in cleanup_job
+    assert "Configure GitHub SSH over 443" in cleanup_job
+    assert "ssh-key: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY }}" in cleanup_job
+    assert "ssh-strict: ${{ env.BENCHMARK_CHECKOUT_USE_SSH_443 != '1' }}" in cleanup_job
     assert "timeout-minutes: 10" in workflow
 
 
