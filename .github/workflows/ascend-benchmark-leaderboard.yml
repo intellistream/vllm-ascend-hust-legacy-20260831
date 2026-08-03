@@ -298,7 +298,7 @@ jobs:
       target_sha: ${{ steps.target-metadata.outputs.target_sha }}
       runner_name: ${{ steps.runner-identity.outputs.runner_name }}
     if: >-
-      always() &&
+      always() && !cancelled() &&
       (
         github.event_name == 'workflow_dispatch' ||
         github.event_name == 'schedule' ||
