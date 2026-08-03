@@ -643,6 +643,10 @@ start_server() {
   printf '%s\n' "$server_pid" >"$SERVER_PID_MARKER"
   printf '%s\n' "$server_group_pid" >"$SERVER_PGID_MARKER"
   record_server_marker
+  # Start the verified-member journal immediately. Later readiness polls add
+  # descendants as soon as they appear, before GitHub cancellation can reap
+  # the launcher and reparent them outside its session.
+  record_server_marker_members
 }
 
 run_completions_smoke() {
@@ -1428,6 +1432,10 @@ else
     start_server
 
     for attempt in $(seq 1 "$server_ready_max_attempts"); do
+      # Keep an append-only snapshot while the launcher identity and ancestry
+      # are still available. Cleanup revalidates every PID by start time.
+      record_server_marker_members
+
       if curl -fsS "http://$HOST:$PORT/v1/models" >/dev/null; then
         if wait_for_completions_smoke; then
           server_ready=1

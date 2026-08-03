@@ -591,6 +591,149 @@ def test_marker_cleanup_kills_ready_snapshot_member_after_launcher_exits(
     assert not marker_file.exists()
 
 
+def test_marker_refresh_retains_reparented_member_before_server_ready(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker_file = tmp_path / "server.marker"
+    create_process(
+        tmp_path,
+        760,
+        {},
+        engine_core=False,
+        start_time=7601,
+        process_group=760,
+        session_id=760,
+    )
+    create_process(
+        tmp_path,
+        761,
+        {},
+        start_time=7611,
+        process_group=761,
+        session_id=761,
+        parent_pid=760,
+    )
+    cleanup.record_process_marker(
+        marker_file,
+        760,
+        tmp_path,
+        context,
+        isolated_session=True,
+    )
+    assert cleanup.refresh_process_marker_members(marker_file, tmp_path, context) == [
+        cleanup.ProcessInfo(pid=760, start_time=7601),
+        cleanup.ProcessInfo(pid=761, start_time=7611),
+    ]
+
+    # The first worker detaches before the next readiness poll, while a new
+    # worker appears under the still-verified launcher. Refresh must append the
+    # new identity without forgetting the already verified detached worker.
+    create_process(
+        tmp_path,
+        761,
+        {},
+        start_time=7611,
+        process_group=761,
+        session_id=761,
+        parent_pid=1,
+    )
+    create_process(
+        tmp_path,
+        762,
+        {},
+        start_time=7621,
+        process_group=762,
+        session_id=762,
+        parent_pid=760,
+    )
+    assert cleanup.refresh_process_marker_members(marker_file, tmp_path, context) == [
+        cleanup.ProcessInfo(pid=760, start_time=7601),
+        cleanup.ProcessInfo(pid=761, start_time=7611),
+        cleanup.ProcessInfo(pid=762, start_time=7621),
+    ]
+
+    shutil.rmtree(tmp_path / "760")
+    create_process(
+        tmp_path,
+        762,
+        {},
+        start_time=7621,
+        process_group=762,
+        session_id=762,
+        parent_pid=1,
+    )
+    signals: list[tuple[int, int]] = []
+
+    def fake_signal(pid: int, signum: int) -> None:
+        signals.append((pid, signum))
+        shutil.rmtree(tmp_path / str(pid))
+
+    monkeypatch.setattr(cleanup, "send_process_signal", fake_signal)
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_marker_group(
+        marker_file,
+        tmp_path,
+        context,
+        "current",
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        sleep=lambda _: None,
+    )
+
+    assert matched == [761, 762]
+    assert signaled == [761, 762]
+    assert remaining == []
+    assert ambiguities == []
+    assert signals == [(761, signal.SIGTERM), (762, signal.SIGTERM)]
+    assert not marker_file.exists()
+
+
+def test_marker_refresh_replaces_reused_pid_with_new_verified_identity(
+    tmp_path: Path, context: dict[str, str]
+) -> None:
+    marker_file = tmp_path / "server.marker"
+    create_process(
+        tmp_path,
+        770,
+        {},
+        engine_core=False,
+        start_time=7701,
+        process_group=770,
+        session_id=770,
+    )
+    create_process(
+        tmp_path,
+        771,
+        {},
+        start_time=7711,
+        process_group=771,
+        session_id=771,
+        parent_pid=770,
+    )
+    cleanup.record_process_marker(
+        marker_file,
+        770,
+        tmp_path,
+        context,
+        isolated_session=True,
+    )
+    cleanup.refresh_process_marker_members(marker_file, tmp_path, context)
+
+    shutil.rmtree(tmp_path / "771")
+    create_process(
+        tmp_path,
+        771,
+        {},
+        start_time=7712,
+        process_group=771,
+        session_id=771,
+        parent_pid=770,
+    )
+    assert cleanup.refresh_process_marker_members(marker_file, tmp_path, context) == [
+        cleanup.ProcessInfo(pid=770, start_time=7701),
+        cleanup.ProcessInfo(pid=771, start_time=7712),
+    ]
+
+
 def test_marker_cleanup_does_not_trust_reused_isolated_session(
     tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -314,6 +314,7 @@ def refresh_process_marker_members(marker_file: Path, proc_root: Path, context: 
         session_id = int(marker["session_id"])
         start_time = int(marker["start_time"])
         isolated_session = bool(marker.get("isolated_session"))
+        recorded_members = read_marker_members(marker)
     except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid benchmark process marker {marker_file}: {exc}") from exc
 
@@ -345,11 +346,20 @@ def refresh_process_marker_members(marker_file: Path, proc_root: Path, context: 
     if ambiguities:
         raise ValueError("could not safely inspect isolated benchmark session: " + "; ".join(ambiguities))
 
-    marker["members"] = [{"pid": process.pid, "start_time": process.start_time} for process in members]
+    # Never discard a previously verified member merely because it has since
+    # detached and been reparented. PID/start-time revalidation during cleanup
+    # keeps retaining exited members safe while closing the gap between
+    # successive readiness polls.
+    retained_by_pid = {process.pid: process for process in recorded_members}
+    retained_by_pid.update({process.pid: process for process in members})
+    retained_members = sorted(retained_by_pid.values(), key=lambda process: process.pid)
+    marker["members"] = [
+        {"pid": process.pid, "start_time": process.start_time} for process in retained_members
+    ]
     temporary_file = marker_file.with_suffix(f"{marker_file.suffix}.tmp")
     temporary_file.write_text(json.dumps(marker, sort_keys=True), encoding="utf-8")
     temporary_file.replace(marker_file)
-    return members
+    return retained_members
 
 
 def find_marker_group_processes(
