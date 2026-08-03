@@ -104,6 +104,20 @@ def read_process_group(process_dir: Path) -> int:
         raise ProcessInspectionError(f"invalid process group: {process_dir / 'stat'}") from exc
 
 
+def read_parent_pid(process_dir: Path) -> int:
+    stat = read_bytes(process_dir / "stat")
+    command_end = stat.rfind(b")")
+    if command_end < 0:
+        raise ProcessInspectionError(f"malformed process stat: {process_dir / 'stat'}")
+    fields = stat[command_end + 1 :].split()
+    if len(fields) <= 1:
+        raise ProcessInspectionError(f"process stat lacks parent PID: {process_dir / 'stat'}")
+    try:
+        return int(fields[1])
+    except ValueError as exc:
+        raise ProcessInspectionError(f"invalid process parent PID: {process_dir / 'stat'}") from exc
+
+
 def read_session_id(process_dir: Path) -> int:
     stat = read_bytes(process_dir / "stat")
     command_end = stat.rfind(b")")
@@ -268,6 +282,7 @@ def record_process_marker(
 
 def find_marker_group_processes(
     proc_root: Path,
+    leader_pid: int,
     process_group: int,
     session_id: int | None,
     context: Mapping[str, str],
@@ -285,16 +300,28 @@ def find_marker_group_processes(
         if not process_dir.name.isdigit():
             continue
         try:
+            if not marker_scope_contains(
+                process_dir,
+                proc_root,
+                leader_pid,
+                process_group,
+                session_id,
+                trust_isolated_session=trust_isolated_session,
+            ):
+                continue
             if trust_isolated_session:
-                if session_id is None or read_session_id(process_dir) != session_id:
-                    continue
                 start_time = read_start_time(process_dir)
-                if read_session_id(process_dir) != session_id:
+                if not marker_scope_contains(
+                    process_dir,
+                    proc_root,
+                    leader_pid,
+                    process_group,
+                    session_id,
+                    trust_isolated_session=trust_isolated_session,
+                ):
                     continue
                 process = ProcessInfo(pid=int(process_dir.name), start_time=start_time)
             else:
-                if read_process_group(process_dir) != process_group:
-                    continue
                 process = inspect_process(process_dir, context, "current", require_engine_core=False)
         except ProcessDisappeared:
             continue
@@ -308,6 +335,8 @@ def find_marker_group_processes(
 
 def inspect_marker_group_member(
     process_dir: Path,
+    proc_root: Path,
+    leader_pid: int,
     process_group: int,
     session_id: int | None,
     context: Mapping[str, str],
@@ -316,7 +345,14 @@ def inspect_marker_group_member(
 ) -> ProcessInfo | None:
     if trust_isolated_session:
         start_time = read_start_time(process_dir)
-        if session_id is None or read_session_id(process_dir) != session_id:
+        if not marker_scope_contains(
+            process_dir,
+            proc_root,
+            leader_pid,
+            process_group,
+            session_id,
+            trust_isolated_session=True,
+        ):
             return None
         if read_start_time(process_dir) != start_time:
             return None
@@ -325,6 +361,62 @@ def inspect_marker_group_member(
     if process is None or read_process_group(process_dir) != process_group:
         return None
     return process
+
+
+def is_descendant_of(process_dir: Path, proc_root: Path, ancestor_pid: int) -> bool:
+    current_pid = int(process_dir.name)
+    seen = {current_pid}
+    while True:
+        parent_pid = read_parent_pid(proc_root / str(current_pid))
+        if parent_pid == ancestor_pid:
+            return True
+        if parent_pid <= 1 or parent_pid in seen:
+            return False
+        seen.add(parent_pid)
+        current_pid = parent_pid
+
+
+def marker_scope_contains(
+    process_dir: Path,
+    proc_root: Path,
+    leader_pid: int,
+    process_group: int,
+    session_id: int | None,
+    *,
+    trust_isolated_session: bool,
+) -> bool:
+    if not trust_isolated_session:
+        return read_process_group(process_dir) == process_group
+    return (session_id is not None and read_session_id(process_dir) == session_id) or is_descendant_of(
+        process_dir, proc_root, leader_pid
+    )
+
+
+def find_known_processes(
+    proc_root: Path, known_processes: Sequence[ProcessInfo]
+) -> tuple[list[ProcessInfo], list[str]]:
+    remaining: list[ProcessInfo] = []
+    ambiguities: list[str] = []
+    for process in known_processes:
+        try:
+            current = inspect_known_process(proc_root / str(process.pid), process)
+        except ProcessDisappeared:
+            continue
+        except ProcessInspectionError as exc:
+            ambiguities.append(str(exc))
+            continue
+        if current is not None:
+            remaining.append(current)
+    return remaining, ambiguities
+
+
+def inspect_known_process(process_dir: Path, expected: ProcessInfo) -> ProcessInfo | None:
+    start_time = read_start_time(process_dir)
+    if start_time != expected.start_time:
+        return None
+    if read_start_time(process_dir) != start_time:
+        return None
+    return expected
 
 
 def cleanup_marker_group(
@@ -382,6 +474,7 @@ def cleanup_marker_group(
     trust_isolated_session = isolated_session and leader_identity_matches
     initial, ambiguities = find_marker_group_processes(
         proc_root,
+        pid,
         process_group,
         session_id,
         process_context,
@@ -397,6 +490,7 @@ def cleanup_marker_group(
         process_context,
         "current",
         require_engine_core=False,
+        marker_leader_pid=pid,
         marker_process_group=process_group,
         marker_session_id=session_id,
         trust_isolated_session=trust_isolated_session,
@@ -406,12 +500,16 @@ def cleanup_marker_group(
     while True:
         remaining, later_ambiguities = find_marker_group_processes(
             proc_root,
+            pid,
             process_group,
             session_id,
             process_context,
             trust_isolated_session=trust_isolated_session,
         )
+        known_remaining, known_ambiguities = find_known_processes(proc_root, initial)
+        remaining = sorted({*remaining, *known_remaining}, key=lambda process: process.pid)
         ambiguities.extend(later_ambiguities)
+        ambiguities.extend(known_ambiguities)
         if not remaining or time.monotonic() >= deadline:
             break
         sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
@@ -423,9 +521,11 @@ def cleanup_marker_group(
             process_context,
             "current",
             require_engine_core=False,
+            marker_leader_pid=pid,
             marker_process_group=process_group,
             marker_session_id=session_id,
             trust_isolated_session=trust_isolated_session,
+            known_marker_members=initial,
         )
         for process_id in kill_signaled:
             if process_id not in signaled:
@@ -435,12 +535,16 @@ def cleanup_marker_group(
         while True:
             remaining, later_ambiguities = find_marker_group_processes(
                 proc_root,
+                pid,
                 process_group,
                 session_id,
                 process_context,
                 trust_isolated_session=trust_isolated_session,
             )
+            known_remaining, known_ambiguities = find_known_processes(proc_root, initial)
+            remaining = sorted({*remaining, *known_remaining}, key=lambda process: process.pid)
             ambiguities.extend(later_ambiguities)
+            ambiguities.extend(known_ambiguities)
             if not remaining or time.monotonic() >= deadline:
                 break
             sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
@@ -462,13 +566,18 @@ def signal_processes(
     mode: str,
     *,
     require_engine_core: bool = True,
+    marker_leader_pid: int | None = None,
     marker_process_group: int | None = None,
     marker_session_id: int | None = None,
     trust_isolated_session: bool = False,
+    known_marker_members: Sequence[ProcessInfo] = (),
 ) -> tuple[list[int], list[str]]:
     signaled: list[int] = []
     ambiguities: list[str] = []
-    for process in processes:
+    ordered_processes = list(processes)
+    if marker_leader_pid is not None:
+        ordered_processes.sort(key=lambda process: process.pid == marker_leader_pid)
+    for process in ordered_processes:
         try:
             pidfd = open_process_handle(process.pid)
         except ProcessDisappeared:
@@ -482,13 +591,20 @@ def signal_processes(
                     proc_root / str(process.pid), context, mode, require_engine_core=require_engine_core
                 )
             else:
-                current = inspect_marker_group_member(
-                    proc_root / str(process.pid),
-                    marker_process_group,
-                    marker_session_id,
-                    context,
-                    trust_isolated_session=trust_isolated_session,
-                )
+                try:
+                    current = inspect_marker_group_member(
+                        proc_root / str(process.pid),
+                        proc_root,
+                        marker_leader_pid or process.pid,
+                        marker_process_group,
+                        marker_session_id,
+                        context,
+                        trust_isolated_session=trust_isolated_session,
+                    )
+                except ProcessDisappeared:
+                    current = None
+                if current != process and process in known_marker_members:
+                    current = inspect_known_process(proc_root / str(process.pid), process)
             if current != process:
                 continue
             send_process_signal(pidfd, signum)

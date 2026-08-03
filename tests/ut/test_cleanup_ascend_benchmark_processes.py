@@ -57,6 +57,7 @@ def create_process(
     start_time: int | None = None,
     process_group: int | None = None,
     session_id: int | None = None,
+    parent_pid: int = 0,
 ) -> None:
     process_dir = proc_root / str(pid)
     process_dir.mkdir(parents=True, exist_ok=True)
@@ -68,7 +69,7 @@ def create_process(
     (process_dir / "environ").write_bytes(environ)
     stat_suffix = [
         "S",
-        "0",
+        str(parent_pid),
         str(process_group if process_group is not None else pid),
         str(session_id if session_id is not None else process_group if process_group is not None else pid),
         *("0" for _ in range(15)),
@@ -311,9 +312,9 @@ def test_marker_cleanup_signals_owned_process_group_members_before_reporting_amb
     )
 
     assert matched == [701, 702]
-    assert signaled == [701, 702]
+    assert signaled == [702, 701]
     assert remaining == []
-    assert signals == [(701, signal.SIGTERM), (702, signal.SIGTERM)]
+    assert signals == [(702, signal.SIGTERM), (701, signal.SIGTERM)]
     assert len(ambiguities) == 1
     assert "PID 703 lacks ownership metadata" in ambiguities[0]
     assert marker_file.exists()
@@ -391,10 +392,133 @@ def test_marker_cleanup_trusts_verified_isolated_session_without_child_metadata(
     )
 
     assert matched == [715, 716]
-    assert signaled == [715, 716]
+    assert signaled == [716, 715]
     assert remaining == []
     assert ambiguities == []
-    assert signals == [(715, signal.SIGTERM), (716, signal.SIGTERM)]
+    assert signals == [(716, signal.SIGTERM), (715, signal.SIGTERM)]
+    assert not marker_file.exists()
+
+
+def test_marker_cleanup_trusts_descendant_that_creates_a_new_session(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker_file = tmp_path / "server.marker"
+    create_process(
+        tmp_path,
+        730,
+        {},
+        engine_core=False,
+        start_time=7301,
+        process_group=730,
+        session_id=730,
+    )
+    create_process(
+        tmp_path,
+        731,
+        {},
+        process_group=731,
+        session_id=731,
+        parent_pid=730,
+    )
+    cleanup.record_process_marker(
+        marker_file,
+        730,
+        tmp_path,
+        context,
+        isolated_session=True,
+    )
+    signals: list[tuple[int, int]] = []
+
+    def fake_signal(pid: int, signum: int) -> None:
+        signals.append((pid, signum))
+        shutil.rmtree(tmp_path / str(pid))
+
+    monkeypatch.setattr(cleanup, "send_process_signal", fake_signal)
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_marker_group(
+        marker_file,
+        tmp_path,
+        context,
+        "current",
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        sleep=lambda _: None,
+    )
+
+    assert matched == [730, 731]
+    assert signaled == [731, 730]
+    assert remaining == []
+    assert ambiguities == []
+    assert signals == [(731, signal.SIGTERM), (730, signal.SIGTERM)]
+    assert not marker_file.exists()
+
+
+def test_marker_cleanup_kills_tracked_descendant_after_leader_reparents_it(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker_file = tmp_path / "server.marker"
+    create_process(
+        tmp_path,
+        740,
+        {},
+        engine_core=False,
+        start_time=7401,
+        process_group=740,
+        session_id=740,
+    )
+    create_process(
+        tmp_path,
+        741,
+        {},
+        start_time=7411,
+        process_group=741,
+        session_id=741,
+        parent_pid=740,
+    )
+    cleanup.record_process_marker(
+        marker_file,
+        740,
+        tmp_path,
+        context,
+        isolated_session=True,
+    )
+    signals: list[tuple[int, int]] = []
+
+    def fake_signal(pid: int, signum: int) -> None:
+        signals.append((pid, signum))
+        if pid == 740:
+            shutil.rmtree(tmp_path / str(pid))
+            create_process(
+                tmp_path,
+                741,
+                {},
+                start_time=7411,
+                process_group=741,
+                session_id=741,
+                parent_pid=1,
+            )
+        elif pid == 741 and signum == signal.SIGKILL:
+            shutil.rmtree(tmp_path / str(pid))
+
+    monkeypatch.setattr(cleanup, "send_process_signal", fake_signal)
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_marker_group(
+        marker_file,
+        tmp_path,
+        context,
+        "current",
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        sleep=lambda _: None,
+    )
+
+    assert matched == [740, 741]
+    assert signaled == [741, 740]
+    assert remaining == []
+    assert ambiguities == []
+    assert signals == [
+        (741, signal.SIGTERM),
+        (740, signal.SIGTERM),
+        (741, signal.SIGKILL),
+    ]
     assert not marker_file.exists()
 
 
