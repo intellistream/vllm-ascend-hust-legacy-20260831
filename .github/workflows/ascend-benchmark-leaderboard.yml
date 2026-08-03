@@ -297,7 +297,7 @@ jobs:
       - 910b
       - docker
       - vllm-ascend-0-21-0rc1
-      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-pool' }}
+      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-npu0' }}
     timeout-minutes: 60
     env:
       BENCHMARK_CHECKOUT_USE_SSH_443: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY != '' && '1' || '0' }}
@@ -1345,7 +1345,7 @@ jobs:
       - 910b
       - docker
       - vllm-ascend-0-21-0rc1
-      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-pool' }}
+      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-npu0' }}
     timeout-minutes: 10
     permissions:
       contents: read
