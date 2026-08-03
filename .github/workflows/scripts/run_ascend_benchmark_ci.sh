@@ -530,6 +530,11 @@ record_server_marker() {
     --isolated-session
 }
 
+record_server_marker_members() {
+  "$PYTHON_BIN" "$SCRIPT_DIR/cleanup_ascend_benchmark_processes.py" \
+    --refresh-marker-members "$SERVER_PID_MARKER"
+}
+
 wait_for_ascend_runtime_ready() {
   local max_attempts
   max_attempts=$(((ASCEND_RUNTIME_READY_TIMEOUT_SECONDS + ASCEND_RUNTIME_READY_POLL_SECONDS - 1) / ASCEND_RUNTIME_READY_POLL_SECONDS))
@@ -1491,6 +1496,11 @@ else
     fi
     exit 1
   fi
+
+  # Capture the descendants while the isolated launcher is still alive. A
+  # GitHub cancellation can reap that launcher before this script's cleanup
+  # trap executes, leaving EngineCore reparented in its own session.
+  record_server_marker_members
 
   case "$ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE" in
     normal)

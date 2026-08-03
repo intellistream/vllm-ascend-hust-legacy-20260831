@@ -522,6 +522,75 @@ def test_marker_cleanup_kills_tracked_descendant_after_leader_reparents_it(
     assert not marker_file.exists()
 
 
+def test_marker_cleanup_kills_ready_snapshot_member_after_launcher_exits(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker_file = tmp_path / "server.marker"
+    create_process(
+        tmp_path,
+        750,
+        {},
+        engine_core=False,
+        start_time=7501,
+        process_group=750,
+        session_id=750,
+    )
+    create_process(
+        tmp_path,
+        751,
+        {},
+        start_time=7511,
+        process_group=751,
+        session_id=751,
+        parent_pid=750,
+    )
+    cleanup.record_process_marker(
+        marker_file,
+        750,
+        tmp_path,
+        context,
+        isolated_session=True,
+    )
+    assert cleanup.refresh_process_marker_members(marker_file, tmp_path, context) == [
+        cleanup.ProcessInfo(pid=750, start_time=7501),
+        cleanup.ProcessInfo(pid=751, start_time=7511),
+    ]
+
+    shutil.rmtree(tmp_path / "750")
+    create_process(
+        tmp_path,
+        751,
+        {},
+        start_time=7511,
+        process_group=751,
+        session_id=751,
+        parent_pid=1,
+    )
+    signals: list[tuple[int, int]] = []
+
+    def fake_signal(pid: int, signum: int) -> None:
+        signals.append((pid, signum))
+        shutil.rmtree(tmp_path / str(pid))
+
+    monkeypatch.setattr(cleanup, "send_process_signal", fake_signal)
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_marker_group(
+        marker_file,
+        tmp_path,
+        context,
+        "current",
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        sleep=lambda _: None,
+    )
+
+    assert matched == [751]
+    assert signaled == [751]
+    assert remaining == []
+    assert ambiguities == []
+    assert signals == [(751, signal.SIGTERM)]
+    assert not marker_file.exists()
+
+
 def test_marker_cleanup_does_not_trust_reused_isolated_session(
     tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

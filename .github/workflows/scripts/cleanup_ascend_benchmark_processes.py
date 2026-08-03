@@ -274,10 +274,82 @@ def record_process_marker(
         "start_time": read_start_time(process_dir),
         "context": dict(context),
         "isolated_session": isolated_session,
+        # This is populated after the server becomes ready, while the
+        # launcher can still prove its descendant relationship.
+        "members": [],
     }
     temporary_file = marker_file.with_suffix(f"{marker_file.suffix}.tmp")
     temporary_file.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     temporary_file.replace(marker_file)
+
+
+def read_marker_members(marker: Mapping[str, object]) -> list[ProcessInfo]:
+    raw_members = marker.get("members", [])
+    if not isinstance(raw_members, list):
+        raise ValueError("benchmark process marker members must be a list")
+
+    members: list[ProcessInfo] = []
+    seen_pids: set[int] = set()
+    for raw_member in raw_members:
+        if not isinstance(raw_member, dict):
+            raise ValueError("benchmark process marker member must be an object")
+        pid = raw_member.get("pid")
+        start_time = raw_member.get("start_time")
+        if type(pid) is not int or pid <= 0 or type(start_time) is not int or start_time < 0:
+            raise ValueError("benchmark process marker member has invalid PID or start time")
+        if pid in seen_pids:
+            raise ValueError("benchmark process marker contains duplicate member PID")
+        seen_pids.add(pid)
+        members.append(ProcessInfo(pid=pid, start_time=start_time))
+    return sorted(members, key=lambda process: process.pid)
+
+
+def refresh_process_marker_members(marker_file: Path, proc_root: Path, context: Mapping[str, str]) -> list[ProcessInfo]:
+    """Persist members proven to belong to the live isolated server session."""
+    try:
+        marker = json.loads(marker_file.read_text(encoding="utf-8"))
+        marker_context = validate_context(marker["context"])
+        pid = int(marker["pid"])
+        process_group = int(marker["process_group"])
+        session_id = int(marker["session_id"])
+        start_time = int(marker["start_time"])
+        isolated_session = bool(marker.get("isolated_session"))
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid benchmark process marker {marker_file}: {exc}") from exc
+
+    if marker_context != dict(context):
+        raise ValueError(f"benchmark process marker {marker_file} belongs to another job")
+    if not isolated_session:
+        raise ValueError("benchmark process marker does not describe an isolated session")
+
+    leader_dir = proc_root / str(pid)
+    try:
+        leader_identity_matches = (
+            read_start_time(leader_dir) == start_time
+            and read_process_group(leader_dir) == process_group
+            and read_session_id(leader_dir) == session_id
+        )
+    except (ProcessDisappeared, ProcessInspectionError) as exc:
+        raise ValueError("benchmark launcher disappeared before marker members could be recorded") from exc
+    if not leader_identity_matches:
+        raise ValueError("benchmark launcher identity changed before marker members could be recorded")
+
+    members, ambiguities = find_marker_group_processes(
+        proc_root,
+        pid,
+        process_group,
+        session_id,
+        context,
+        trust_isolated_session=True,
+    )
+    if ambiguities:
+        raise ValueError("could not safely inspect isolated benchmark session: " + "; ".join(ambiguities))
+
+    marker["members"] = [{"pid": process.pid, "start_time": process.start_time} for process in members]
+    temporary_file = marker_file.with_suffix(f"{marker_file.suffix}.tmp")
+    temporary_file.write_text(json.dumps(marker, sort_keys=True), encoding="utf-8")
+    temporary_file.replace(marker_file)
+    return members
 
 
 def find_marker_group_processes(
@@ -439,6 +511,7 @@ def cleanup_marker_group(
         start_time = int(marker["start_time"])
         isolated_session = bool(marker.get("isolated_session"))
         session_id = int(marker["session_id"]) if isolated_session else None
+        marker_members = read_marker_members(marker)
     except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         return [], [], [], [f"invalid benchmark process marker {marker_file}: {exc}"]
     try:
@@ -480,6 +553,9 @@ def cleanup_marker_group(
         process_context,
         trust_isolated_session=trust_isolated_session,
     )
+    known_members, member_ambiguities = find_known_processes(proc_root, marker_members)
+    initial = sorted({*initial, *known_members}, key=lambda process: process.pid)
+    ambiguities.extend(member_ambiguities)
     if not leader_identity_matches and not initial and not ambiguities:
         marker_file.unlink(missing_ok=True)
         return [], [], [], []
@@ -494,6 +570,7 @@ def cleanup_marker_group(
         marker_process_group=process_group,
         marker_session_id=session_id,
         trust_isolated_session=trust_isolated_session,
+        known_marker_members=initial,
     )
     ambiguities.extend(signal_ambiguities)
     deadline = time.monotonic() + term_timeout_seconds
@@ -603,6 +680,10 @@ def signal_processes(
                     )
                 except ProcessDisappeared:
                     current = None
+                except ProcessInspectionError:
+                    if process not in known_marker_members:
+                        raise
+                    current = inspect_known_process(proc_root / str(process.pid), process)
                 if current != process and process in known_marker_members:
                     current = inspect_known_process(proc_root / str(process.pid), process)
             if current != process:
@@ -687,6 +768,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kill-timeout-seconds", type=float, default=5.0)
     parser.add_argument("--marker-file", type=Path)
     parser.add_argument("--record-marker", type=Path)
+    parser.add_argument("--refresh-marker-members", type=Path)
     parser.add_argument("--pid", type=int)
     parser.add_argument("--isolated-session", action="store_true")
     parser.add_argument("--target-job")
@@ -715,6 +797,9 @@ def main() -> int:
                 context,
                 isolated_session=args.isolated_session,
             )
+            return 0
+        if getattr(args, "refresh_marker_members", None):
+            refresh_process_marker_members(args.refresh_marker_members, args.proc_root, context)
             return 0
         if args.mode is None:
             raise ValueError("--mode is required when recording no marker")

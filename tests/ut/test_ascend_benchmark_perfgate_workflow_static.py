@@ -84,6 +84,9 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     assert "pkill" not in cleanup_wrapper
     assert "grep -E 'vllm|python|pytest'" not in runner_script
     assert 'ASCEND_BENCHMARK_CLEANUP_MARKER_FILE="$SERVER_PID_MARKER"' in runner_script
+    assert "record_server_marker_members()" in runner_script
+    assert '--refresh-marker-members "$SERVER_PID_MARKER"' in runner_script
+    assert '  record_server_marker_members\n\n  case "$ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE"' in runner_script
     assert 'kill -TERM -- "-$server_group_pid"' not in runner_script
     assert "if ! command -v setsid >/dev/null 2>&1; then" in runner_script
     assert "setsid is required to launch the benchmark with an isolated process group" in runner_script
