@@ -350,6 +350,117 @@ def test_marker_cleanup_handles_children_after_launcher_exits(
     assert not marker_file.exists()
 
 
+def test_marker_cleanup_trusts_verified_isolated_group_without_child_metadata(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker_file = tmp_path / "server.marker"
+    create_process(tmp_path, 715, {}, engine_core=False, start_time=7151, process_group=715)
+    create_process(tmp_path, 716, {}, process_group=715)
+    cleanup.record_process_marker(
+        marker_file,
+        715,
+        tmp_path,
+        context,
+        isolated_process_group=True,
+    )
+    signals: list[tuple[int, int]] = []
+
+    def fake_signal(pid: int, signum: int) -> None:
+        signals.append((pid, signum))
+        shutil.rmtree(tmp_path / str(pid))
+
+    monkeypatch.setattr(cleanup, "send_process_signal", fake_signal)
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_marker_group(
+        marker_file,
+        tmp_path,
+        context,
+        "current",
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        sleep=lambda _: None,
+    )
+
+    assert matched == [715, 716]
+    assert signaled == [715, 716]
+    assert remaining == []
+    assert ambiguities == []
+    assert signals == [(715, signal.SIGTERM), (716, signal.SIGTERM)]
+    assert not marker_file.exists()
+
+
+def test_marker_cleanup_does_not_trust_reused_isolated_group(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker_file = tmp_path / "server.marker"
+    create_process(tmp_path, 717, {}, engine_core=False, start_time=7171, process_group=717)
+    create_process(tmp_path, 718, {}, process_group=717)
+    cleanup.record_process_marker(
+        marker_file,
+        717,
+        tmp_path,
+        context,
+        isolated_process_group=True,
+    )
+    create_process(tmp_path, 717, {}, engine_core=False, start_time=7172, process_group=717)
+    signals: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(cleanup, "send_process_signal", lambda pid, signum: signals.append((pid, signum)))
+    matched, signaled, remaining, ambiguities = cleanup.cleanup_marker_group(
+        marker_file,
+        tmp_path,
+        context,
+        "current",
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        sleep=lambda _: None,
+    )
+
+    assert matched == []
+    assert signaled == []
+    assert remaining == []
+    assert len(ambiguities) == 2
+    assert signals == []
+    assert marker_file.exists()
+
+
+def test_main_cleans_isolated_marker_group_before_global_engine_core_scan(
+    tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker_file = tmp_path / "server.marker"
+    create_process(tmp_path, 719, {}, engine_core=False, start_time=7191, process_group=719)
+    create_process(tmp_path, 720, {}, process_group=719)
+    cleanup.record_process_marker(
+        marker_file,
+        719,
+        tmp_path,
+        context,
+        isolated_process_group=True,
+    )
+
+    def fake_signal(pid: int, _signum: int) -> None:
+        shutil.rmtree(tmp_path / str(pid))
+
+    args = SimpleNamespace(
+        mode="current",
+        proc_root=tmp_path,
+        term_timeout_seconds=0,
+        kill_timeout_seconds=0,
+        marker_file=marker_file,
+        record_marker=None,
+        pid=None,
+        isolated_process_group=False,
+        target_job=None,
+        target_run_id=None,
+        target_run_attempt=None,
+    )
+    monkeypatch.setattr(cleanup, "parse_args", lambda: args)
+    monkeypatch.setattr(cleanup, "validate_context", lambda _environment: context)
+    monkeypatch.setattr(cleanup, "send_process_signal", fake_signal)
+
+    assert cleanup.main() == 0
+    assert not marker_file.exists()
+
+
 def test_stale_marker_cleanup_uses_marker_run_context(
     tmp_path: Path, context: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
