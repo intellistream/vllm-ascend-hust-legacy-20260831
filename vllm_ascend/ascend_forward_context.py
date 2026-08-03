@@ -223,14 +223,14 @@ def _get_quant_type(vllm_config: VllmConfig):
     )
 
 
-def _is_a2_fused_float_configured(vllm_config: VllmConfig) -> bool:
+def _is_a2_fused_configured(vllm_config: VllmConfig) -> bool:
     parallel_config = vllm_config.parallel_config
     ep_world_size = parallel_config.world_size_across_dp // parallel_config.pipeline_parallel_size
     num_experts_per_device = vllm_config.model_config.get_num_experts() // ep_world_size
     return (
         get_ascend_device_type() in {AscendDeviceType.A2}
         and get_ascend_config().enable_fused_mc2 == 1
-        and _get_quant_type(vllm_config) is None
+        and _get_quant_type(vllm_config) in (None, "w8a8_dynamic")
         and parallel_config.enable_expert_parallel
         and 1 < ep_world_size <= MAX_A2_FUSED_MC2_EP_SIZE
         and num_experts_per_device >= MIN_A2_FUSED_MC2_LOCAL_EXPERTS
@@ -238,7 +238,7 @@ def _is_a2_fused_float_configured(vllm_config: VllmConfig) -> bool:
 
 
 def _compute_mc2_tokens_limit(vllm_config, max_num_reqs, uniform_decode_query_len) -> int:
-    if _is_a2_fused_float_configured(vllm_config) or get_ascend_config().enable_prefill_mc2:
+    if _is_a2_fused_configured(vllm_config) or get_ascend_config().enable_prefill_mc2:
         return vllm_config.scheduler_config.max_num_batched_tokens
     if vllm_config.compilation_config.cudagraph_capture_sizes:
         return vllm_config.compilation_config.max_cudagraph_capture_size
@@ -248,12 +248,12 @@ def _compute_mc2_tokens_limit(vllm_config, max_num_reqs, uniform_decode_query_le
 def _compute_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len) -> int:
     """Return the maximum padded pre-TP token domain reserved at startup.
 
-    A2 floating-point fused MC2 is one immutable communication family for a
+    A2 BF16/W8A8 fused MC2 is one immutable communication family for a
     compiled model. Its capacity therefore covers the scheduler's complete
     legal batch domain instead of acting as a per-forward fallback threshold.
     Other MC2 implementations retain their existing memory-saving ceiling.
     """
-    a2_fused_float = _is_a2_fused_float_configured(vllm_config)
+    a2_fused = _is_a2_fused_configured(vllm_config)
     max_num_tokens = _compute_mc2_tokens_limit(
         vllm_config,
         max_num_reqs,
@@ -262,7 +262,7 @@ def _compute_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query
 
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-    if a2_fused_float:
+    if a2_fused:
         # dispatch_ffn_combine does not support a direct one-row invocation.
         # Reserve two local rows so a one-token legal batch can stay in the
         # fused family and mark the synthetic rows inactive.
@@ -354,12 +354,13 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
 
     1. Non-MoE models return `None`.
     2. Without expert parallel, fall back to all-gather.
-    3. On A2 with expert parallel, use the floating-point fused MC2 path when
-       explicitly enabled for a small EP group with enough local experts for
-       the kernel pipeline. The fused family covers the scheduler's complete
-       legal token domain; a request beyond its startup capacity is a scheduler
-       contract violation. Otherwise, pick MC2 when tokens fit the ordinary
-       MC2 capacity and the DP size is large enough, or use all-gather.
+    3. On A2 with expert parallel, use the BF16 or W8A8 dynamic fused MC2 path
+       when explicitly enabled for a small EP group with enough local experts
+       for the kernel pipeline. The fused family covers the scheduler's
+       complete legal token domain; a request beyond its startup capacity is a
+       scheduler contract violation. Otherwise, pick MC2 when tokens fit the
+       ordinary MC2 capacity and the DP size is large enough, or use
+       all-gather.
     4. On A3 with expert parallel, prefer fused MC2 when using w8a8_dynamic
        quantization with small EP size, no dynamic_eplb, and not in MTP
        mode; otherwise use MC2 within capacity or all-to-all.
@@ -393,10 +394,10 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             vllm_config.parallel_config.world_size_across_dp // vllm_config.parallel_config.pipeline_parallel_size
         )
         num_experts_per_device = num_experts // ep_world_size
-        fused_float_enable = _is_a2_fused_float_configured(vllm_config) and (
+        fused_a2_enable = _is_a2_fused_configured(vllm_config) and (
             get_ep_group().world_size <= MAX_A2_FUSED_MC2_EP_SIZE
         )
-        if fused_float_enable:
+        if fused_a2_enable:
             mc2_tokens_limit = get_mc2_tokens_limit()
             if mc2_tokens_limit is None:
                 raise RuntimeError("A2 fused MC2 token domain was not initialized")
