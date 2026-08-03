@@ -52,6 +52,11 @@ on:
         required: false
         type: string
         default: Qwen/Qwen2.5-14B-Instruct
+      model_parameters:
+        description: Model parameter scale recorded in benchmark metadata (for example 3B or 14B)
+        required: false
+        type: string
+        default: "14B"
       model_precision:
         description: Model weight precision (e.g. FP16, BF16, INT8)
         required: false
@@ -346,7 +351,7 @@ jobs:
       BENCH_SCENARIOS: ${{ (github.event_name == 'schedule' && (vars.VLLM_ASCEND_HUST_SCHEDULE_BENCHMARK_SCENARIOS || 'random-online,sharegpt-online,prefix-repetition-online,random-latency,sharegpt-throughput,sonnet-throughput,instructcoder-online,agent-research-online,visionarena-online')) || (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios != 'perfgate-bootstrap' && inputs.benchmark_scenarios) || (github.event_name == 'pull_request' && vars.VLLM_ASCEND_HUST_PR_BENCHMARK_SCENARIOS) || (github.event_name == 'push' && vars.VLLM_ASCEND_HUST_MAIN_BENCHMARK_SCENARIOS) || '' }}
       BENCH_DATASET_PATH: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.dataset_path || (github.event_name == 'workflow_dispatch' && inputs.dataset_path || (github.event_name == 'pull_request' && vars.VLLM_ASCEND_HUST_PR_BENCHMARK_DATASET_PATH) || (github.event_name == 'push' && vars.VLLM_ASCEND_HUST_MAIN_BENCHMARK_DATASET_PATH) || '') }}
       BENCH_CONSTRAINTS_FILE: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.constraints_file || (github.event_name == 'workflow_dispatch' && inputs.constraints_file || (github.event_name == 'pull_request' && vars.VLLM_ASCEND_HUST_PR_BENCHMARK_CONSTRAINTS_FILE) || (github.event_name == 'push' && vars.VLLM_ASCEND_HUST_MAIN_BENCHMARK_CONSTRAINTS_FILE) || '') }}
-      MODEL_PARAMETERS: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap')) && '3B' || '14B' }}
+      MODEL_PARAMETERS: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap')) && '3B' || (github.event_name == 'workflow_dispatch' && inputs.model_parameters || '14B') }}
       MODEL_PRECISION: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap')) && 'BF16' || (github.event_name == 'workflow_dispatch' && inputs.model_precision || 'FP16') }}
       MODEL_QUANTIZATION: ${{ github.event_name == 'workflow_dispatch' && inputs.model_quantization || '' }}
       DTYPE: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap')) && 'bfloat16' || (github.event_name == 'workflow_dispatch' && inputs.dtype || 'float16') }}

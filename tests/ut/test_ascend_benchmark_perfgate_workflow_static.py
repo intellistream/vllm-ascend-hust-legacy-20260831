@@ -176,6 +176,8 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "docs/official-baselines/perfgate-ascend-qwen25-3b-910b3.json" not in workflow
     assert "perfgate-ascend-qwen25-3b-910b3.json" not in workflow
     assert "VLLM_HUST_BENCHMARK_REF" in workflow
+    assert "model_parameters:" in workflow
+    assert "inputs.model_parameters" in workflow
     assert "ref: ${{ env.VLLM_HUST_BENCHMARK_REF }}" in workflow
     assert 'hust_run_pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]"' not in workflow
     assert "Detect PR fork point" in workflow
@@ -462,7 +464,7 @@ def test_perfgate_baseline_events_match_pull_request_spec_size() -> None:
         assert fixed_spec_events in line
 
     assert "'Qwen/Qwen2.5-3B-Instruct'" in workflow
-    assert "&& '3B' || '14B'" in workflow
+    assert "&& '3B' || (github.event_name == 'workflow_dispatch' && inputs.model_parameters || '14B')" in workflow
     assert "&& 'BF16' ||" in workflow
     assert "&& 'bfloat16' ||" in workflow
     assert "&& '64' || '1024'" in workflow
