@@ -52,3 +52,7 @@ def test_from_env_rejects_non_positive_bound(
     monkeypatch.setenv(TRACE_DIR, str(tmp_path))
     monkeypatch.setenv(TRACE_MAX, "0")
 
+    with pytest.raises(ObservationViolation) as error:
+        ADMRuntimeObserver.from_env(rank=0, dp_size=2)
+
+    assert error.value.code == "invalid_configuration"

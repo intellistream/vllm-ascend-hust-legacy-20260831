@@ -186,4 +186,3 @@ def test_trace_error_is_reported_in_receipt(tmp_path):
 
     receipt = read_records(tmp_path)[-1]
     assert receipt["trace_error_count"] == 1
-
