@@ -799,6 +799,34 @@ def test_pull_request_trigger_preserves_ready_labels_on_updates() -> None:
     assert "github.event.label.name" not in workflow
 
 
+def test_plugin_producer_outcome_controls_publication_and_enforcement() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    producer_start = workflow.index("- name: Run Plugin perfgate baseline producer")
+    producer_end = workflow.index("- name: Upload Plugin perfgate producer artifact")
+    producer = workflow[producer_start:producer_end]
+    assert "id: perfgate_producer" in producer
+    assert "continue-on-error: true" in producer
+    assert "GITHUB_OUTPUT" not in producer
+
+    success_gate = "steps.perfgate_producer.outcome == 'success'"
+    for step_name in (
+        "Upload Plugin perfgate producer artifact",
+        "Sanitize runner before Plugin baseline publication",
+        "Publish central Plugin perfgate baseline",
+    ):
+        step_start = workflow.index(f"- name: {step_name}")
+        next_step = workflow.index("\n      - name:", step_start + 1)
+        assert success_gate in workflow[step_start:next_step]
+
+    enforce_start = workflow.index("- name: Enforce Plugin perfgate producer result")
+    enforce_end = workflow.index("\n      - name:", enforce_start + 1)
+    enforce = workflow[enforce_start:enforce_end]
+    assert "always()" in enforce
+    assert "steps.perfgate_producer.outcome != 'success'" in enforce
+    assert "perfgate-producer.outputs.status" not in workflow
+
+
 def test_plugin_producer_preserves_measurement_and_provenance_evidence() -> None:
     runner = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
     store = (SCRIPT_DIR / "perfgate_store_baseline.sh").read_text(encoding="utf-8")
