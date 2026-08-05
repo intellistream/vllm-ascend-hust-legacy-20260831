@@ -62,6 +62,8 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     current_step = workflow[current_index:release_index]
     assert "if: always()" in current_step
     assert "cleanup_ascend_benchmark_processes.sh current" in current_step
+    assert "ASCEND_BENCHMARK_CLEANUP_MARKER_FILE:" in current_step
+    assert "runtime/process-markers/ascend-benchmark-server.pid" in current_step
     assert "cleanup_ascend_benchmark_processes.sh stale" in workflow[stale_index:current_index]
 
     preserve_block = runner_script[runner_script.index("SUDO_PRESERVE_ENV_VARS=(") :]
@@ -101,7 +103,7 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     assert "linux-aarch64-a2b3-npu0" in workflow
     assert "vllm-ascend-0-21-0rc1" in workflow
     assert "      - ascend\n      - 910b\n      - docker" in workflow
-    assert "ASCEND_RT_VISIBLE_DEVICES:" not in workflow
+    assert 'ASCEND_RT_VISIBLE_DEVICES: "0"' in workflow
     assert "cleanup-ascend-benchmark:" in workflow
     assert "needs: ascend-benchmark" in workflow
     assert "runner_name: ${{ steps.runner-identity.outputs.runner_name }}" in workflow
@@ -163,10 +165,14 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert (
         "runs-on:\n"
         "      - self-hosted\n"
+        "      - Linux\n"
+        "      - ARM64\n"
         "      - ascend\n"
         "      - 910b\n"
         "      - docker\n"
         "      - vllm-ascend-0-21-0rc1\n"
+        "      - linux-aarch64-a2b3-pool\n"
+        "      - ascend-benchmark\n"
         "      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-npu0' }}"
     ) in workflow
     assert (

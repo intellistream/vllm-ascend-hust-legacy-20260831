@@ -316,10 +316,14 @@ jobs:
       issues: write
     runs-on:
       - self-hosted
+      - Linux
+      - ARM64
       - ascend
       - 910b
       - docker
       - vllm-ascend-0-21-0rc1
+      - linux-aarch64-a2b3-pool
+      - ascend-benchmark
       - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-npu0' }}
     timeout-minutes: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.cleanup_validation_timeout_minutes || '60') }}
     env:
@@ -372,6 +376,8 @@ jobs:
       NODE_COUNT: "1"
       ASCEND_BENCHMARK_USE_SUDO: ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_USE_SUDO || 'auto' }}
       ASCEND_BENCHMARK_ROOT_HELPER: ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_ROOT_HELPER || '' }}
+      # Each pool runner exposes one physical NPU as container-local logical device 0.
+      ASCEND_RT_VISIBLE_DEVICES: "0"
       ALLOW_RANDOM_HF_PUBLISH: ${{ vars.VLLM_ASCEND_HUST_ALLOW_RANDOM_HF_PUBLISH || '0' }}
       SAME_SPEC_BENCHMARK_ENABLED: ${{ (github.event_name == 'workflow_dispatch' && inputs.cleanup_validation_mode != 'normal') && '0' || (vars.VLLM_ASCEND_HUST_SAME_SPEC_BENCHMARK_ENABLED || '1') }}
       PERFGATE_MODE: ${{ github.event_name == 'pull_request' && 'enforce' || (vars.VLLM_ASCEND_HUST_PERFGATE_MODE || 'report') }}
@@ -996,6 +1002,10 @@ jobs:
 
       - name: Cleanup current Ascend benchmark processes
         if: always()
+        env:
+          # Reuse the member journal written before cancellation so detached
+          # EngineCore processes can be verified by PID and start time.
+          ASCEND_BENCHMARK_CLEANUP_MARKER_FILE: ${{ github.workspace }}/../vllm-ascend-hust-ci-state/runtime/process-markers/ascend-benchmark-server.pid
         run: bash .github/workflows/scripts/cleanup_ascend_benchmark_processes.sh current
 
       - name: Capture post-cleanup Ascend NPU diagnostics
