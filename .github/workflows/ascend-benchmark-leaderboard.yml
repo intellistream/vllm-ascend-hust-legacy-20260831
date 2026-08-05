@@ -972,7 +972,33 @@ jobs:
           set -euo pipefail
           echo "status=failed" >> "$GITHUB_OUTPUT"
 
-          git -C "$VLLM_HUST_BENCHMARK_REPO" fetch --quiet origin main
+          fetch_with_retry() {
+            local max_attempts=4
+            local delay_seconds=15
+            local attempt=1
+
+            while [[ "$attempt" -le "$max_attempts" ]]; do
+              echo "[plugin-perfgate-producer] fetch attempt ${attempt}/${max_attempts}: git fetch $*"
+              if git -C "$VLLM_HUST_BENCHMARK_REPO" fetch --quiet "$@"; then
+                return 0
+              fi
+              echo "[plugin-perfgate-producer] fetch failed (${attempt}/${max_attempts}): git fetch $*" >&2
+              if [[ "$attempt" -lt "$max_attempts" ]]; then
+                sleep "$delay_seconds"
+              fi
+              attempt=$((attempt + 1))
+              delay_seconds=$((delay_seconds * 2))
+            done
+
+            echo "[plugin-perfgate-producer] fetch failed after ${max_attempts} attempts: git fetch $*" >&2
+            return 1
+          }
+
+          if [[ "$(git -C "$VLLM_HUST_BENCHMARK_REPO" rev-parse --is-shallow-repository)" == "true" ]]; then
+            fetch_with_retry --unshallow origin main
+          else
+            fetch_with_retry origin main
+          fi
           git -C "$VLLM_HUST_BENCHMARK_REPO" merge-base --is-ancestor HEAD origin/main
 
           perfgate_spec_file="${PERFGATE_SPEC_FILE:-}"

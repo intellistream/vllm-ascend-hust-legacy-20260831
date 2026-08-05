@@ -514,6 +514,9 @@ def test_main_perfgate_producer_is_reachable_and_pins_dependencies() -> None:
     assert 'PERFGATE_MEASURED_RUNS: "3"' in producer
     assert 'PERFGATE_AGGREGATION: "primary-median-run"' in producer
     assert 'SAME_SPEC_PR_PREVIEW_COMPAT: "0"' in producer
+    assert "fetch_with_retry()" in producer
+    assert "fetch_with_retry --unshallow origin main" in producer
+    assert "fetch_with_retry origin main" in producer
     assert "prepare_plugin_perfgate_artifact.py" in producer
     assert producer.index("Upload Plugin perfgate producer artifact") < producer.index(
         "Publish central Plugin perfgate baseline"
