@@ -713,6 +713,12 @@ jobs:
           test "$(git -C "$GITHUB_WORKSPACE/vllm-hust" rev-parse HEAD)" = "$PERFGATE_VLLM_HUST_SHA"
           test "$(git -C "$GITHUB_WORKSPACE/vllm-hust-benchmark" rev-parse HEAD)" = "$PERFGATE_BENCHMARK_RUNNER_SHA"
           test "$(git -C "$GITHUB_WORKSPACE/ascend-runtime-manager" rev-parse HEAD)" = "$PERFGATE_RUNTIME_MANAGER_SHA"
+          if ! PYTHONPATH="$GITHUB_WORKSPACE/vllm-hust-benchmark/src${PYTHONPATH:+:$PYTHONPATH}" \
+            python3 -m vllm_hust_benchmark.perfgate_baselines publish --help | \
+            grep -Fq -- '--runtime-manager-sha'; then
+            echo "Pinned benchmark runner does not support --runtime-manager-sha; update VLLM_ASCEND_HUST_PERFGATE_BENCHMARK_RUNNER_SHA to a compatible immutable SHA." >&2
+            exit 2
+          fi
 
       - name: Checkout website repo
         uses: actions/checkout@v7
@@ -1014,15 +1020,6 @@ jobs:
             --target-ref "$ASCEND_HUST_TARGET_REF" \
             --target-sha "$ASCEND_HUST_TARGET_SHA" \
             --github-server-url "$GITHUB_SERVER_URL"
-          {
-            echo "RUN_ID=$RUN_ID"
-            echo "RESULT_ROOT=$RESULT_ROOT"
-            echo "SUBMISSION_DIR=$SUBMISSION_DIR"
-            echo "BENCHMARK_EXIT_CODE=0"
-            echo "PUBLISH_TO_BENCHMARK_REPO=0"
-            echo "PUBLISH_TO_HF=0"
-            echo "SYNC_GITHUB_SNAPSHOTS=0"
-          } >> "$GITHUB_ENV"
           echo "status=success" >> "$GITHUB_OUTPUT"
 
       - name: Upload Plugin perfgate producer artifact
@@ -1065,9 +1062,8 @@ jobs:
           PERFGATE_EXPECTED_AGGREGATION: "primary-median-run"
         run: bash .github/workflows/scripts/perfgate_store_baseline.sh
 
-      - name: Run benchmark CI and optional HF sync
+      - name: Run benchmark CI and optional formal publish
         id: run_benchmark_ci
-        if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') }}
         env:
           WORKSPACE_ROOT: ${{ github.workspace }}
           VLLM_HUST_REPO: ${{ github.workspace }}/vllm-hust
@@ -1142,7 +1138,7 @@ jobs:
         run: bash .github/workflows/scripts/perfgate_validate_required.sh
 
       - name: Sync GitHub leaderboard snapshots
-        if: ${{ success() && !(github.event_name == 'push' && github.ref == 'refs/heads/main') && env.SYNC_GITHUB_SNAPSHOTS == '1' && steps.resolve-scenario.outputs.BENCH_SCENARIO_COUNT == '1' }}
+        if: ${{ success() && env.SYNC_GITHUB_SNAPSHOTS == '1' && steps.resolve-scenario.outputs.BENCH_SCENARIO_COUNT == '1' }}
         env:
           BENCHMARK_REPO_DIR: ${{ github.workspace }}/vllm-hust-benchmark
           WEBSITE_REPO_DIR: ${{ github.workspace }}/vllm-hust-website

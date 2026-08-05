@@ -15,9 +15,6 @@ self-hosted-runner:
     - linux-amd64-cpu-8-hk
     - linux-amd64-cpu-16-hk
     - linux-arm64-cpu-16
-    - ascend
-    - 910b
-    - docker
     - ascend-benchmark
     - ascend
     - 910b

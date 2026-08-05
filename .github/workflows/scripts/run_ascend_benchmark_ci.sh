@@ -796,6 +796,7 @@ run_same_spec_current_benchmark() {
   local benchmark_runner_commit
   local current_plugin_commit
   local current_vllm_hust_commit
+  local runtime_manager_commit
   local same_spec_exit_code=0
 
   if [[ ! -f "$same_spec_runner" ]]; then
@@ -814,6 +815,7 @@ run_same_spec_current_benchmark() {
   current_vllm_hust_commit=$(git -C "$VLLM_HUST_REPO" rev-parse HEAD 2>/dev/null || true)
   current_plugin_commit=$(git -C "$VLLM_ASCEND_HUST_REPO" rev-parse HEAD 2>/dev/null || true)
   benchmark_runner_commit=$(git -C "$VLLM_HUST_BENCHMARK_REPO" rev-parse HEAD 2>/dev/null || true)
+  runtime_manager_commit=$(git -C "${HUST_ASCEND_MANAGER_REPO:-}" rev-parse HEAD 2>/dev/null || true)
   rm -f "$same_spec_raw_result" "$RAW_RESULT_FILE"
   rm -rf "$same_spec_submission_dir" "$SUBMISSION_DIR"
 
@@ -961,7 +963,7 @@ PY
     cp "$same_spec_submission_dir/measurement.json" "$SUBMISSION_DIR/measurement.json"
 
     local provenance_sha
-    for provenance_sha in "$current_vllm_hust_commit" "$current_plugin_commit" "$benchmark_runner_commit"; do
+    for provenance_sha in "$current_vllm_hust_commit" "$current_plugin_commit" "$benchmark_runner_commit" "$runtime_manager_commit"; do
       if ! [[ "$provenance_sha" =~ ^[0-9a-f]{40}$ ]]; then
         echo "Could not resolve full lowercase runtime provenance SHAs" >&2
         return 2
@@ -972,6 +974,7 @@ PY
     PERFGATE_VLLM_HUST_SHA="$current_vllm_hust_commit" \
     PERFGATE_VLLM_ASCEND_HUST_SHA="$current_plugin_commit" \
     PERFGATE_BENCHMARK_RUNNER_SHA="$benchmark_runner_commit" \
+    PERFGATE_RUNTIME_MANAGER_SHA="$runtime_manager_commit" \
     PERFGATE_HARDWARE_CHIP_MODEL="$HARDWARE_CHIP_MODEL" \
     PERFGATE_CANN_VERSION="${HUST_ASCEND_RUNTIME_VERSION:-}" \
       "$PYTHON_BIN" - <<'PY'
@@ -1010,6 +1013,9 @@ payload = {
     ),
     "benchmark_runner_sha": one_line(
         os.environ["PERFGATE_BENCHMARK_RUNNER_SHA"], "benchmark runner SHA"
+    ),
+    "runtime_manager_sha": one_line(
+        os.environ["PERFGATE_RUNTIME_MANAGER_SHA"], "runtime manager SHA"
     ),
     "hardware_chip_model": one_line(
         os.environ["PERFGATE_HARDWARE_CHIP_MODEL"], "hardware chip model"

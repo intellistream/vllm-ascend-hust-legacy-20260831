@@ -507,25 +507,29 @@ def test_main_perfgate_producer_is_reachable_and_pins_dependencies() -> None:
     assert '[[ ! "$value" =~ ^[0-9a-f]{40}$ ]]' in workflow
     assert "Verify trusted main dependency SHAs" in workflow
     assert "Run Plugin perfgate baseline producer" in workflow
-    producer = workflow[workflow.index("- name: Run Plugin perfgate baseline producer") :]
-    producer = producer[: producer.index("- name: Run benchmark CI and optional HF sync")]
+    producer_start = workflow.index("- name: Run Plugin perfgate baseline producer")
+    formal_start = workflow.index("- name: Run benchmark CI and optional formal publish")
+    producer = workflow[producer_start:formal_start]
     assert 'PERFGATE_WARMUP_RUNS: "1"' in producer
     assert 'PERFGATE_MEASURED_RUNS: "3"' in producer
     assert 'PERFGATE_AGGREGATION: "primary-median-run"' in producer
     assert 'SAME_SPEC_PR_PREVIEW_COMPAT: "0"' in producer
     assert "prepare_plugin_perfgate_artifact.py" in producer
-    assert 'echo "RUN_ID=$RUN_ID"' in producer
-    assert 'echo "SUBMISSION_DIR=$SUBMISSION_DIR"' in producer
     assert producer.index("Upload Plugin perfgate producer artifact") < producer.index(
         "Publish central Plugin perfgate baseline"
     )
+    assert producer_start < workflow.index("Upload Plugin perfgate producer artifact")
+    assert workflow.index("Publish central Plugin perfgate baseline") < formal_start
     publication = producer[producer.index("Publish central Plugin perfgate baseline") :]
     assert "VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN" in publication
     assert "plugin-run_leaderboard.json" in publication
+    assert "--runtime-manager-sha" in workflow
     assert "store-main-perfgate-baseline:" not in workflow
+    formal = workflow[formal_start : workflow.index("- name: Performance gate - Stage 1 comparison")]
+    assert "!(github.event_name == 'push' && github.ref == 'refs/heads/main')" not in formal
     snapshot_step = workflow[workflow.index("- name: Sync GitHub leaderboard snapshots") :]
     snapshot_step = snapshot_step[: snapshot_step.index("- name: Release Ascend hardware lock")]
-    assert "!(github.event_name == 'push' && github.ref == 'refs/heads/main')" in snapshot_step
+    assert "!(github.event_name == 'push' && github.ref == 'refs/heads/main')" not in snapshot_step
 
 
 def test_pull_request_trigger_preserves_ready_labels_on_updates() -> None:
@@ -553,6 +557,7 @@ def test_plugin_producer_preserves_measurement_and_provenance_evidence() -> None
     assert 'cp "$same_spec_submission_dir/measurement.json"' in runner
     assert '"schema_version": "perfgate-runtime-provenance/v1"' in runner
     assert '"benchmark_runner_sha"' in runner
+    assert '"runtime_manager_sha"' in runner
     assert '"cann_version"' in runner
     assert '"torch_npu_version"' in runner
     assert "NPU_MEMORY_EXIT_CODE=${NPU_MEMORY_EXIT_CODE:-87}" in runner
@@ -564,11 +569,12 @@ def test_plugin_producer_preserves_measurement_and_provenance_evidence() -> None
     assert "verify_raw_result_evidence per_run" in store
     assert "vllm_hust_benchmark.perfgate_baselines publish" in store
     assert '--measurement-file "$MEASUREMENT_FILE"' in store
+    assert '--runtime-manager-sha "$RUNTIME_MANAGER_SHA"' in store
     assert "GIT_ASKPASS" in store
     assert "git worktree" not in store
     assert workflow.count("secrets.VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN") == 1
     producer = workflow[workflow.index("- name: Run Plugin perfgate baseline producer") :]
-    producer = producer[: producer.index("- name: Run benchmark CI and optional HF sync")]
+    producer = producer[: producer.index("- name: Run benchmark CI and optional formal publish")]
     assert "cleanup_ascend_benchmark_processes.sh current" in producer
     assert "cleanup_ascend_ci_processes.sh" not in workflow
 
@@ -578,7 +584,7 @@ def test_plugin_scheme_c_is_producer_only() -> None:
     runner = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
     store = (SCRIPT_DIR / "perfgate_store_baseline.sh").read_text(encoding="utf-8")
 
-    formal_step = workflow.index("- name: Run benchmark CI and optional HF sync")
+    formal_step = workflow.index("- name: Run benchmark CI and optional formal publish")
     stage1_step = workflow.index("- name: Performance gate - Stage 1 comparison")
     stage2_step = workflow.index("- name: Performance gate - Stage 2 trial rebase and benchmark")
     final_compare_step = workflow.index("- name: Performance gate - two-stage comparison", stage2_step)
