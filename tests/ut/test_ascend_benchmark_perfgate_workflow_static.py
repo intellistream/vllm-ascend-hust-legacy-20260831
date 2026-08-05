@@ -180,6 +180,10 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     )
     assert "Resolve perfgate same-spec file" in workflow
     assert "Resolve main same-spec file" in workflow
+    main_spec_start = workflow.index("- name: Resolve main same-spec file")
+    main_spec_end = workflow.index("- name: Checkout ascend-runtime-manager repo")
+    main_spec_block = workflow[main_spec_start:main_spec_end]
+    assert "github.event_name != 'push'" not in main_spec_block
     assert "resolve_perfgate_spec_file.py" in workflow
     assert "MAIN_SAME_SPEC_SPEC_FILE:" in workflow
     assert "github.event_name != 'pull_request' && github.event_name != 'issue_comment'" in workflow
@@ -224,8 +228,7 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
         "&& steps.resolve-scenario.outputs.BENCH_SCENARIO_COUNT == '1'"
     ) in workflow
     assert (
-        "github.event_name != 'push' && github.event_name != 'pull_request' && "
-        "github.event_name != 'issue_comment' "
+        "github.event_name != 'pull_request' && github.event_name != 'issue_comment' "
         "&& !(github.event_name == 'workflow_dispatch' && "
         "inputs.benchmark_scenarios == 'perfgate-bootstrap') "
         "&& steps.resolve-scenario.outputs.BENCH_SCENARIO_COUNT == '1'"

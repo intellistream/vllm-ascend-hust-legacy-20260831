@@ -20,7 +20,7 @@ EXPECTED_AGGREGATION=${PERFGATE_EXPECTED_AGGREGATION:-primary-median-run}
 WRITER_TOKEN=${PERFGATE_BASELINE_WRITER_TOKEN:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 
-for tool in git jq awk mktemp sha256sum "$PYTHON_BIN"; do
+for tool in git jq awk mktemp sha256sum tr "$PYTHON_BIN"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "Required perfgate publication tool is unavailable: $tool" >&2
     exit 2
@@ -119,20 +119,24 @@ CANN_VERSION=$(read_json '.cann_version' "$PROVENANCE_FILE")
 TORCH_VERSION=$(read_json '.torch_version' "$PROVENANCE_FILE")
 TORCH_NPU_VERSION=$(read_json '.torch_npu_version' "$PROVENANCE_FILE")
 
-if [[ "${ARTIFACT_REPOSITORY,,}" != "${TARGET_REPOSITORY,,}" ]]; then
+ARTIFACT_REPOSITORY_NORMALIZED=$(printf '%s' "$ARTIFACT_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+TARGET_REPOSITORY_NORMALIZED=$(printf '%s' "$TARGET_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+ARTIFACT_SHA_NORMALIZED=$(printf '%s' "$ARTIFACT_SHA" | tr '[:upper:]' '[:lower:]')
+
+if [[ "$ARTIFACT_REPOSITORY_NORMALIZED" != "$TARGET_REPOSITORY_NORMALIZED" ]]; then
   echo "Artifact repository mismatch: expected $TARGET_REPOSITORY, got $ARTIFACT_REPOSITORY" >&2
   exit 2
 fi
-if [[ "${ARTIFACT_SHA,,}" != "$TARGET_SHA" ]]; then
+if [[ "$ARTIFACT_SHA_NORMALIZED" != "$TARGET_SHA" ]]; then
   echo "Artifact SHA mismatch: expected $TARGET_SHA, got $ARTIFACT_SHA" >&2
   exit 2
 fi
 
 git -C "$TARGET_GIT_REPOSITORY" fetch --quiet \
   origin main:refs/remotes/origin/main
-UPDATE_POINTER=()
+UPDATE_LATEST_POINTER=0
 if [[ "$(git -C "$TARGET_GIT_REPOSITORY" rev-parse origin/main)" == "$TARGET_SHA" ]]; then
-  UPDATE_POINTER=(--update-latest-pointer)
+  UPDATE_LATEST_POINTER=1
 else
   echo "Target main advanced; publishing exact baseline without updating latest pointer."
 fi
@@ -140,12 +144,13 @@ fi
 ASKPASS_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/perfgate-writer-askpass.XXXXXX")
 ASKPASS_FILE="$ASKPASS_DIR/askpass.sh"
 cleanup() {
-  local status=$?
+  local status=${1:-1}
+  trap - EXIT
   unset PERFGATE_BASELINE_WRITER_TOKEN WRITER_TOKEN GIT_ASKPASS GIT_TERMINAL_PROMPT
   rm -rf "$ASKPASS_DIR"
   exit "$status"
 }
-trap cleanup EXIT
+trap 'cleanup $?' EXIT
 
 cat >"$ASKPASS_FILE" <<'EOF'
 #!/bin/sh
@@ -160,25 +165,31 @@ export PERFGATE_BASELINE_WRITER_TOKEN="$WRITER_TOKEN"
 export GIT_ASKPASS="$ASKPASS_FILE"
 export GIT_TERMINAL_PROMPT=0
 
+PUBLISH_ARGS=(
+  -m vllm_hust_benchmark.perfgate_baselines publish
+  --remote "$CENTRAL_REPO_URL"
+  --branch "$CENTRAL_BRANCH"
+  --source "$BASELINE_FILE"
+  --measurement-file "$MEASUREMENT_FILE"
+  --target-git-repository "$TARGET_GIT_REPOSITORY"
+  --main-ref origin/main
+  --target-repository "$TARGET_REPOSITORY"
+  --target-sha "$TARGET_SHA"
+  --scenario "$SCENARIO"
+  --spec-id "$SPEC_ID"
+  --spec-hash "$SPEC_HASH"
+  --vllm-hust-sha "$VLLM_HUST_SHA"
+  --vllm-ascend-hust-sha "$VLLM_ASCEND_HUST_SHA"
+  --benchmark-runner-sha "$BENCHMARK_RUNNER_SHA"
+  --runtime-manager-sha "$RUNTIME_MANAGER_SHA"
+  --hardware-chip-model "$HARDWARE_CHIP_MODEL"
+  --cann-version "$CANN_VERSION"
+  --torch-version "$TORCH_VERSION"
+  --torch-npu-version "$TORCH_NPU_VERSION"
+)
+if [[ "$UPDATE_LATEST_POINTER" == "1" ]]; then
+  PUBLISH_ARGS+=(--update-latest-pointer)
+fi
+
 PYTHONPATH="$BENCHMARK_REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
-  "$PYTHON_BIN" -m vllm_hust_benchmark.perfgate_baselines publish \
-  --remote "$CENTRAL_REPO_URL" \
-  --branch "$CENTRAL_BRANCH" \
-  --source "$BASELINE_FILE" \
-  --measurement-file "$MEASUREMENT_FILE" \
-  --target-git-repository "$TARGET_GIT_REPOSITORY" \
-  --main-ref origin/main \
-  --target-repository "$TARGET_REPOSITORY" \
-  --target-sha "$TARGET_SHA" \
-  --scenario "$SCENARIO" \
-  --spec-id "$SPEC_ID" \
-  --spec-hash "$SPEC_HASH" \
-  --vllm-hust-sha "$VLLM_HUST_SHA" \
-  --vllm-ascend-hust-sha "$VLLM_ASCEND_HUST_SHA" \
-  --benchmark-runner-sha "$BENCHMARK_RUNNER_SHA" \
-  --runtime-manager-sha "$RUNTIME_MANAGER_SHA" \
-  --hardware-chip-model "$HARDWARE_CHIP_MODEL" \
-  --cann-version "$CANN_VERSION" \
-  --torch-version "$TORCH_VERSION" \
-  --torch-npu-version "$TORCH_NPU_VERSION" \
-  "${UPDATE_POINTER[@]}"
+  "$PYTHON_BIN" "${PUBLISH_ARGS[@]}"
