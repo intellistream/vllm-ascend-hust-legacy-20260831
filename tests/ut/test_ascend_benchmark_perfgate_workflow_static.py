@@ -827,6 +827,18 @@ def test_plugin_producer_outcome_controls_publication_and_enforcement() -> None:
     assert "perfgate-producer.outputs.status" not in workflow
 
 
+def test_ssh_443_configuration_pins_github_host_key() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "HostKeyAlias github.com" in workflow
+    assert (
+        "github.com ssh-ed25519 "
+        "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+        in workflow
+    )
+    assert 'chmod 600 "$HOME/.ssh/known_hosts"' in workflow
+
+
 def test_plugin_producer_preserves_measurement_and_provenance_evidence() -> None:
     runner = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
     store = (SCRIPT_DIR / "perfgate_store_baseline.sh").read_text(encoding="utf-8")
