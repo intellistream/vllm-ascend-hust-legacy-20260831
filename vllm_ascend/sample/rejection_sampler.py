@@ -1,3 +1,4 @@
+# PEARL_STAGE5_NANOPEARL_EXPLICIT_VERIFY_SAMPLER_V1
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import replace
@@ -228,6 +229,35 @@ class AscendRejectionSampler(RejectionSampler):
             sampling_metadata,
             ori_target_logits=raw_target_logits,
         )
+
+
+        # PEARL_STAGE5_NANOPEARL_EXPLICIT_VERIFY_SAMPLER_V1
+        # Preserve the authoritative per-row rejection result for the custom
+        # proposer.  The ModelRunner remaps row_index to stable request_id.
+        pearl_verify_results = []
+        valid_counts = (output_token_ids != PLACEHOLDER_TOKEN_ID).sum(dim=1)
+        for row_index, draft_len_raw in enumerate(metadata.num_draft_tokens):
+            draft_len = int(draft_len_raw)
+            if draft_len <= 0:
+                continue
+            valid_count = int(valid_counts[row_index].item())
+            accepted_len = max(0, min(draft_len, valid_count - 1))
+            replacement_token_id = None
+            if accepted_len < output_token_ids.shape[1]:
+                candidate = int(output_token_ids[row_index, accepted_len].item())
+                if candidate != PLACEHOLDER_TOKEN_ID:
+                    replacement_token_id = candidate
+            pearl_verify_results.append(
+                {
+                    "request_id": str(row_index),
+                    "row_index": row_index,
+                    "accepted_len": accepted_len,
+                    "draft_len": draft_len,
+                    "replacement_token_id": replacement_token_id,
+                    "finished": False,
+                }
+            )
+        self.last_verify_results = pearl_verify_results
 
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:

@@ -1,3 +1,5 @@
+# PEARL_STAGE5_NANOPEARL_EXPLICIT_VERIFY_RUNNER_V1
+# PEARL_STAGE5_BATCH_GT1_V1
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2025 The vLLM team.
@@ -1802,6 +1804,26 @@ class NPUModelRunner(GPUModelRunner):
                 self._num_valid_draft_tokens,
                 batch_size,
             )
+        elif self.speculative_config.method == "custom_class":
+            # The common custom proposer API is CPU-side and is called after
+            # bookkeeping.  It returns one list of draft token IDs per active
+            # request.  No target hidden states or draft-model forward pass is
+            # needed for an external nano-PEARL Draft worker.
+            assert isinstance(valid_sampled_token_ids, list), (
+                "sampled_token_ids should be a python list for custom_class"
+            )
+            assert self.drafter is not None
+            draft_token_ids = self.drafter.propose(
+                valid_sampled_token_ids,
+                self.input_batch.num_tokens_no_spec,
+                self.input_batch.token_ids_cpu,
+                slot_mappings=None,
+                request_ids=list(
+                    self.input_batch.req_ids[: len(valid_sampled_token_ids)]
+                ),
+                verify_results=getattr(self, "_pearl_verify_results", None),
+            )
+            self._pearl_verify_results = None
         elif isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
                 valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
@@ -2674,6 +2696,7 @@ class NPUModelRunner(GPUModelRunner):
             if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
                 max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
                 self.sampler.prepare_sampling(max_topk)
+            self._pearl_verify_results = None
             return self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
@@ -2690,6 +2713,20 @@ class NPUModelRunner(GPUModelRunner):
             logits,
             sampling_metadata,
         )
+        self._pearl_verify_results = getattr(
+            self.rejection_sampler, "last_verify_results", None
+        )
+        # PEARL_STAGE5_SAMPLE_OUTPUT_TRACE_V1
+        if __import__("os").environ.get("PEARL_STAGE5_SAMPLE_OUTPUT_TRACE") == "1":
+            _raw_ids = sampler_output.sampled_token_ids.detach().cpu().tolist()
+            _raw_row = _raw_ids[0] if _raw_ids else []
+            print(
+                "[PEARL_STAGE5_SAMPLE_OUTPUT_TRACE] raw "
+                f"shape={tuple(sampler_output.sampled_token_ids.shape)} "
+                f"draft_counts={getattr(spec_decode_metadata, 'num_draft_tokens', None)} "
+                f"row0={_raw_row[:16]}",
+                flush=True,
+            )
         return sampler_output
 
     # TODO: remove this func after eagle_proposer is refactored and
@@ -2761,6 +2798,23 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch.vocab_size,
                     discard_sampled_tokens_req_indices,
                     logprobs_tensors=logprobs_tensors,
+                )
+            # PEARL_STAGE5_SAMPLE_OUTPUT_TRACE_V1
+            if __import__("os").environ.get("PEARL_STAGE5_SAMPLE_OUTPUT_TRACE") == "1":
+                _parsed_raw_ids = sampled_token_ids.detach().cpu().tolist()
+                _parsed_raw_row = _parsed_raw_ids[0] if _parsed_raw_ids else []
+                _parsed_row = (
+                    valid_sampled_token_ids[0]
+                    if valid_sampled_token_ids
+                    else []
+                )
+                print(
+                    "[PEARL_STAGE5_SAMPLE_OUTPUT_TRACE] parsed "
+                    f"raw_shape={tuple(sampled_token_ids.shape)} "
+                    f"raw_row0={_parsed_raw_row[:16]} "
+                    f"parsed_len={len(_parsed_row)} "
+                    f"parsed_row0={_parsed_row[:16]}",
+                    flush=True,
                 )
         else:
             valid_sampled_token_ids = []

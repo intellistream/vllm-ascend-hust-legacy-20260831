@@ -60,5 +60,14 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         )
 
         return AscendExtractHiddenStatesProposer(vllm_config, device, runner)
+    elif method == "custom_class":
+        # Keep the common vLLM custom proposer contract on Ascend.  The
+        # proposer is intentionally model-free; it can obtain draft IDs from
+        # an external Draft worker (for example, nano-PEARL over AF_UNIX).
+        from vllm.v1.spec_decode.custom_class_proposer import (
+            create_custom_proposer,
+        )
+
+        return create_custom_proposer(vllm_config)
     else:
         raise ValueError(f"Unknown speculative decoding method: {method}")
