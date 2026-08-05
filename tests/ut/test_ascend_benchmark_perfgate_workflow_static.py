@@ -466,12 +466,11 @@ def test_benchmark_runner_resolves_same_spec_without_random_online_default() -> 
     assert "print_same_spec_server_log_tail" in validation_failure_block
 
 
-def test_perfgate_baseline_events_match_pull_request_spec_size() -> None:
+def test_formal_main_and_perfgate_producer_keep_separate_workload_sizes() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
-    fixed_spec_events = (
+    preview_spec_events = (
         "github.event_name == 'pull_request' || github.event_name == 'issue_comment' || "
-        "github.event_name == 'push' || "
         "(github.event_name == 'workflow_dispatch' && "
         "inputs.benchmark_scenarios == 'perfgate-bootstrap')"
     )
@@ -484,7 +483,8 @@ def test_perfgate_baseline_events_match_pull_request_spec_size() -> None:
         "BENCH_RANDOM_OUTPUT_LEN:",
     ):
         line = next(line for line in workflow.splitlines() if line.strip().startswith(setting))
-        assert fixed_spec_events in line
+        assert preview_spec_events in line
+        assert "github.event_name == 'push'" not in line
 
     assert "'Qwen/Qwen2.5-3B-Instruct'" in workflow
     assert "&& '3B' || (github.event_name == 'workflow_dispatch' && inputs.model_parameters || '14B')" in workflow
@@ -492,6 +492,16 @@ def test_perfgate_baseline_events_match_pull_request_spec_size() -> None:
     assert "&& 'bfloat16' ||" in workflow
     assert "&& '64' || '1024'" in workflow
     assert "&& '16' || '256'" in workflow
+
+    producer_start = workflow.index("- name: Run Plugin perfgate baseline producer")
+    producer_end = workflow.index("- name: Upload Plugin perfgate producer artifact")
+    producer = workflow[producer_start:producer_end]
+    assert "MODEL_NAME: Qwen/Qwen2.5-3B-Instruct" in producer
+    assert "MODEL_PARAMETERS: 3B" in producer
+    assert "MODEL_PRECISION: BF16" in producer
+    assert "DTYPE: bfloat16" in producer
+    assert 'BENCH_RANDOM_INPUT_LEN: "64"' in producer
+    assert 'BENCH_RANDOM_OUTPUT_LEN: "16"' in producer
 
 
 def test_main_perfgate_producer_is_reachable_and_pins_dependencies() -> None:
