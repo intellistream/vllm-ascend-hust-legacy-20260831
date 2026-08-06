@@ -1,3 +1,4 @@
+# PEARL_STAGE5_NANOPEARL_STRICT_WORKER_V1
 # PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_WORKER_V4
 # PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_WORKER_V2
 # PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_WORKER_V1
@@ -61,6 +62,22 @@ def build_parser() -> argparse.ArgumentParser:
 def _load_target(args: argparse.Namespace):
     from vllm import LLM
 
+    target_async = (
+        os.environ.get("PEARL_STAGE5_TARGET_ASYNC_SCHEDULING", "0") == "1"
+    )
+    if target_async and (
+        os.environ.get(
+            "PEARL_STAGE5_EXPERIMENTAL_TARGET_ASYNC_CUSTOM_CLASS", "0"
+        )
+        != "1"
+    ):
+        print(
+            "[PEARL_STAGE5_TARGET_ASYNC_CUSTOM_CLASS_DISABLED_V1] "
+            "requested=1 effective=0 reason=custom_class_requires_ordered_commit",
+            flush=True,
+        )
+        target_async = False
+
     return LLM(
         model=args.model,
         tensor_parallel_size=1,
@@ -69,9 +86,7 @@ def _load_target(args: argparse.Namespace):
         enforce_eager=True,
         # PEARL_STAGE5_TARGET_SYNC_CONTROL_V1
         # PEARL_STAGE5_TARGET_ASYNC_OPTIN_V1
-        async_scheduling=(
-            os.environ.get("PEARL_STAGE5_TARGET_ASYNC_SCHEDULING", "0") == "1"
-        ),
+        async_scheduling=target_async,
         trust_remote_code=True,
         speculative_config={
             "method": "custom_class",
@@ -172,6 +187,16 @@ def _draft_proposal_loop(
                     try:
                         command = message.get("cmd")
                         if command == "rebase_batch":
+                            if (
+                                os.environ.get(
+                                    "PEARL_STAGE5_NANOPEARL_STRICT", "0"
+                                )
+                                == "1"
+                            ):
+                                raise RuntimeError(
+                                    "nano-PEARL strict mode forbids "
+                                    "rebase_batch commands"
+                                )
                             raw_requests = message.get("requests")
                             if not isinstance(raw_requests, list) or not raw_requests:
                                 raise ValueError(

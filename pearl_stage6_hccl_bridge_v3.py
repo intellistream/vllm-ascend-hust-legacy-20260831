@@ -19,6 +19,12 @@ SINGLE_REQUEST_MAGIC = 1606
 SINGLE_RESPONSE_MAGIC = 1607
 BATCH_REQUEST_MAGIC = 1608
 BATCH_RESPONSE_MAGIC = 1609
+COMMIT_REQUEST_MAGIC = 1612
+COMMIT_RESPONSE_MAGIC = 1613
+REBASE_REQUEST_MAGIC = 1614
+REBASE_RESPONSE_MAGIC = 1615
+COMMIT_ROW_LENGTH_ONLY = 0
+COMMIT_ROW_FULL = 1
 
 
 def validate_request(
@@ -90,6 +96,57 @@ def recv_batch_response(dist, device, sequence: int, count: int):
     return True, [rows[index] for index in range(count)]
 
 
+def recv_commit_response(dist, device, sequence: int, count: int) -> bool:
+    header = base.recv_i32(dist, 3, device, src=0)
+    if len(header) != 3 or header[0] not in (
+        COMMIT_RESPONSE_MAGIC,
+        base.ERROR_MAGIC,
+    ):
+        raise RuntimeError(
+            f"invalid HCCL v3 commit response header: {header}"
+        )
+    if header[1] != sequence:
+        raise RuntimeError(
+            f"HCCL v3 commit sequence mismatch: expected {sequence}, "
+            f"got {header[1]}"
+        )
+    if header[0] == base.ERROR_MAGIC:
+        return False
+    if header[2] != count:
+        raise RuntimeError(
+            f"HCCL v3 commit count mismatch: expected {count}, "
+            f"got {header[2]}"
+        )
+    return True
+
+
+
+def recv_rebase_response(
+    dist, device, sequence: int, count: int
+) -> bool:
+    header = base.recv_i32(dist, 3, device, src=0)
+    if len(header) != 3 or header[0] not in (
+        REBASE_RESPONSE_MAGIC,
+        base.ERROR_MAGIC,
+    ):
+        raise RuntimeError(
+            f"invalid HCCL v3 rebase response header: {header}"
+        )
+    if header[1] != sequence:
+        raise RuntimeError(
+            f"HCCL v3 rebase sequence mismatch: expected {sequence}, "
+            f"got {header[1]}"
+        )
+    if header[0] == base.ERROR_MAGIC:
+        return False
+    if header[2] != count:
+        raise RuntimeError(
+            f"HCCL v3 rebase count mismatch: expected {count}, "
+            f"got {header[2]}"
+        )
+    return True
+
+
 def run_target_bridge(server, dist, device, max_model_len: int) -> None:
     conn, _ = server.accept()
     sequence = 0
@@ -158,6 +215,235 @@ def run_target_bridge(server, dist, device, max_model_len: int) -> None:
                             f"seq={sequence} slot={slot} "
                             f"prefix_len={len(prefix)} "
                             f"draft_len={len(draft_ids[:gamma])}",
+                            flush=True,
+                        )
+                        continue
+
+                    if command == "commit_batch":
+                        raw_updates = message.get("updates")
+                        if not isinstance(raw_updates, list) or not raw_updates:
+                            raise ValueError(
+                                "commit_batch requires a non-empty updates list"
+                            )
+
+                        wire_updates = []
+                        for item in raw_updates:
+                            if not isinstance(item, dict):
+                                raise ValueError("commit_batch update must be a dict")
+
+                            request_id = str(item.get("request_id", ""))
+                            if request_id not in slots:
+                                raise ValueError(
+                                    f"unknown HCCL v3 request slot: {request_id!r}"
+                                )
+
+                            length_only = item.get("length_only", False)
+                            if not isinstance(length_only, bool):
+                                raise ValueError(
+                                    "commit_batch length_only must be boolean"
+                                )
+
+                            accepted_len = int(item["accepted_len"])
+                            valid_len = int(item["valid_len"])
+                            if accepted_len < 0 or valid_len < 0:
+                                raise ValueError(
+                                    "accepted_len and valid_len must be non-negative"
+                                )
+
+                            if length_only:
+                                if item.get("prefix_token_ids") is not None:
+                                    raise ValueError(
+                                        "length-only HCCL commit must not carry "
+                                        "prefix_token_ids"
+                                    )
+                                wire_updates.append(
+                                    {
+                                        "slot": slots[request_id],
+                                        "mode": COMMIT_ROW_LENGTH_ONLY,
+                                        "accepted_len": accepted_len,
+                                        "valid_len": valid_len,
+                                    }
+                                )
+                                continue
+
+                            prefix = item.get("prefix_token_ids")
+                            if not isinstance(prefix, list) or not prefix:
+                                raise ValueError(
+                                    "full HCCL commit requires non-empty "
+                                    "prefix_token_ids"
+                                )
+                            prefix = [int(token_id) for token_id in prefix]
+
+                            target_prefix_len = int(
+                                item.get("target_prefix_len", len(prefix))
+                            )
+                            if target_prefix_len != len(prefix):
+                                raise ValueError(
+                                    "target_prefix_len must equal prefix length"
+                                )
+
+                            gamma = int(item.get("gamma", 0))
+                            draft_len = int(item.get("draft_len", 0))
+                            if gamma < 0 or draft_len < 0:
+                                raise ValueError(
+                                    "gamma and draft_len must be non-negative"
+                                )
+
+                            replacement = item.get("replacement_token_id")
+                            replacement_token_id = (
+                                -1 if replacement is None else int(replacement)
+                            )
+                            if replacement_token_id < -1:
+                                raise ValueError(
+                                    "replacement_token_id must be >= -1"
+                                )
+
+                            finished = 1 if bool(item.get("finished", False)) else 0
+
+                            wire_updates.append(
+                                {
+                                    "slot": slots[request_id],
+                                    "mode": COMMIT_ROW_FULL,
+                                    "accepted_len": accepted_len,
+                                    "valid_len": valid_len,
+                                    "gamma": gamma,
+                                    "draft_len": draft_len,
+                                    "target_prefix_len": target_prefix_len,
+                                    "replacement_token_id": replacement_token_id,
+                                    "finished": finished,
+                                    "prefix": prefix,
+                                }
+                            )
+
+                        sequence += 1
+                        base.send_i32(
+                            dist,
+                            [COMMIT_REQUEST_MAGIC, sequence, len(wire_updates), 0, 0],
+                            device,
+                            dst=0,
+                        )
+                        for update in wire_updates:
+                            base.send_i32(
+                                dist,
+                                [
+                                    update["slot"],
+                                    update["mode"],
+                                    update["accepted_len"],
+                                    update["valid_len"],
+                                ],
+                                device,
+                                dst=0,
+                            )
+                            if update["mode"] == COMMIT_ROW_FULL:
+                                base.send_i32(
+                                    dist,
+                                    [
+                                        update["gamma"],
+                                        update["draft_len"],
+                                        update["target_prefix_len"],
+                                        update["replacement_token_id"],
+                                        update["finished"],
+                                        len(update["prefix"]),
+                                    ],
+                                    device,
+                                    dst=0,
+                                )
+                                base.send_i32(
+                                    dist,
+                                    update["prefix"],
+                                    device,
+                                    dst=0,
+                                )
+
+                        ok = recv_commit_response(
+                            dist, device, sequence, len(wire_updates)
+                        )
+                        if not ok:
+                            raise RuntimeError(
+                                "Draft batch sidecar returned an HCCL v3 commit error"
+                            )
+                        base.send_message(conn, {"status": "result"})
+                        print(
+                            "[stage6-hccl] target bridge commit_batch "
+                            f"v3 seq={sequence} updates={len(wire_updates)}",
+                            flush=True,
+                        )
+                        continue
+
+                    if command == "rebase_batch":
+                        raw_requests = message.get("requests")
+                        if not isinstance(raw_requests, list) or not raw_requests:
+                            raise ValueError(
+                                "rebase_batch requires a non-empty requests list"
+                            )
+
+                        wire_requests = []
+                        for index, item in enumerate(raw_requests):
+                            if not isinstance(item, dict):
+                                raise ValueError(
+                                    f"rebase request {index} must be a dict"
+                                )
+
+                            request_id = str(item.get("request_id", ""))
+                            if request_id not in slots:
+                                raise ValueError(
+                                    f"unknown HCCL v3 request slot: {request_id!r}"
+                                )
+
+                            prefix = item.get("prefix_token_ids")
+                            if not isinstance(prefix, list) or not prefix:
+                                raise ValueError(
+                                    "rebase prefix_token_ids must be non-empty"
+                                )
+
+                            prefix = [int(token_id) for token_id in prefix]
+                            if len(prefix) > max_model_len:
+                                raise ValueError(
+                                    f"rebase prefix length {len(prefix)} exceeds "
+                                    f"max_model_len {max_model_len}"
+                                )
+
+                            wire_requests.append((slots[request_id], prefix))
+
+                        sequence += 1
+                        base.send_i32(
+                            dist,
+                            [
+                                REBASE_REQUEST_MAGIC,
+                                sequence,
+                                len(wire_requests),
+                                0,
+                                0,
+                            ],
+                            device,
+                            dst=0,
+                        )
+
+                        for slot, prefix in wire_requests:
+                            base.send_i32(
+                                dist,
+                                [slot, len(prefix), 0],
+                                device,
+                                dst=0,
+                            )
+                            base.send_i32(dist, prefix, device, dst=0)
+
+                        ok = recv_rebase_response(
+                            dist,
+                            device,
+                            sequence,
+                            len(wire_requests),
+                        )
+                        if not ok:
+                            raise RuntimeError(
+                                "Draft batch sidecar returned an HCCL "
+                                "v3 rebase error"
+                            )
+
+                        base.send_message(conn, {"status": "result"})
+                        print(
+                            "[stage6-hccl] target bridge rebase_batch "
+                            f"v3 seq={sequence} rows={len(wire_requests)}",
                             flush=True,
                         )
                         continue
@@ -281,6 +567,186 @@ def run_draft_bridge(
                         "[stage6-hccl] draft bridge v3 "
                         f"seq={sequence} slot={slot} "
                         f"draft_len={len(draft_ids)}",
+                        flush=True,
+                    )
+                    continue
+
+                if magic == COMMIT_REQUEST_MAGIC:
+                    count = field2
+                    if count <= 0:
+                        raise RuntimeError(
+                            f"invalid HCCL v3 commit count: {count}"
+                        )
+
+                    updates = []
+                    for _ in range(count):
+                        row_header = base.recv_i32(
+                            dist, 4, device, src=1
+                        )
+                        if len(row_header) != 4:
+                            raise RuntimeError(
+                                f"invalid HCCL v3 commit row header: {row_header}"
+                            )
+
+                        slot, mode, accepted_len, valid_len = row_header
+                        if slot < 0 or accepted_len < 0 or valid_len < 0:
+                            raise RuntimeError(
+                                "invalid HCCL v3 commit update: "
+                                f"{slot}, {accepted_len}, {valid_len}"
+                            )
+
+                        if mode == COMMIT_ROW_LENGTH_ONLY:
+                            updates.append(
+                                {
+                                    "request_id": f"hccl-slot-{slot}",
+                                    "length_only": True,
+                                    "accepted_len": accepted_len,
+                                    "valid_len": valid_len,
+                                }
+                            )
+                            continue
+
+                        if mode != COMMIT_ROW_FULL:
+                            raise RuntimeError(
+                                f"unknown HCCL v3 commit row mode: {mode}"
+                            )
+
+                        metadata = base.recv_i32(
+                            dist, 6, device, src=1
+                        )
+                        if len(metadata) != 6:
+                            raise RuntimeError(
+                                f"invalid HCCL v3 full commit metadata: {metadata}"
+                            )
+
+                        (
+                            gamma,
+                            draft_len,
+                            target_prefix_len,
+                            replacement_token_id,
+                            finished,
+                            prefix_len,
+                        ) = metadata
+
+                        if (
+                            gamma < 0
+                            or draft_len < 0
+                            or target_prefix_len <= 0
+                            or prefix_len <= 0
+                            or target_prefix_len != prefix_len
+                            or replacement_token_id < -1
+                            or finished not in (0, 1)
+                        ):
+                            raise RuntimeError(
+                                "invalid HCCL v3 full commit metadata: "
+                                f"{metadata}"
+                            )
+
+                        prefix = base.recv_i32(
+                            dist, prefix_len, device, src=1
+                        )
+
+                        updates.append(
+                            {
+                                "request_id": f"hccl-slot-{slot}",
+                                "length_only": False,
+                                "accepted_len": accepted_len,
+                                "valid_len": valid_len,
+                                "gamma": gamma,
+                                "draft_len": draft_len,
+                                "target_prefix_len": target_prefix_len,
+                                "replacement_token_id": (
+                                    None
+                                    if replacement_token_id == -1
+                                    else replacement_token_id
+                                ),
+                                "finished": bool(finished),
+                                "prefix_token_ids": prefix,
+                            }
+                        )
+
+                    base.send_message(
+                        worker_conn,
+                        {"cmd": "commit_batch", "updates": updates},
+                    )
+                    response = base.receive_message(worker_reader)
+                    if response is None or response.get("status") != "result":
+                        base.send_i32(
+                            dist,
+                            [base.ERROR_MAGIC, sequence, 0],
+                            device,
+                            dst=1,
+                        )
+                        continue
+
+                    base.send_i32(
+                        dist,
+                        [COMMIT_RESPONSE_MAGIC, sequence, count],
+                        device,
+                        dst=1,
+                    )
+                    print(
+                        "[stage6-hccl] draft bridge commit_batch "
+                        f"v3 seq={sequence} updates={count}",
+                        flush=True,
+                    )
+                    continue
+
+                if magic == REBASE_REQUEST_MAGIC:
+                    count = field2
+                    if count <= 0:
+                        raise RuntimeError(
+                            f"invalid HCCL v3 rebase count: {count}"
+                        )
+
+                    requests = []
+                    for _ in range(count):
+                        slot, prefix_len, _reserved = base.recv_i32(
+                            dist, 3, device, src=1
+                        )
+                        if slot < 0 or prefix_len <= 0:
+                            raise RuntimeError(
+                                "invalid HCCL v3 rebase row: "
+                                f"slot={slot} prefix_len={prefix_len}"
+                            )
+
+                        prefix = base.recv_i32(
+                            dist, prefix_len, device, src=1
+                        )
+                        requests.append(
+                            {
+                                "request_id": f"hccl-slot-{slot}",
+                                "prefix_token_ids": prefix,
+                            }
+                        )
+
+                    base.send_message(
+                        worker_conn,
+                        {
+                            "cmd": "rebase_batch",
+                            "requests": requests,
+                        },
+                    )
+                    response = base.receive_message(worker_reader)
+
+                    if response is None or response.get("status") != "result":
+                        base.send_i32(
+                            dist,
+                            [base.ERROR_MAGIC, sequence, 0],
+                            device,
+                            dst=1,
+                        )
+                        continue
+
+                    base.send_i32(
+                        dist,
+                        [REBASE_RESPONSE_MAGIC, sequence, count],
+                        device,
+                        dst=1,
+                    )
+                    print(
+                        "[stage6-hccl] draft bridge rebase_batch "
+                        f"v3 seq={sequence} rows={count}",
                         flush=True,
                     )
                     continue

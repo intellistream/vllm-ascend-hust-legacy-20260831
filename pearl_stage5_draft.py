@@ -1,3 +1,4 @@
+# PEARL_STAGE5_NANOPEARL_STRICT_DRAFT_V1
 # PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_DRAFT_V3
 # PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_DRAFT_V2
 # PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_DRAFT_V1
@@ -6,6 +7,7 @@
 # PEARL_STAGE5_NANOPEARL_TRUE_PARTIAL_REBASE_V3
 # PEARL_STAGE5_NANOPEARL_TRUE_PARTIAL_REBASE_V2
 # PEARL_STAGE5_NANOPEARL_DISCARD_REBASE_DRAFT_V1
+# PEARL_STAGE5_PIPELINE_AC_SAFE_V1
 # PEARL_STAGE5_PIPELINE_V2
 # PEARL_STAGE5_PIPELINE_V1
 # PEARL_STAGE5_BATCH_GT1_V3
@@ -730,6 +732,11 @@ class PersistentDraftEngine:
 
     def _remove_request_from_model_runner_batch(self) -> None:
         """Remove the batch row but keep the cached request state."""
+        if os.environ.get("PEARL_STAGE5_NANOPEARL_STRICT", "0") == "1":
+            raise RuntimeError(
+                "nano-PEARL strict mode forbids removing the Draft "
+                "model-runner row"
+            )
         if self.request_id is None:
             raise RuntimeError(
                 "Cannot remove a missing Draft request from input batch"
@@ -1339,6 +1346,12 @@ class PersistentDraftEngine:
             )
             return
 
+        if os.environ.get("PEARL_STAGE5_NANOPEARL_STRICT", "0") == "1":
+            raise RuntimeError(
+                "nano-PEARL strict mode requires in-place rollback; "
+                "refusing RUNNING -> WAITING requeue fallback"
+            )
+
         self._sync_model_runner_state(prefix_token_ids, request)
         self._trace_full_block_state(
             "full_requeue.after_sync", request=request
@@ -1386,6 +1399,10 @@ class PersistentDraftEngine:
             )
 
     def _reset_request(self, prefix_token_ids: list[int]) -> None:
+        if os.environ.get("PEARL_STAGE5_NANOPEARL_STRICT", "0") == "1":
+            raise RuntimeError(
+                "nano-PEARL strict mode forbids Draft request reset/remove-add"
+            )
         if self.request_id is not None:
             self.core_client.abort_requests([self.request_id])
         self.request_id = None
@@ -1540,7 +1557,21 @@ class PersistentDraftEngine:
         return collected
 
     def _pipeline_enabled(self) -> bool:
-        return os.environ.get("PEARL_STAGE5_PIPELINE", "0") == "1"
+        if os.environ.get("PEARL_STAGE5_PIPELINE", "0") != "1":
+            return False
+
+        explicit = os.environ.get("PEARL_STAGE5_DRAFT_LOOKAHEAD_PIPELINE")
+        if explicit is not None:
+            return explicit == "1"
+
+        # Nano-PEARL's runtime controller already overlaps Target verification
+        # with the next Draft request.  The older Draft-side lookahead layer
+        # changes proposal trajectories in commit-state runs and lowers GSM8K
+        # AC, so keep it opt-in until that path is made verify-result aware.
+        if os.environ.get("PEARL_STAGE5_NANOPEARL_COMMIT_STATE", "0") == "1":
+            return False
+
+        return True
 
     def _pipeline_trace(self, message: str) -> None:
         if os.environ.get("PEARL_STAGE5_PIPELINE_TRACE", "0") == "1":
@@ -1675,6 +1706,20 @@ class PersistentDraftEngine:
             return False
         return len(generated) >= len(prefix) + int(gamma)
 
+    def _current_pipeline_candidate(self) -> dict[str, Any] | None:
+        if self._active_key is None:
+            return None
+        candidate = self._pipeline_candidates.get(str(self._active_key))
+        if candidate is None:
+            return None
+        if str(candidate.get("internal_id")) != str(self.request_id):
+            return None
+        return candidate
+
+    @staticmethod
+    def _pipeline_generated_tokens(candidate: dict[str, Any]) -> list[int]:
+        return [int(token_id) for token_id in candidate.get("generated", [])]
+
     def _sync_model_runner_lengths_only(
         self,
         request: Any,
@@ -1718,9 +1763,29 @@ class PersistentDraftEngine:
         if len(committed) < target_prefix_len:
             needed = target_prefix_len - len(committed)
             candidates: list[int] = []
+            pipeline_candidate = self._current_pipeline_candidate()
+            if pipeline_candidate is not None:
+                generated = self._pipeline_generated_tokens(pipeline_candidate)
+                if (
+                    len(generated) >= target_prefix_len
+                    and generated[: len(committed)] == committed
+                ):
+                    candidates = generated[len(committed):target_prefix_len]
+                    if os.environ.get(
+                        "PEARL_STAGE5_NANOPEARL_TRACE", "0"
+                    ) == "1":
+                        print(
+                            "[PEARL_STAGE5_NANOPEARL_PIPELINE_LENGTH_ONLY_V1] "
+                            f"request_id={self.request_id!r} "
+                            f"old_len={len(committed)} "
+                            f"target_prefix_len={target_prefix_len} "
+                            f"adopted={len(candidates)} "
+                            f"tokens={candidates!r}",
+                            flush=True,
+                        )
 
             spec_rows = getattr(input_batch, "spec_token_ids", None)
-            if spec_rows is not None:
+            if len(candidates) < needed and spec_rows is not None:
                 try:
                     values = spec_rows[req_index]
                     if hasattr(values, "tolist"):
@@ -1786,6 +1851,151 @@ class PersistentDraftEngine:
                 "action=update_lengths_only_keep_kv",
                 flush=True,
             )
+
+    def _adopt_resident_tokens_for_full_commit(
+        self,
+        prefix: list[int],
+        valid_len: int,
+        accepted_len: int,
+    ) -> tuple[list[int], int]:
+        """Adopt accepted resident Draft tokens before full-prefix validation."""
+        committed = [int(x) for x in self.committed_token_ids]
+        old_len = len(committed)
+        needed = valid_len - old_len
+
+        if needed <= 0:
+            return committed, 0
+
+        if needed != accepted_len:
+            raise RuntimeError(
+                "full commit boundary is inconsistent with accepted_len: "
+                f"committed_len={old_len} valid_len={valid_len} "
+                f"needed={needed} accepted_len={accepted_len}"
+            )
+
+        expected = [int(x) for x in prefix[old_len:valid_len]]
+        pipeline_candidate = self._current_pipeline_candidate()
+        if pipeline_candidate is not None:
+            generated = self._pipeline_generated_tokens(pipeline_candidate)
+            target_valid_prefix = [int(x) for x in prefix[:valid_len]]
+            if len(generated) >= valid_len and (
+                generated[:valid_len] == target_valid_prefix
+            ):
+                committed = list(target_valid_prefix)
+                if os.environ.get("PEARL_STAGE5_NANOPEARL_TRACE", "0") == "1":
+                    print(
+                        "[PEARL_STAGE5_NANOPEARL_PIPELINE_ADOPTION_V1] "
+                        f"request_id={self.request_id!r} "
+                        f"old_len={old_len} accepted_len={accepted_len} "
+                        f"adopted={needed} tokens={expected!r}",
+                        flush=True,
+                    )
+                return committed, needed
+            if os.environ.get("PEARL_STAGE5_NANOPEARL_TRACE", "0") == "1":
+                print(
+                    "[PEARL_STAGE5_NANOPEARL_PIPELINE_ADOPTION_SKIP_V1] "
+                    f"request_id={self.request_id!r} "
+                    f"old_len={old_len} valid_len={valid_len} "
+                    f"generated_len={len(generated)} "
+                    f"expected={expected!r} "
+                    f"candidate_segment={generated[old_len:valid_len]!r}",
+                    flush=True,
+                )
+
+        executor = getattr(self.core, "model_executor", None)
+        driver_worker = getattr(executor, "driver_worker", None)
+        runner = getattr(driver_worker, "model_runner", None)
+
+        if runner is None:
+            workers = getattr(executor, "workers", None)
+            if workers:
+                runner = getattr(workers[0], "model_runner", None)
+
+        if runner is None:
+            raise RuntimeError(
+                "Cannot locate Draft model runner for full commit adoption"
+            )
+
+        input_batch = getattr(runner, "input_batch", None)
+        if input_batch is None:
+            raise RuntimeError(
+                "Draft model runner has no input batch for full commit adoption"
+            )
+
+        req_map = getattr(input_batch, "req_id_to_index", None)
+        req_index = req_map.get(self.request_id) if req_map is not None else None
+        if req_index is None:
+            raise RuntimeError(
+                f"Draft input batch has no row for {self.request_id!r}"
+            )
+
+        def to_ints(values: Any) -> list[int]:
+            if hasattr(values, "tolist"):
+                values = values.tolist()
+            if not isinstance(values, (list, tuple)):
+                return []
+
+            result = []
+            for value in values:
+                try:
+                    token_id = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if token_id >= 0:
+                    result.append(token_id)
+            return result
+
+        candidates: list[int] = []
+
+        spec_rows = getattr(input_batch, "spec_token_ids", None)
+        if spec_rows is not None:
+            try:
+                candidates = to_ints(spec_rows[req_index])
+            except (IndexError, KeyError, TypeError, ValueError):
+                candidates = []
+
+        if len(candidates) < needed:
+            token_ids_cpu = getattr(input_batch, "token_ids_cpu", None)
+            if token_ids_cpu is not None:
+                try:
+                    values = token_ids_cpu[req_index, old_len:valid_len]
+                except (IndexError, KeyError, TypeError, ValueError):
+                    try:
+                        values = token_ids_cpu[req_index][old_len:valid_len]
+                    except (IndexError, KeyError, TypeError, ValueError):
+                        values = None
+
+                cpu_candidates = to_ints(values)
+                if len(cpu_candidates) >= needed:
+                    candidates = cpu_candidates
+
+        if len(candidates) < needed:
+            raise RuntimeError(
+                "full commit cannot find resident Draft tokens: "
+                f"have={len(candidates)} need={needed}"
+            )
+
+        resident = candidates[:needed]
+
+        if resident != expected:
+            raise RuntimeError(
+                "resident Draft tokens diverged from Target prefix: "
+                f"expected={expected!r} resident={resident!r}"
+            )
+
+        committed.extend(resident)
+
+        if os.environ.get("PEARL_STAGE5_NANOPEARL_TRACE", "0") == "1":
+            print(
+                "[PEARL_STAGE5_NANOPEARL_RESIDENT_ADOPTION_V1] "
+                f"request_id={self.request_id!r} "
+                f"old_len={old_len} accepted_len={accepted_len} "
+                f"adopted={needed} tokens={resident!r}",
+                flush=True,
+            )
+
+        return committed, needed
+
     def commit_batch(
         self,
         updates: list[dict[str, Any]],
@@ -1794,6 +2004,11 @@ class PersistentDraftEngine:
         if not isinstance(updates, list) or not updates:
             raise ValueError("commit_batch requires a non-empty updates list")
         if os.environ.get("PEARL_STAGE5_NANOPEARL_COMMIT_STATE", "0") != "1":
+            if os.environ.get("PEARL_STAGE5_NANOPEARL_STRICT", "0") == "1":
+                raise RuntimeError(
+                    "nano-PEARL strict mode requires commit-state updates; "
+                    "refusing rebase_batch fallback"
+                )
             rebase_batch = getattr(self, "rebase_batch", None)
             if callable(rebase_batch):
                 return rebase_batch(updates)
@@ -1942,7 +2157,13 @@ class PersistentDraftEngine:
                     continue
 
                 prefix = item["prefix_token_ids"]
-                old_prefix = list(self.committed_token_ids)
+                old_prefix, _resident_adopted = (
+                    self._adopt_resident_tokens_for_full_commit(
+                        prefix,
+                        valid_len,
+                        item["accepted_len"],
+                    )
+                )
                 common_len = 0
                 for old_token, new_token in zip(old_prefix, prefix):
                     if old_token != new_token:
@@ -2013,6 +2234,11 @@ class PersistentDraftEngine:
         """
         if not isinstance(requests, list) or not requests:
             raise ValueError("rebase_batch requires a non-empty requests list")
+        if os.environ.get("PEARL_STAGE5_NANOPEARL_STRICT", "0") == "1":
+            raise RuntimeError(
+                "nano-PEARL strict mode forbids rebase_batch; "
+                "use in-place commit/rollback state updates instead"
+            )
 
         join_pipeline = getattr(self, "_join_pipeline", None)
         if callable(join_pipeline):

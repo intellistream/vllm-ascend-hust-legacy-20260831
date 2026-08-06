@@ -1,3 +1,5 @@
+# PEARL_STAGE5_TARGET_ASYNC_CUSTOM_CLASS_RUNNER_V1
+# PEARL_STAGE5_NANOPEARL_NO_BONUS_RUNNER_V1
 # PEARL_STAGE5_NANOPEARL_EXPLICIT_VERIFY_RUNNER_V1
 # PEARL_STAGE5_BATCH_GT1_V1
 #
@@ -22,6 +24,7 @@
 import gc
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -1731,6 +1734,116 @@ class NPUModelRunner(GPUModelRunner):
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
+    def _nanoparl_async_custom_class_enabled(self) -> bool:
+        return (
+            self.use_async_scheduling
+            and self.speculative_config is not None
+            and self.speculative_config.method == "custom_class"
+            and os.environ.get(
+                "PEARL_STAGE5_EXPERIMENTAL_TARGET_ASYNC_CUSTOM_CLASS", "0"
+            )
+            == "1"
+        )
+
+    def _stage_nanoparl_async_sample_state(
+        self,
+        valid_sampled_token_ids: list[list[int]],
+        scheduler_output: "SchedulerOutput",
+        invalid_req_indices: set[int],
+    ) -> None:
+        """Provide async prepare with real CPU-proposer sampled-token state."""
+        if not self._nanoparl_async_custom_class_enabled():
+            return
+        if not valid_sampled_token_ids:
+            return
+
+        no_bonus = os.environ.get(
+            "PEARL_STAGE5_NANOPEARL_NO_BONUS", "0"
+        ) == "1"
+        verify_by_row: dict[int, dict[str, Any]] = {}
+        for raw in getattr(self, "_pearl_verify_results", None) or []:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                row_index = int(raw.get("row_index", -1))
+            except (TypeError, ValueError):
+                continue
+            verify_by_row[row_index] = raw
+
+        next_token_ids: list[int] = []
+        valid_counts: list[int] = []
+        for row_index, row_tokens in enumerate(valid_sampled_token_ids):
+            req_id = self.input_batch.req_ids[row_index]
+            if row_tokens:
+                next_token_id = int(row_tokens[-1])
+            else:
+                req_state = self.requests[req_id]
+                seq_len = (
+                    req_state.num_computed_tokens
+                    + scheduler_output.num_scheduled_tokens[req_id]
+                )
+                next_token_id = int(req_state.get_token_id(seq_len))
+            next_token_ids.append(next_token_id)
+
+            count = 0 if row_index in invalid_req_indices else len(row_tokens)
+            raw = verify_by_row.get(row_index)
+            if no_bonus and raw is not None:
+                try:
+                    accepted_len = int(raw.get("accepted_len", 0))
+                    draft_len = int(raw.get("draft_len", 0))
+                except (TypeError, ValueError):
+                    accepted_len = -1
+                    draft_len = -2
+                if accepted_len == draft_len and accepted_len >= 0:
+                    # Async correction computes accepted_len as count - 1.
+                    # True nano-PEARL all-accepted rows have no bonus token, so
+                    # stage a synthetic count that preserves the accepted length
+                    # while still using the last accepted draft token as next.
+                    count = accepted_len + 1
+            valid_counts.append(int(count))
+
+        next_token_ids_tensor = torch.tensor(
+            next_token_ids,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        valid_counts_tensor = torch.tensor(
+            valid_counts,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self._copy_valid_sampled_token_count(
+            next_token_ids_tensor,
+            valid_counts_tensor,
+        )
+
+    def _tensorize_nanoparl_async_draft_tokens(
+        self,
+        draft_token_ids: list[list[int]] | torch.Tensor | None,
+    ) -> list[list[int]] | torch.Tensor | None:
+        if not self._nanoparl_async_custom_class_enabled():
+            return draft_token_ids
+        if draft_token_ids is None or torch.is_tensor(draft_token_ids):
+            return draft_token_ids
+
+        num_reqs = len(self.input_batch.req_ids)
+        padded = torch.full(
+            (num_reqs, self.num_spec_tokens),
+            PLACEHOLDER_TOKEN_ID,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        for row_index, row_tokens in enumerate(draft_token_ids[:num_reqs]):
+            values = [int(token_id) for token_id in row_tokens[: self.num_spec_tokens]]
+            if not values:
+                continue
+            padded[row_index, : len(values)] = torch.tensor(
+                values,
+                dtype=torch.int32,
+                device=self.device,
+            )
+        return padded
+
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
         self,
@@ -1995,6 +2108,15 @@ class NPUModelRunner(GPUModelRunner):
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
     ) -> None:
         if not self.num_spec_tokens:
+            return
+        if torch.is_tensor(self._draft_token_ids):
+            assert isinstance(self._draft_token_ids, torch.Tensor)
+            if self._draft_token_ids.ndim >= 2:
+                self.prev_num_spec_tokens = self._draft_token_ids.shape[1]
+            else:
+                self.prev_num_spec_tokens = self.num_spec_tokens
+        if self._nanoparl_async_custom_class_enabled():
+            self._draft_token_req_ids = self.input_batch.req_ids.copy()
             return
         if self.use_async_scheduling and not (
             scheduler_output.has_structured_output_requests
@@ -2541,7 +2663,7 @@ class NPUModelRunner(GPUModelRunner):
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
-            self._draft_token_ids = self.propose_draft_token_ids(
+            draft_token_ids = self.propose_draft_token_ids(
                 sampled_token_ids,
                 self.input_batch.sampling_metadata,
                 scheduler_output,
@@ -2553,6 +2675,9 @@ class NPUModelRunner(GPUModelRunner):
                 aux_hidden_states,
                 sample_hidden_states,
                 batch_desc,
+            )
+            self._draft_token_ids = self._tensorize_nanoparl_async_draft_tokens(
+                draft_token_ids
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
 
@@ -2570,6 +2695,11 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states,
             scheduler_output.total_num_scheduled_tokens,
             spec_decode_metadata,
+        )
+
+        nanoparl_verify_results = self._normalize_nanoparl_verify_results(
+            getattr(self, "_pearl_verify_results", None),
+            req_ids_output_copy,
         )
 
         with record_function_or_nullcontext("draft_token"):
@@ -2610,6 +2740,7 @@ class NPUModelRunner(GPUModelRunner):
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
             cudagraph_stats=cudagraph_stats,
             routed_experts=None,
+            nanoparl_verify_results=nanoparl_verify_results,
         )
         if self.ascend_config.profiling_chunk_config.need_timing and hasattr(self, '_execution_start_time'):
             self._sync_device()
@@ -2636,7 +2767,7 @@ class NPUModelRunner(GPUModelRunner):
             if pp.world_size > 1 and pp.is_last_rank and not skip_pp_pd_broadcast:
                 self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
 
-        if not self.use_async_scheduling:
+        if not self.use_async_scheduling or self._nanoparl_async_custom_class_enabled():
             if self.routed_experts_initialized:
                 # Sync path: D2H was issued in ``_bookkeeping_sync`` and
                 # synchronized by ``_to_list``'s event.synchronize(), so
@@ -2686,6 +2817,110 @@ class NPUModelRunner(GPUModelRunner):
         return async_output
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
+    def _normalize_nanoparl_verify_results(
+        self,
+        raw_results,
+        req_ids: list[str],
+    ) -> list[dict[str, Any]] | None:
+        """Attach stable request IDs and fill the target boundary.
+
+        The Ascend rejection sampler reports row indices because sampling
+        metadata is row-oriented. The scheduler consumes stable request IDs.
+        If the sampler does not yet expose valid_len, derive it from the
+        optimistic scheduled boundary and accepted length.
+        """
+        if not raw_results:
+            return None
+
+        no_bonus = os.environ.get(
+            "PEARL_STAGE5_NANOPEARL_NO_BONUS", "0"
+        ) == "1"
+        normalized: list[dict[str, Any]] = []
+        for raw in raw_results:
+            if not isinstance(raw, dict):
+                continue
+            row_index = raw.get("row_index")
+            try:
+                row_index = int(row_index) if row_index is not None else -1
+            except (TypeError, ValueError):
+                row_index = -1
+            if row_index < 0 or row_index >= len(req_ids):
+                continue
+
+            req_id = req_ids[row_index]
+            req_index = self.input_batch.req_id_to_index.get(req_id, row_index)
+            try:
+                draft_len = int(raw.get("draft_len", 0))
+                accepted_len = int(raw.get("accepted_len", 0))
+            except (TypeError, ValueError):
+                continue
+
+            valid_len = raw.get("valid_len")
+            if valid_len is None:
+                target_prefix_len = raw.get("target_prefix_len")
+                if target_prefix_len is not None:
+                    valid_len = int(target_prefix_len) - 1
+                else:
+                    optimistic_len = int(
+                        self.input_batch.num_computed_tokens_cpu[req_index]
+                    )
+                    all_accepted = accepted_len == draft_len
+                    if no_bonus and all_accepted:
+                        # True nano-PEARL does not append a target bonus token
+                        # when all draft tokens are accepted.  Keep the one-token
+                        # decode lag: valid_len remains prefix_len - 1.
+                        valid_len = optimistic_len + accepted_len
+                    else:
+                        # Standard vLLM speculative decoding keeps the accepted
+                        # draft tokens and one target replacement/bonus token.
+                        valid_len = optimistic_len + accepted_len + 1
+
+            replacement_token_id = raw.get("replacement_token_id")
+            if no_bonus and accepted_len == draft_len:
+                replacement_token_id = None
+
+            normalized.append(
+                {
+                    "request_id": req_id,
+                    "accepted_len": accepted_len,
+                    "valid_len": int(valid_len),
+                    "draft_len": draft_len,
+                    "replacement_token_id": replacement_token_id,
+                    "finished": bool(raw.get("finished", False)),
+                    "length_only": bool(raw.get("length_only", False)),
+                }
+            )
+        return normalized or None
+
+    def _trim_nanoparl_bonus_tokens(
+        self,
+        valid_sampled_token_ids: list[list[int]],
+    ) -> None:
+        """Drop standard bonus tokens from all-accepted nano-PEARL rows."""
+        if os.environ.get("PEARL_STAGE5_NANOPEARL_NO_BONUS", "0") != "1":
+            return
+        raw_results = getattr(self, "_pearl_verify_results", None) or []
+        for raw in raw_results:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                row_index = int(raw.get("row_index", -1))
+                accepted_len = int(raw.get("accepted_len", 0))
+                draft_len = int(raw.get("draft_len", 0))
+            except (TypeError, ValueError):
+                continue
+            if (
+                row_index < 0
+                or row_index >= len(valid_sampled_token_ids)
+                or accepted_len != draft_len
+            ):
+                continue
+            row_tokens = valid_sampled_token_ids[row_index]
+            if len(row_tokens) > accepted_len:
+                del row_tokens[accepted_len:]
+            raw["replacement_token_id"] = None
+            raw["no_bonus"] = True
+
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.
         self.input_batch.update_async_output_token_ids()
@@ -2749,6 +2984,8 @@ class NPUModelRunner(GPUModelRunner):
     ]:
         # TODO: implement PR 28597 from vllm
         discard_sampled_tokens_req_indices = self.discard_request_indices.np[: self.num_discarded_requests]
+        nanoparl_async_custom = self._nanoparl_async_custom_class_enabled()
+        invalid_req_indices_set: set[int] = set()
         for i in discard_sampled_tokens_req_indices:
             gen = self.input_batch.generators.get(int(i))
             if gen is not None:
@@ -2764,7 +3001,7 @@ class NPUModelRunner(GPUModelRunner):
         logprobs_tensors = sampler_output.logprobs_tensors
         invalid_req_indices = []
         logprobs_lists = None
-        if not self.use_async_scheduling:
+        if not self.use_async_scheduling or nanoparl_async_custom:
             # Sync scheduling: issue routed experts D2H into the pinned
             # CPU buffer BEFORE ``_to_list`` below. ``_to_list`` does
             # ``event.synchronize()`` on the async copy stream which
@@ -2799,6 +3036,7 @@ class NPUModelRunner(GPUModelRunner):
                     discard_sampled_tokens_req_indices,
                     logprobs_tensors=logprobs_tensors,
                 )
+                self._trim_nanoparl_bonus_tokens(valid_sampled_token_ids)
             # PEARL_STAGE5_SAMPLE_OUTPUT_TRACE_V1
             if __import__("os").environ.get("PEARL_STAGE5_SAMPLE_OUTPUT_TRACE") == "1":
                 _parsed_raw_ids = sampled_token_ids.detach().cpu().tolist()
@@ -2832,6 +3070,20 @@ class NPUModelRunner(GPUModelRunner):
                 req_id: i for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
             }
 
+        if nanoparl_async_custom:
+            invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
+            invalid_req_indices_set = set(invalid_req_indices)
+            self.input_batch.prev_req_id_to_index = {
+                req_id: i
+                for i, req_id in enumerate(self.input_batch.req_ids)
+                if i not in invalid_req_indices_set
+            }
+            self._stage_nanoparl_async_sample_state(
+                valid_sampled_token_ids,
+                scheduler_output,
+                invalid_req_indices_set,
+            )
+
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
@@ -2839,7 +3091,7 @@ class NPUModelRunner(GPUModelRunner):
         # between the first-stage worker and the last-stage worker.
         req_ids = self.input_batch.req_ids
         for req_idx in range(num_sampled_tokens):
-            if self.use_async_scheduling:
+            if self.use_async_scheduling and not nanoparl_async_custom:
                 sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
             else:
                 sampled_ids = valid_sampled_token_ids[req_idx]
@@ -2864,6 +3116,19 @@ class NPUModelRunner(GPUModelRunner):
 
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
+            if nanoparl_async_custom:
+                placeholders = min(
+                    int(getattr(req_state, "prev_num_draft_len", 0)),
+                    len(req_state.output_token_ids),
+                )
+                removed = 0
+                while (
+                    removed < placeholders
+                    and req_state.output_token_ids
+                    and req_state.output_token_ids[-1] == PLACEHOLDER_TOKEN_ID
+                ):
+                    req_state.output_token_ids.pop()
+                    removed += 1
             req_state.output_token_ids.extend(sampled_ids)
 
         # logprobs_lists is already set above:

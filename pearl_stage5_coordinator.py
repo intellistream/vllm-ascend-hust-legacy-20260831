@@ -231,8 +231,8 @@ def _hccl_main(args: argparse.Namespace) -> None:
                 args.draft_device,
                 draft_control,
                 args.max_model_len,
-                getattr(args, "max_num_seqs", 1),
                 args.gamma,
+                getattr(args, "max_num_seqs", 1),
                 proposal_socket=draft_proposal,
             )
             processes.append(("draft", draft_process, None))
@@ -271,8 +271,8 @@ def _hccl_main(args: argparse.Namespace) -> None:
                 args.target_device,
                 target_control,
                 args.max_model_len,
-                getattr(args, "max_num_seqs", 1),
                 args.gamma,
+                getattr(args, "max_num_seqs", 1),
                 draft_socket=target_hccl,
             )
             processes.append(("target", target_process, None))

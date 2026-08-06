@@ -1,3 +1,4 @@
+# PEARL_STAGE5_NANOPEARL_STRICT_RUNTIME_V1
 # PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_RUNTIME_V4
 # PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_RUNTIME_V2
 # PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_RUNTIME_V1
@@ -72,6 +73,7 @@ class VerifyResult:
     request_id: str
     accepted_len: int
     draft_len: int
+    valid_len: int | None = None
     replacement_token_id: int | None = None
     finished: bool = False
 
@@ -80,6 +82,8 @@ class VerifyResult:
             raise ValueError("accepted_len and draft_len must be non-negative")
         if self.accepted_len > self.draft_len:
             raise ValueError("accepted_len cannot exceed draft_len")
+        if self.valid_len is not None and self.valid_len < 0:
+            raise ValueError("valid_len must be non-negative")
 
     @classmethod
     def from_mapping(cls, value: dict) -> "VerifyResult":
@@ -87,6 +91,11 @@ class VerifyResult:
             request_id=str(value["request_id"]),
             accepted_len=int(value["accepted_len"]),
             draft_len=int(value["draft_len"]),
+            valid_len=(
+                None
+                if value.get("valid_len") is None
+                else int(value["valid_len"])
+            ),
             replacement_token_id=(
                 None
                 if value.get("replacement_token_id") is None
@@ -155,6 +164,9 @@ class NanoPearlPrefetchController:
         self._force_rebase = os.environ.get(
             "PEARL_STAGE5_NANOPEARL_FORCE_REBASE", "0"
         ) == "1"
+        self._strict = (
+            os.environ.get("PEARL_STAGE5_NANOPEARL_STRICT", "0") == "1"
+        )
         self._trace_fn = trace
         self._executor = ThreadPoolExecutor(
             max_workers=1,
@@ -187,7 +199,6 @@ class NanoPearlPrefetchController:
             raise ValueError("nano-pearl request batch must not be empty")
         return normalized
 
-    @staticmethod
     @staticmethod
     def _compatible(
         expected: tuple[DraftRequest, ...],
@@ -285,6 +296,11 @@ class NanoPearlPrefetchController:
         length_only_ids: set[str] | None = None,
     ) -> set[str]:
         """Commit boundaries; strict rows carry only accepted/valid lengths."""
+        if self._strict and explicit and self._commit_batch is None:
+            raise RuntimeError(
+                "nano-PEARL strict mode requires commit_batch; "
+                "refusing to advance Draft state through prefix refresh"
+            )
         if self._commit_batch is None or not explicit:
             return set()
 
@@ -295,10 +311,22 @@ class NanoPearlPrefetchController:
             result = explicit.get(request.request_id)
             if result is None:
                 continue
-            valid_len = max(0, len(request.prefix_token_ids) - 1)
+            target_prefix_len = len(request.prefix_token_ids)
+            valid_len = (
+                int(result.valid_len)
+                if result.valid_len is not None
+                else max(0, target_prefix_len - 1)
+            )
+            if valid_len < 0 or valid_len > max(0, target_prefix_len - 1):
+                raise RuntimeError(
+                    "invalid nano-PEARL valid_len for "
+                    f"{request.request_id!r}: valid_len={valid_len} "
+                    f"target_prefix_len={target_prefix_len}"
+                )
             length_only = (
                 self._length_only_enabled
                 and request.request_id in length_only_ids
+                and valid_len == target_prefix_len - 1
             )
             if length_only:
                 # Strict length-only payload.  The receiver derives the
@@ -317,7 +345,7 @@ class NanoPearlPrefetchController:
                     "accepted_len": result.accepted_len,
                     "draft_len": result.draft_len,
                     "valid_len": valid_len,
-                    "target_prefix_len": len(request.prefix_token_ids),
+                    "target_prefix_len": target_prefix_len,
                     "replacement_token_id": result.replacement_token_id,
                     "finished": result.finished,
                     "length_only": False,
@@ -373,6 +401,11 @@ class NanoPearlPrefetchController:
     def _rebase_current(self, current: tuple[DraftRequest, ...]) -> None:
         if not self._rebase_on_discard or self._rebase_batch is None:
             return
+        if self._strict:
+            raise RuntimeError(
+                "nano-PEARL strict mode forbids discard rebase scheduling; "
+                "Draft must be advanced by commit/rollback state updates"
+            )
         self._trace(
             "discard_rebase_start "
             f"round={self.round_id} batch={len(current)}"
@@ -580,8 +613,22 @@ class NanoPearlPrefetchController:
                         for request in refresh_requests
                         if request.request_id not in committed_ids
                     )
-                    if uncommitted_refresh:
-                        rebase_current(uncommitted_refresh)
+                    rebase_candidates = tuple(
+                        request
+                        for request in uncommitted_refresh
+                        if request.request_id in pending_by_id
+                    )
+                    skipped_new_rows = (
+                        len(uncommitted_refresh) - len(rebase_candidates)
+                    )
+                    if skipped_new_rows:
+                        self._trace(
+                            "discard_rebase_skip_new_rows "
+                            f"round={self.round_id} "
+                            f"rows={skipped_new_rows}"
+                        )
+                    if rebase_candidates:
+                        rebase_current(rebase_candidates)
             fresh = self._call_batch(tuple(refresh_requests))
             for request, result in zip(refresh_requests, fresh):
                 selected[request.request_id] = result
@@ -659,4 +706,3 @@ def trace_from_env(prefix: str = "[PEARL_STAGE5_NANOPEARL_V1]") -> TraceFn | Non
         print(f"{prefix} {message}", flush=True)
 
     return emit
-

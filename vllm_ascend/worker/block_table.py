@@ -94,6 +94,10 @@ class BlockTable:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+        # CPU-only logical boundary; physical rows remain append-only.
+        self.nanoparl_logical_num_tokens = np.full(
+            max_num_reqs, -1, dtype=np.int64
+        )
         self.slot_mapping = self._make_buffer(
             self.max_num_batched_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32
         )
@@ -120,6 +124,7 @@ class BlockTable:
 
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
         self.num_blocks_per_row[row_idx] = 0
+        self.nanoparl_logical_num_tokens[row_idx] = -1
         self.append_row(block_ids, row_idx)
 
     def clear_row(self, row_idx: int) -> None:
@@ -127,11 +132,15 @@ class BlockTable:
         if num_blocks > 0:
             self.block_table.np[row_idx, :num_blocks] = 0
         self.num_blocks_per_row[row_idx] = 0
+        self.nanoparl_logical_num_tokens[row_idx] = -1
 
     def move_row(self, src: int, tgt: int) -> None:
         num_blocks = self.num_blocks_per_row[src]
         self.block_table.np[tgt, :num_blocks] = self.block_table.np[src, :num_blocks]
         self.num_blocks_per_row[tgt] = num_blocks
+        self.nanoparl_logical_num_tokens[tgt] = (
+            self.nanoparl_logical_num_tokens[src]
+        )
 
     def swap_row(self, src: int, tgt: int) -> None:
         num_blocks_src = self.num_blocks_per_row[src]
@@ -140,6 +149,20 @@ class BlockTable:
         self.num_blocks_per_row[tgt] = num_blocks_src
 
         self.block_table.np[[src, tgt]] = self.block_table.np[[tgt, src]]
+        self.nanoparl_logical_num_tokens[[src, tgt]] = (
+            self.nanoparl_logical_num_tokens[[tgt, src]]
+        )
+
+    def set_nanoparl_logical_boundary(
+        self, row_idx: int, logical_num_tokens: int
+    ) -> None:
+        """Record the logical token boundary without changing block IDs."""
+        if logical_num_tokens < 0:
+            raise ValueError(
+                "logical_num_tokens must be non-negative, "
+                f"got {logical_num_tokens}"
+            )
+        self.nanoparl_logical_num_tokens[row_idx] = logical_num_tokens
 
     def compute_slot_mapping(
         self,
@@ -326,6 +349,7 @@ class BlockTable:
 
     def clear(self) -> None:
         self.block_table.fill_(0)
+        self.nanoparl_logical_num_tokens.fill(-1)
         self.block_table.cpu.fill_(0)
 
     def _convert_physical_to_logical_blocks(self, physical_blocks: np.ndarray) -> np.ndarray:
@@ -459,6 +483,14 @@ class MultiGroupBlockTable:
     def swap_row(self, src: int, tgt: int) -> None:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
+
+    def set_nanoparl_logical_boundary(
+        self, row_idx: int, logical_num_tokens: int
+    ) -> None:
+        for block_table in self.block_tables:
+            block_table.set_nanoparl_logical_boundary(
+                row_idx, logical_num_tokens
+            )
 
     def compute_slot_mapping(
         self,

@@ -1,0 +1,1107 @@
+===== stage6 lines 175-255 =====
+   175	                        base.send_message(
+   176	                            conn,
+   177	                            {
+   178	                                "status": "result",
+   179	                                "draft_token_ids": draft_ids[:gamma],
+   180	                                "prefix_len": len(prefix),
+   181	                            },
+   182	                        )
+   183	                        print(
+   184	                            "[stage6-hccl] target bridge v3 "
+   185	                            f"seq={sequence} slot={slot} "
+   186	                            f"prefix_len={len(prefix)} "
+   187	                            f"draft_len={len(draft_ids[:gamma])}",
+   188	                            flush=True,
+   189	                        )
+   190	                        continue
+   191	
+   192	                    if command == "commit_batch":
+   193	                        raw_updates = message.get("updates")
+   194	                        if not isinstance(raw_updates, list) or not raw_updates:
+   195	                            raise ValueError(
+   196	                                "commit_batch requires a non-empty updates list"
+   197	                            )
+   198	
+   199	                        wire_updates = []
+   200	                        for item in raw_updates:
+   201	                            if not isinstance(item, dict):
+   202	                                raise ValueError("commit_batch update must be a dict")
+   203	                            request_id = str(item.get("request_id", ""))
+   204	                            if request_id not in slots:
+   205	                                raise ValueError(
+   206	                                    f"unknown HCCL v3 request slot: {request_id!r}"
+   207	                                )
+   208	                            if item.get("length_only") is not True:
+   209	                                raise ValueError(
+   210	                                    "HCCL v3 commit_batch supports length-only updates only"
+   211	                                )
+   212	                            accepted_len = int(item["accepted_len"])
+   213	                            valid_len = int(item["valid_len"])
+   214	                            if accepted_len < 0 or valid_len < 0:
+   215	                                raise ValueError(
+   216	                                    "accepted_len and valid_len must be non-negative"
+   217	                                )
+   218	                            wire_updates.append(
+   219	                                (slots[request_id], accepted_len, valid_len)
+   220	                            )
+   221	
+   222	                        sequence += 1
+   223	                        base.send_i32(
+   224	                            dist,
+   225	                            [COMMIT_REQUEST_MAGIC, sequence, len(wire_updates), 0, 0],
+   226	                            device,
+   227	                            dst=0,
+   228	                        )
+   229	                        for slot, accepted_len, valid_len in wire_updates:
+   230	                            base.send_i32(
+   231	                                dist,
+   232	                                [slot, accepted_len, valid_len],
+   233	                                device,
+   234	                                dst=0,
+   235	                            )
+   236	
+   237	                        ok = recv_commit_response(
+   238	                            dist, device, sequence, len(wire_updates)
+   239	                        )
+   240	                        if not ok:
+   241	                            raise RuntimeError(
+   242	                                "Draft batch sidecar returned an HCCL v3 commit error"
+   243	                            )
+   244	                        base.send_message(conn, {"status": "result"})
+   245	                        print(
+   246	                            "[stage6-hccl] target bridge commit_batch "
+   247	                            f"v3 seq={sequence} updates={len(wire_updates)}",
+   248	                            flush=True,
+   249	                        )
+   250	                        continue
+   251	
+   252	                    if command != "draft_batch":
+   253	                        raise ValueError(
+   254	                            f"unknown HCCL bridge command: {command!r}"
+   255	                        )
+
+===== stage6 lines 350-430 =====
+   350	                            dist,
+   351	                            [base.ERROR_MAGIC, sequence, 0],
+   352	                            device,
+   353	                            dst=1,
+   354	                        )
+   355	                        continue
+   356	                    draft_ids = [
+   357	                        int(x)
+   358	                        for x in response.get("draft_token_ids", [])[:gamma]
+   359	                    ]
+   360	                    base.send_i32(
+   361	                        dist,
+   362	                        [SINGLE_RESPONSE_MAGIC, sequence, len(draft_ids)],
+   363	                        device,
+   364	                        dst=1,
+   365	                    )
+   366	                    base.send_i32(dist, draft_ids, device, dst=1)
+   367	                    print(
+   368	                        "[stage6-hccl] draft bridge v3 "
+   369	                        f"seq={sequence} slot={slot} "
+   370	                        f"draft_len={len(draft_ids)}",
+   371	                        flush=True,
+   372	                    )
+   373	                    continue
+   374	
+   375	                if magic == COMMIT_REQUEST_MAGIC:
+   376	                    count = field2
+   377	                    if count <= 0:
+   378	                        raise RuntimeError(
+   379	                            f"invalid HCCL v3 commit count: {count}"
+   380	                        )
+   381	
+   382	                    updates = []
+   383	                    for _ in range(count):
+   384	                        slot, accepted_len, valid_len = base.recv_i32(
+   385	                            dist, 3, device, src=1
+   386	                        )
+   387	                        if slot < 0 or accepted_len < 0 or valid_len < 0:
+   388	                            raise RuntimeError(
+   389	                                "invalid HCCL v3 commit update: "
+   390	                                f"{slot}, {accepted_len}, {valid_len}"
+   391	                            )
+   392	                        updates.append(
+   393	                            {
+   394	                                "request_id": f"hccl-slot-{slot}",
+   395	                                "length_only": True,
+   396	                                "accepted_len": accepted_len,
+   397	                                "valid_len": valid_len,
+   398	                            }
+   399	                        )
+   400	
+   401	                    base.send_message(
+   402	                        worker_conn,
+   403	                        {"cmd": "commit_batch", "updates": updates},
+   404	                    )
+   405	                    response = base.receive_message(worker_reader)
+   406	                    if response is None or response.get("status") != "result":
+   407	                        base.send_i32(
+   408	                            dist,
+   409	                            [base.ERROR_MAGIC, sequence, 0],
+   410	                            device,
+   411	                            dst=1,
+   412	                        )
+   413	                        continue
+   414	
+   415	                    base.send_i32(
+   416	                        dist,
+   417	                        [COMMIT_RESPONSE_MAGIC, sequence, count],
+   418	                        device,
+   419	                        dst=1,
+   420	                    )
+   421	                    print(
+   422	                        "[stage6-hccl] draft bridge commit_batch "
+   423	                        f"v3 seq={sequence} updates={count}",
+   424	                        flush=True,
+   425	                    )
+   426	                    continue
+   427	
+   428	                if magic != BATCH_REQUEST_MAGIC:
+   429	                    raise RuntimeError(
+   430	                        f"invalid HCCL v3 request header: {header}"
+
+===== grep protocol references =====
+pearl_stage5_worker.py-162-            continue
+pearl_stage5_worker.py-163-        except OSError:
+pearl_stage5_worker.py-164-            break
+pearl_stage5_worker.py-165-
+pearl_stage5_worker.py-166-        with conn:
+pearl_stage5_worker.py-167-            with conn.makefile("r", encoding="utf-8") as reader:
+pearl_stage5_worker.py-168-                while not stop_event.is_set():
+pearl_stage5_worker.py-169-                    message = receive_message(reader)
+pearl_stage5_worker.py-170-                    if message is None:
+pearl_stage5_worker.py-171-                        break
+pearl_stage5_worker.py-172-                    try:
+pearl_stage5_worker.py-173-                        command = message.get("cmd")
+pearl_stage5_worker.py:174:                        if command == "rebase_batch":
+pearl_stage5_worker.py-175-                            raw_requests = message.get("requests")
+pearl_stage5_worker.py-176-                            if not isinstance(raw_requests, list) or not raw_requests:
+pearl_stage5_worker.py-177-                                raise ValueError(
+pearl_stage5_worker.py:178:                                    "rebase_batch requires a non-empty requests list"
+pearl_stage5_worker.py-179-                                )
+pearl_stage5_worker.py-180-                            requests = []
+pearl_stage5_worker.py-181-                            for index, item in enumerate(raw_requests):
+pearl_stage5_worker.py-182-                                if not isinstance(item, dict):
+pearl_stage5_worker.py-183-                                    raise ValueError(
+pearl_stage5_worker.py-184-                                        f"rebase request {index} must be an object"
+pearl_stage5_worker.py-185-                                    )
+pearl_stage5_worker.py:186:                                prefix = item.get("prefix_token_ids")
+pearl_stage5_worker.py-187-                                if not isinstance(prefix, list) or not prefix:
+pearl_stage5_worker.py-188-                                    raise ValueError(
+pearl_stage5_worker.py:189:                                        "rebase prefix_token_ids must be non-empty"
+pearl_stage5_worker.py-190-                                    )
+pearl_stage5_worker.py-191-                                requests.append(
+pearl_stage5_worker.py-192-                                    {
+pearl_stage5_worker.py-193-                                        "request_id": str(
+pearl_stage5_worker.py-194-                                            item.get("request_id", f"row-{index}")
+pearl_stage5_worker.py-195-                                        ),
+pearl_stage5_worker.py:196:                                        "prefix_token_ids": [int(x) for x in prefix],
+pearl_stage5_worker.py-197-                                    }
+pearl_stage5_worker.py-198-                                )
+pearl_stage5_worker.py:199:                            rebase_batch = getattr(engine, "rebase_batch", None)
+pearl_stage5_worker.py:200:                            if not callable(rebase_batch):
+pearl_stage5_worker.py-201-                                raise RuntimeError(
+pearl_stage5_worker.py:202:                                    "Draft engine has no rebase_batch(); "
+pearl_stage5_worker.py-203-                                    "stale nano-PEARL state cannot be safely discarded"
+pearl_stage5_worker.py-204-                                )
+pearl_stage5_worker.py:205:                            result = rebase_batch(requests)
+pearl_stage5_worker.py-206-                            print(
+pearl_stage5_worker.py:207:                                "[draft] rebase_batch "
+pearl_stage5_worker.py-208-                                f"batch_size={len(requests)} "
+pearl_stage5_worker.py-209-                                f"request_ids={[item['request_id'] for item in requests]}",
+pearl_stage5_worker.py-210-                                flush=True,
+pearl_stage5_worker.py-211-                            )
+pearl_stage5_worker.py-212-                            send_message(
+pearl_stage5_worker.py-213-                                conn,
+pearl_stage5_worker.py-214-                                {"status": "result", "results": result or []},
+pearl_stage5_worker.py-215-                            )
+pearl_stage5_worker.py-216-                            continue
+pearl_stage5_worker.py-217-
+pearl_stage5_worker.py:218:                        if command == "commit_batch":
+pearl_stage5_worker.py-219-                            raw_updates = message.get("updates")
+pearl_stage5_worker.py-220-                            if not isinstance(raw_updates, list) or not raw_updates:
+pearl_stage5_worker.py-221-                                raise ValueError(
+pearl_stage5_worker.py:222:                                    "commit_batch requires a non-empty updates list"
+pearl_stage5_worker.py-223-                                )
+pearl_stage5_worker.py:224:                            commit_batch = getattr(engine, "commit_batch", None)
+pearl_stage5_worker.py:225:                            if not callable(commit_batch):
+pearl_stage5_worker.py-226-                                raise RuntimeError(
+pearl_stage5_worker.py:227:                                    "Draft engine has no commit_batch(); "
+pearl_stage5_worker.py-228-                                    "apply the nano-PEARL commit-state patch first"
+pearl_stage5_worker.py-229-                                )
+pearl_stage5_worker.py-230-                            updates = []
+pearl_stage5_worker.py-231-                            for index, item in enumerate(raw_updates):
+pearl_stage5_worker.py-232-                                if not isinstance(item, dict):
+pearl_stage5_worker.py-233-                                    raise ValueError(
+pearl_stage5_worker.py-234-                                        f"commit update {index} must be an object"
+pearl_stage5_worker.py-235-                                    )
+pearl_stage5_worker.py:236:                                length_only = bool(item.get("length_only", False))
+pearl_stage5_worker.py:237:                                prefix = item.get("prefix_token_ids")
+pearl_stage5_worker.py-238-                                valid_len = int(item.get("valid_len", -1))
+pearl_stage5_worker.py-239-                                accepted_len = int(item.get("accepted_len", 0))
+pearl_stage5_worker.py:240:                                if length_only:
+pearl_stage5_worker.py-241-                                    # Strict wire form: no prefix or other
+pearl_stage5_worker.py-242-                                    # target-side token metadata is accepted.
+pearl_stage5_worker.py-243-                                    if prefix is not None:
+pearl_stage5_worker.py-244-                                        raise ValueError(
+pearl_stage5_worker.py-245-                                            "strict length-only commit must not "
+pearl_stage5_worker.py:246:                                            "carry prefix_token_ids"
+pearl_stage5_worker.py-247-                                        )
+pearl_stage5_worker.py-248-                                    if valid_len < 0:
+pearl_stage5_worker.py-249-                                        raise ValueError(
+pearl_stage5_worker.py-250-                                            "strict length-only valid_len must be non-negative"
+pearl_stage5_worker.py-251-                                        )
+pearl_stage5_worker.py-252-                                    target_prefix_len = valid_len + 1
+pearl_stage5_worker.py-253-                                    # Draft's verifier contract requires an
+pearl_stage5_worker.py-254-                                    # all-accepted length-only row.  The
+pearl_stage5_worker.py-255-                                    # runtime eligibility check established
+pearl_stage5_worker.py-256-                                    # that property before sending this row.
+pearl_stage5_worker.py-257-                                    draft_len = accepted_len
+pearl_stage5_worker.py-258-                                    replacement = None
+pearl_stage5_worker.py-259-                                    finished = False
+pearl_stage5_worker.py-260-                                    gamma = 0
+pearl_stage5_worker.py-261-                                else:
+pearl_stage5_worker.py-262-                                    if not isinstance(prefix, list) or not prefix:
+pearl_stage5_worker.py-263-                                        raise ValueError(
+pearl_stage5_worker.py:264:                                            "commit prefix_token_ids must be non-empty"
+pearl_stage5_worker.py-265-                                        )
+pearl_stage5_worker.py-266-                                    target_prefix_len = int(
+pearl_stage5_worker.py-267-                                        item.get(
+pearl_stage5_worker.py-268-                                            "target_prefix_len", len(prefix)
+pearl_stage5_worker.py-269-                                        )
+pearl_stage5_worker.py-270-                                    )
+pearl_stage5_worker.py-271-                                    draft_len = int(item.get("draft_len", 0))
+pearl_stage5_worker.py-272-                                    replacement = item.get("replacement_token_id")
+pearl_stage5_worker.py-273-                                    finished = bool(item.get("finished", False))
+pearl_stage5_worker.py-274-                                    gamma = int(item.get("gamma", 0))
+pearl_stage5_worker.py-275-                                    if target_prefix_len != len(prefix):
+pearl_stage5_worker.py-276-                                        raise ValueError(
+--
+pearl_stage5_worker.py-284-                                    "request_id": str(
+pearl_stage5_worker.py-285-                                        item.get("request_id", f"row-{index}")
+pearl_stage5_worker.py-286-                                    ),
+pearl_stage5_worker.py-287-                                    "gamma": gamma,
+pearl_stage5_worker.py-288-                                    "accepted_len": accepted_len,
+pearl_stage5_worker.py-289-                                    "draft_len": draft_len,
+pearl_stage5_worker.py-290-                                    "valid_len": valid_len,
+pearl_stage5_worker.py-291-                                    "target_prefix_len": target_prefix_len,
+pearl_stage5_worker.py-292-                                    "replacement_token_id": (
+pearl_stage5_worker.py-293-                                        None if replacement is None else int(replacement)
+pearl_stage5_worker.py-294-                                    ),
+pearl_stage5_worker.py-295-                                    "finished": finished,
+pearl_stage5_worker.py:296:                                    "length_only": length_only,
+pearl_stage5_worker.py-297-                                }
+pearl_stage5_worker.py:298:                                if not length_only:
+pearl_stage5_worker.py:299:                                    normalized["prefix_token_ids"] = [
+pearl_stage5_worker.py-300-                                        int(x) for x in prefix
+pearl_stage5_worker.py-301-                                    ]
+pearl_stage5_worker.py-302-                                updates.append(normalized)
+pearl_stage5_worker.py:303:                            result = commit_batch(updates)
+pearl_stage5_worker.py-304-                            print(
+pearl_stage5_worker.py:305:                                "[draft] commit_batch "
+pearl_stage5_worker.py-306-                                f"batch_size={len(updates)} "
+pearl_stage5_worker.py-307-                                f"accepted={sum(x['accepted_len'] for x in updates)} "
+pearl_stage5_worker.py-308-                                f"valid={sum(x['valid_len'] for x in updates)} "
+pearl_stage5_worker.py:309:                                f"length_only={sum(bool(x['length_only']) for x in updates)} "
+pearl_stage5_worker.py-310-                                "wire_length_fields=accepted_len,valid_len",
+pearl_stage5_worker.py-311-                                flush=True,
+pearl_stage5_worker.py-312-                            )
+pearl_stage5_worker.py-313-                            send_message(
+pearl_stage5_worker.py-314-                                conn,
+pearl_stage5_worker.py-315-                                {"status": "result", "results": result or []},
+pearl_stage5_worker.py-316-                            )
+pearl_stage5_worker.py-317-                            continue
+pearl_stage5_worker.py-318-
+pearl_stage5_worker.py-319-                        if command == "draft_batch":
+pearl_stage5_worker.py-320-                            raw_requests = message.get("requests")
+pearl_stage5_worker.py-321-                            if not isinstance(raw_requests, list) or not raw_requests:
+pearl_stage5_worker.py-322-                                raise ValueError(
+pearl_stage5_worker.py-323-                                    "draft_batch requires a non-empty requests list"
+pearl_stage5_worker.py-324-                                )
+pearl_stage5_worker.py-325-                            requests = []
+pearl_stage5_worker.py-326-                            for index, request in enumerate(raw_requests):
+pearl_stage5_worker.py-327-                                if not isinstance(request, dict):
+pearl_stage5_worker.py-328-                                    raise ValueError(
+pearl_stage5_worker.py-329-                                        f"draft request {index} must be an object"
+pearl_stage5_worker.py-330-                                    )
+pearl_stage5_worker.py-331-                                request_id = str(
+pearl_stage5_worker.py-332-                                    request.get("request_id", f"row-{index}")
+pearl_stage5_worker.py-333-                                )
+pearl_stage5_worker.py:334:                                prefix = request.get("prefix_token_ids")
+pearl_stage5_worker.py-335-                                gamma = int(request.get("gamma", 0))
+pearl_stage5_worker.py-336-                                if not isinstance(prefix, list) or not prefix:
+pearl_stage5_worker.py-337-                                    raise ValueError(
+pearl_stage5_worker.py:338:                                        "prefix_token_ids must be non-empty for "
+pearl_stage5_worker.py-339-                                        f"{request_id!r}"
+pearl_stage5_worker.py-340-                                    )
+pearl_stage5_worker.py-341-                                requests.append(
+pearl_stage5_worker.py-342-                                    {
+pearl_stage5_worker.py-343-                                        "request_id": request_id,
+pearl_stage5_worker.py:344:                                        "prefix_token_ids": [int(x) for x in prefix],
+pearl_stage5_worker.py-345-                                        "gamma": gamma,
+pearl_stage5_worker.py-346-                                    }
+pearl_stage5_worker.py-347-                                )
+pearl_stage5_worker.py-348-
+pearl_stage5_worker.py-349-                            print(
+pearl_stage5_worker.py-350-                                "[draft] batch proposal "
+pearl_stage5_worker.py-351-                                f"batch_size={len(requests)} "
+pearl_stage5_worker.py-352-                                f"request_ids={[item['request_id'] for item in requests]} "
+pearl_stage5_worker.py-353-                                f"gamma={[item['gamma'] for item in requests]}",
+pearl_stage5_worker.py-354-                                flush=True,
+pearl_stage5_worker.py-355-                            )
+pearl_stage5_worker.py-356-                            results = engine.propose_batch(requests)
+pearl_stage5_worker.py-357-                            by_id = {
+pearl_stage5_worker.py-358-                                str(item["request_id"]): item
+pearl_stage5_worker.py-359-                                for item in results
+pearl_stage5_worker.py-360-                            }
+pearl_stage5_worker.py-361-                            for request in requests:
+pearl_stage5_worker.py-362-                                item = by_id[request["request_id"]]
+pearl_stage5_worker.py-363-                                print(
+pearl_stage5_worker.py-364-                                    "[draft] proposal "
+pearl_stage5_worker.py-365-                                    f"request_id={request['request_id']!r} "
+pearl_stage5_worker.py:366:                                    f"prefix_len={len(request['prefix_token_ids'])} "
+pearl_stage5_worker.py-367-                                    f"gamma={request['gamma']} "
+pearl_stage5_worker.py-368-                                    f"draft_ids={item['draft_token_ids']}",
+pearl_stage5_worker.py-369-                                    flush=True,
+pearl_stage5_worker.py-370-                                )
+pearl_stage5_worker.py-371-                            send_message(conn, {"status": "result", "results": results})
+pearl_stage5_worker.py-372-                            continue
+pearl_stage5_worker.py-373-
+pearl_stage5_worker.py-374-                        if command != "draft":
+pearl_stage5_worker.py-375-                            raise ValueError(f"unknown proposal command: {command!r}")
+pearl_stage5_worker.py:376:                        prefix = message.get("prefix_token_ids")
+pearl_stage5_worker.py-377-                        gamma = int(message.get("gamma", 0))
+pearl_stage5_worker.py-378-                        request_id = str(message.get("request_id", "target-0"))
+pearl_stage5_worker.py-379-                        if not isinstance(prefix, list) or not prefix:
+pearl_stage5_worker.py:380:                            raise ValueError("prefix_token_ids must be non-empty")
+pearl_stage5_worker.py-381-                        draft_ids = engine.propose(
+pearl_stage5_worker.py-382-                            request_id,
+pearl_stage5_worker.py-383-                            [int(x) for x in prefix],
+pearl_stage5_worker.py-384-                            gamma,
+pearl_stage5_worker.py-385-                        )
+pearl_stage5_worker.py-386-                        print(
+pearl_stage5_worker.py-387-                            "[draft] proposal "
+pearl_stage5_worker.py-388-                            f"request_id={request_id!r} "
+pearl_stage5_worker.py-389-                            f"prefix_len={len(prefix)} gamma={gamma} "
+pearl_stage5_worker.py-390-                            f"draft_ids={draft_ids}",
+pearl_stage5_worker.py-391-                            flush=True,
+pearl_stage5_worker.py-392-                        )
+--
+pearl_stage5_nanoparl_proposer_v3.py-19-
+pearl_stage5_nanoparl_proposer_v3.py-20-
+pearl_stage5_nanoparl_proposer_v3.py-21-class PearlNanoPearlProposer(_PearlNanoPearlProposerV1):
+pearl_stage5_nanoparl_proposer_v3.py-22-    """Use request_ids for stable HCCL slots while retaining v1 transport."""
+pearl_stage5_nanoparl_proposer_v3.py-23-
+pearl_stage5_nanoparl_proposer_v3.py-24-    def __init__(self, vllm_config: Any) -> None:
+pearl_stage5_nanoparl_proposer_v3.py-25-        super().__init__(vllm_config)
+pearl_stage5_nanoparl_proposer_v3.py-26-        # Replace v1's ordinary controller with the rebase-aware controller.
+pearl_stage5_nanoparl_proposer_v3.py-27-        self._nano_controller.close()
+pearl_stage5_nanoparl_proposer_v3.py-28-        self._nano_controller = NanoPearlPrefetchController(
+pearl_stage5_nanoparl_proposer_v3.py-29-            self._request_batch_for_nano,
+pearl_stage5_nanoparl_proposer_v3.py-30-            trace=trace_from_env(),
+pearl_stage5_nanoparl_proposer_v3.py:31:            commit_batch=self._commit_batch_for_nano,
+pearl_stage5_nanoparl_proposer_v3.py:32:            rebase_batch=self._rebase_batch_for_nano,
+pearl_stage5_nanoparl_proposer_v3.py-33-        )
+pearl_stage5_nanoparl_proposer_v3.py-34-
+pearl_stage5_nanoparl_proposer_v3.py:35:    def _commit_batch_for_nano(
+pearl_stage5_nanoparl_proposer_v3.py-36-        self, updates: list[dict[str, Any]]
+pearl_stage5_nanoparl_proposer_v3.py-37-    ) -> None:
+pearl_stage5_nanoparl_proposer_v3.py-38-        """Send one ordered accepted/valid-length commit to Draft."""
+pearl_stage5_nanoparl_proposer_v3.py-39-        if not updates:
+pearl_stage5_nanoparl_proposer_v3.py-40-            return
+pearl_stage5_nanoparl_proposer_v3.py-41-        with self._nano_io_lock:
+pearl_stage5_nanoparl_proposer_v3.py-42-            response = self._request(
+pearl_stage5_nanoparl_proposer_v3.py:43:                {"cmd": "commit_batch", "updates": updates}
+pearl_stage5_nanoparl_proposer_v3.py-44-            )
+pearl_stage5_nanoparl_proposer_v3.py-45-        if response.get("status") != "result":
+pearl_stage5_nanoparl_proposer_v3.py-46-            raise RuntimeError(
+pearl_stage5_nanoparl_proposer_v3.py:47:                "Draft commit_batch returned an invalid response: "
+pearl_stage5_nanoparl_proposer_v3.py-48-                f"{response!r}"
+pearl_stage5_nanoparl_proposer_v3.py-49-            )
+pearl_stage5_nanoparl_proposer_v3.py-50-
+pearl_stage5_nanoparl_proposer_v3.py:51:    def _rebase_batch_for_nano(
+pearl_stage5_nanoparl_proposer_v3.py-52-        self, requests: list[dict[str, Any]]
+pearl_stage5_nanoparl_proposer_v3.py-53-    ) -> None:
+pearl_stage5_nanoparl_proposer_v3.py-54-        with self._nano_io_lock:
+pearl_stage5_nanoparl_proposer_v3.py-55-            response = self._request(
+pearl_stage5_nanoparl_proposer_v3.py:56:                {"cmd": "rebase_batch", "requests": requests}
+pearl_stage5_nanoparl_proposer_v3.py-57-            )
+pearl_stage5_nanoparl_proposer_v3.py-58-        if response.get("status") != "result":
+pearl_stage5_nanoparl_proposer_v3.py-59-            raise RuntimeError(
+pearl_stage5_nanoparl_proposer_v3.py:60:                "Draft rebase_batch returned an invalid response: "
+pearl_stage5_nanoparl_proposer_v3.py-61-                f"{response!r}"
+pearl_stage5_nanoparl_proposer_v3.py-62-            )
+pearl_stage5_nanoparl_proposer_v3.py-63-
+pearl_stage5_nanoparl_proposer_v3.py-64-    @staticmethod
+pearl_stage5_nanoparl_proposer_v3.py-65-    def _row_ids_fallback(token_ids_cpu: Any, row: int, count: int) -> list[int]:
+pearl_stage5_nanoparl_proposer_v3.py-66-        values = token_ids_cpu[row, :count]
+pearl_stage5_nanoparl_proposer_v3.py-67-        if hasattr(values, "tolist"):
+pearl_stage5_nanoparl_proposer_v3.py-68-            values = values.tolist()
+pearl_stage5_nanoparl_proposer_v3.py-69-        return [int(token_id) for token_id in values]
+pearl_stage5_nanoparl_proposer_v3.py-70-
+pearl_stage5_nanoparl_proposer_v3.py-71-    @staticmethod
+pearl_stage5_nanoparl_proposer_v3.py-72-    def _as_request_id_list(request_ids: Any) -> list[str] | None:
+--
+pearl_stage5_nanoparl_proposer_v3.py-122-                continue
+pearl_stage5_nanoparl_proposer_v3.py-123-            count = int(num_tokens_no_spec[row])
+pearl_stage5_nanoparl_proposer_v3.py-124-            prefix = row_ids(token_ids_cpu, row, count)
+pearl_stage5_nanoparl_proposer_v3.py-125-            if prefix[-len(sampled) :] != sampled:
+pearl_stage5_nanoparl_proposer_v3.py-126-                prefix.extend(sampled)
+pearl_stage5_nanoparl_proposer_v3.py-127-            if stable_ids is not None and row < len(stable_ids):
+pearl_stage5_nanoparl_proposer_v3.py-128-                request_id = stable_ids[row]
+pearl_stage5_nanoparl_proposer_v3.py-129-            else:
+pearl_stage5_nanoparl_proposer_v3.py-130-                request_id = f"target-row-{row}"
+pearl_stage5_nanoparl_proposer_v3.py-131-            requests.append(
+pearl_stage5_nanoparl_proposer_v3.py-132-                DraftRequest(
+pearl_stage5_nanoparl_proposer_v3.py-133-                    request_id=request_id,
+pearl_stage5_nanoparl_proposer_v3.py:134:                    prefix_token_ids=tuple(prefix),
+pearl_stage5_nanoparl_proposer_v3.py-135-                    gamma=self.gamma,
+pearl_stage5_nanoparl_proposer_v3.py-136-                )
+pearl_stage5_nanoparl_proposer_v3.py-137-            )
+pearl_stage5_nanoparl_proposer_v3.py-138-            active_rows.append(row)
+pearl_stage5_nanoparl_proposer_v3.py-139-
+pearl_stage5_nanoparl_proposer_v3.py-140-        if not requests:
+pearl_stage5_nanoparl_proposer_v3.py-141-            return output
+pearl_stage5_nanoparl_proposer_v3.py-142-
+pearl_stage5_nanoparl_proposer_v3.py-143-        normalized_verify_results = None
+pearl_stage5_nanoparl_proposer_v3.py-144-        if verify_results is not None:
+pearl_stage5_nanoparl_proposer_v3.py-145-            normalized_verify_results = []
+pearl_stage5_nanoparl_proposer_v3.py-146-            for raw in verify_results:
+--
+pearl_stage5_nanoparl_runtime_v1.py-32-import threading
+pearl_stage5_nanoparl_runtime_v1.py-33-from typing import Callable, Iterable, Sequence
+pearl_stage5_nanoparl_runtime_v1.py-34-
+pearl_stage5_nanoparl_runtime_v1.py-35-
+pearl_stage5_nanoparl_runtime_v1.py-36-class PearlMode(str, Enum):
+pearl_stage5_nanoparl_runtime_v1.py-37-    PRE_VERIFY = "pre_verify"
+pearl_stage5_nanoparl_runtime_v1.py-38-    POST_VERIFY = "post_verify"
+pearl_stage5_nanoparl_runtime_v1.py-39-
+pearl_stage5_nanoparl_runtime_v1.py-40-
+pearl_stage5_nanoparl_runtime_v1.py-41-@dataclass(frozen=True)
+pearl_stage5_nanoparl_runtime_v1.py-42-class DraftRequest:
+pearl_stage5_nanoparl_runtime_v1.py-43-    request_id: str
+pearl_stage5_nanoparl_runtime_v1.py:44:    prefix_token_ids: tuple[int, ...]
+pearl_stage5_nanoparl_runtime_v1.py-45-    gamma: int
+pearl_stage5_nanoparl_runtime_v1.py-46-
+pearl_stage5_nanoparl_runtime_v1.py-47-    @classmethod
+pearl_stage5_nanoparl_runtime_v1.py-48-    def from_mapping(cls, value: dict) -> "DraftRequest":
+pearl_stage5_nanoparl_runtime_v1.py-49-        request_id = str(value["request_id"])
+pearl_stage5_nanoparl_runtime_v1.py:50:        prefix = tuple(int(x) for x in value["prefix_token_ids"])
+pearl_stage5_nanoparl_runtime_v1.py-51-        gamma = int(value["gamma"])
+pearl_stage5_nanoparl_runtime_v1.py-52-        if not request_id:
+pearl_stage5_nanoparl_runtime_v1.py-53-            raise ValueError("request_id must not be empty")
+pearl_stage5_nanoparl_runtime_v1.py-54-        if not prefix:
+pearl_stage5_nanoparl_runtime_v1.py-55-            raise ValueError(f"empty prefix for {request_id!r}")
+pearl_stage5_nanoparl_runtime_v1.py-56-        if gamma <= 0:
+pearl_stage5_nanoparl_runtime_v1.py-57-            raise ValueError(f"gamma must be positive for {request_id!r}")
+pearl_stage5_nanoparl_runtime_v1.py-58-        return cls(request_id, prefix, gamma)
+pearl_stage5_nanoparl_runtime_v1.py-59-
+pearl_stage5_nanoparl_runtime_v1.py-60-
+pearl_stage5_nanoparl_runtime_v1.py-61-@dataclass(frozen=True)
+pearl_stage5_nanoparl_runtime_v1.py-62-class DraftResult:
+pearl_stage5_nanoparl_runtime_v1.py-63-    request_id: str
+pearl_stage5_nanoparl_runtime_v1.py:64:    prefix_token_ids: tuple[int, ...]
+pearl_stage5_nanoparl_runtime_v1.py-65-    draft_token_ids: tuple[int, ...]
+pearl_stage5_nanoparl_runtime_v1.py-66-
+pearl_stage5_nanoparl_runtime_v1.py-67-
+pearl_stage5_nanoparl_runtime_v1.py-68-@dataclass(frozen=True)
+pearl_stage5_nanoparl_runtime_v1.py-69-class VerifyResult:
+pearl_stage5_nanoparl_runtime_v1.py-70-    """Compact result needed to advance the local Draft/Target state."""
+pearl_stage5_nanoparl_runtime_v1.py-71-
+pearl_stage5_nanoparl_runtime_v1.py-72-    request_id: str
+pearl_stage5_nanoparl_runtime_v1.py-73-    accepted_len: int
+pearl_stage5_nanoparl_runtime_v1.py-74-    draft_len: int
+pearl_stage5_nanoparl_runtime_v1.py-75-    replacement_token_id: int | None = None
+pearl_stage5_nanoparl_runtime_v1.py-76-    finished: bool = False
+--
+pearl_stage5_nanoparl_runtime_v1.py-125-      and a fresh request is made in PRE_VERIFY.
+pearl_stage5_nanoparl_runtime_v1.py-126-
+pearl_stage5_nanoparl_runtime_v1.py-127-    The prefix comparison is intentionally conservative: it only treats a
+pearl_stage5_nanoparl_runtime_v1.py-128-    round as post-verify when every row still has its optimistic prefix.  The
+pearl_stage5_nanoparl_runtime_v1.py-129-    Target remains the source of truth, so this cannot change output tokens.
+pearl_stage5_nanoparl_runtime_v1.py-130-    """
+pearl_stage5_nanoparl_runtime_v1.py-131-
+pearl_stage5_nanoparl_runtime_v1.py-132-    def __init__(
+pearl_stage5_nanoparl_runtime_v1.py-133-        self,
+pearl_stage5_nanoparl_runtime_v1.py-134-        request_batch: BatchRequestFn,
+pearl_stage5_nanoparl_runtime_v1.py-135-        *,
+pearl_stage5_nanoparl_runtime_v1.py-136-        trace: TraceFn | None = None,
+pearl_stage5_nanoparl_runtime_v1.py:137:        commit_batch: CommitBatchFn | None = None,
+pearl_stage5_nanoparl_runtime_v1.py:138:        rebase_batch: RebaseBatchFn | None = None,
+pearl_stage5_nanoparl_runtime_v1.py-139-    ) -> None:
+pearl_stage5_nanoparl_runtime_v1.py-140-        self._request_batch = request_batch
+pearl_stage5_nanoparl_runtime_v1.py:141:        self._commit_batch = commit_batch
+pearl_stage5_nanoparl_runtime_v1.py:142:        self._length_only_enabled = (
+pearl_stage5_nanoparl_runtime_v1.py-143-            os.environ.get(
+pearl_stage5_nanoparl_runtime_v1.py-144-                "PEARL_STAGE5_NANOPEARL_LENGTH_ONLY", "0"
+pearl_stage5_nanoparl_runtime_v1.py-145-            ) == "1"
+pearl_stage5_nanoparl_runtime_v1.py-146-        )
+pearl_stage5_nanoparl_runtime_v1.py:147:        self._rebase_batch = rebase_batch
+pearl_stage5_nanoparl_runtime_v1.py-148-        self._rebase_on_discard = (
+pearl_stage5_nanoparl_runtime_v1.py-149-            os.environ.get(
+pearl_stage5_nanoparl_runtime_v1.py-150-                "PEARL_STAGE5_NANOPEARL_SAFE_DISCARD_REBASE", "1"
+pearl_stage5_nanoparl_runtime_v1.py-151-            )
+pearl_stage5_nanoparl_runtime_v1.py-152-            != "0"
+pearl_stage5_nanoparl_runtime_v1.py-153-        )
+pearl_stage5_nanoparl_runtime_v1.py-154-        # # PEARL_STAGE5_NANOPEARL_FORCE_REBASE_CONTROL_V1: diagnostic switch; default keeps existing behavior.
+pearl_stage5_nanoparl_runtime_v1.py-155-        self._force_rebase = os.environ.get(
+pearl_stage5_nanoparl_runtime_v1.py-156-            "PEARL_STAGE5_NANOPEARL_FORCE_REBASE", "0"
+pearl_stage5_nanoparl_runtime_v1.py-157-        ) == "1"
+pearl_stage5_nanoparl_runtime_v1.py-158-        self._trace_fn = trace
+pearl_stage5_nanoparl_runtime_v1.py-159-        self._executor = ThreadPoolExecutor(
+--
+pearl_stage5_nanoparl_runtime_v1.py-194-        current: tuple[DraftRequest, ...],
+pearl_stage5_nanoparl_runtime_v1.py-195-    ) -> bool:
+pearl_stage5_nanoparl_runtime_v1.py-196-        """Return true only for the exact state used by the prefetch."""
+pearl_stage5_nanoparl_runtime_v1.py-197-        if len(expected) != len(current):
+pearl_stage5_nanoparl_runtime_v1.py-198-            return False
+pearl_stage5_nanoparl_runtime_v1.py-199-        for old, new in zip(expected, current):
+pearl_stage5_nanoparl_runtime_v1.py-200-            if old.request_id != new.request_id:
+pearl_stage5_nanoparl_runtime_v1.py-201-                return False
+pearl_stage5_nanoparl_runtime_v1.py-202-            if old.gamma != new.gamma:
+pearl_stage5_nanoparl_runtime_v1.py-203-                return False
+pearl_stage5_nanoparl_runtime_v1.py-204-            # A Target bonus token or any other prefix change invalidates the
+pearl_stage5_nanoparl_runtime_v1.py-205-            # Draft result computed for the optimistic prefix.
+pearl_stage5_nanoparl_runtime_v1.py:206:            if new.prefix_token_ids != old.prefix_token_ids:
+pearl_stage5_nanoparl_runtime_v1.py-207-                return False
+pearl_stage5_nanoparl_runtime_v1.py-208-        return True
+pearl_stage5_nanoparl_runtime_v1.py-209-    @staticmethod
+pearl_stage5_nanoparl_runtime_v1.py-210-    def _to_wire(requests: Sequence[DraftRequest]) -> list[dict]:
+pearl_stage5_nanoparl_runtime_v1.py-211-        return [
+pearl_stage5_nanoparl_runtime_v1.py-212-            {
+pearl_stage5_nanoparl_runtime_v1.py-213-                "request_id": request.request_id,
+pearl_stage5_nanoparl_runtime_v1.py:214:                "prefix_token_ids": list(request.prefix_token_ids),
+pearl_stage5_nanoparl_runtime_v1.py-215-                "gamma": request.gamma,
+pearl_stage5_nanoparl_runtime_v1.py-216-            }
+pearl_stage5_nanoparl_runtime_v1.py-217-            for request in requests
+pearl_stage5_nanoparl_runtime_v1.py-218-        ]
+pearl_stage5_nanoparl_runtime_v1.py-219-
+pearl_stage5_nanoparl_runtime_v1.py:220:    def _eligible_length_only_ids(
+pearl_stage5_nanoparl_runtime_v1.py-221-        self,
+pearl_stage5_nanoparl_runtime_v1.py-222-        current: tuple[DraftRequest, ...],
+pearl_stage5_nanoparl_runtime_v1.py-223-        explicit: dict[str, VerifyResult],
+pearl_stage5_nanoparl_runtime_v1.py-224-        pending_by_id: dict[str, tuple[DraftRequest, DraftResult]],
+pearl_stage5_nanoparl_runtime_v1.py-225-        pending_error: Exception | None,
+pearl_stage5_nanoparl_runtime_v1.py-226-    ) -> set[str]:
+pearl_stage5_nanoparl_runtime_v1.py-227-        """Return rows whose Target prefix is already in Draft KV state."""
+pearl_stage5_nanoparl_runtime_v1.py-228-        if (
+pearl_stage5_nanoparl_runtime_v1.py:229:            not self._length_only_enabled
+pearl_stage5_nanoparl_runtime_v1.py-230-            or pending_error is not None
+pearl_stage5_nanoparl_runtime_v1.py-231-            or not pending_by_id
+pearl_stage5_nanoparl_runtime_v1.py-232-        ):
+pearl_stage5_nanoparl_runtime_v1.py-233-            return set()
+pearl_stage5_nanoparl_runtime_v1.py-234-
+pearl_stage5_nanoparl_runtime_v1.py-235-        eligible: set[str] = set()
+pearl_stage5_nanoparl_runtime_v1.py-236-        for request in current:
+pearl_stage5_nanoparl_runtime_v1.py-237-            result = explicit.get(request.request_id)
+pearl_stage5_nanoparl_runtime_v1.py-238-            matched = pending_by_id.get(request.request_id)
+pearl_stage5_nanoparl_runtime_v1.py-239-            if result is None or matched is None:
+pearl_stage5_nanoparl_runtime_v1.py-240-                continue
+pearl_stage5_nanoparl_runtime_v1.py-241-            old, old_result = matched
+pearl_stage5_nanoparl_runtime_v1.py-242-            draft = old_result.draft_token_ids
+pearl_stage5_nanoparl_runtime_v1.py-243-            if result.finished or not result.all_accepted:
+pearl_stage5_nanoparl_runtime_v1.py-244-                continue
+pearl_stage5_nanoparl_runtime_v1.py-245-            if result.draft_len != len(draft):
+pearl_stage5_nanoparl_runtime_v1.py-246-                continue
+pearl_stage5_nanoparl_runtime_v1.py-247-            if request.gamma != old.gamma:
+pearl_stage5_nanoparl_runtime_v1.py-248-                continue
+pearl_stage5_nanoparl_runtime_v1.py-249-            if (
+pearl_stage5_nanoparl_runtime_v1.py:250:                len(request.prefix_token_ids) < len(old.prefix_token_ids)
+pearl_stage5_nanoparl_runtime_v1.py:251:                or request.prefix_token_ids[: len(old.prefix_token_ids)]
+pearl_stage5_nanoparl_runtime_v1.py:252:                != old.prefix_token_ids
+pearl_stage5_nanoparl_runtime_v1.py-253-            ):
+pearl_stage5_nanoparl_runtime_v1.py-254-                continue
+pearl_stage5_nanoparl_runtime_v1.py-255-
+pearl_stage5_nanoparl_runtime_v1.py:256:            extra = request.prefix_token_ids[len(old.prefix_token_ids) :]
+pearl_stage5_nanoparl_runtime_v1.py-257-            if len(extra) > len(draft):
+pearl_stage5_nanoparl_runtime_v1.py-258-                continue
+pearl_stage5_nanoparl_runtime_v1.py-259-            if tuple(extra) != tuple(draft[: len(extra)]):
+pearl_stage5_nanoparl_runtime_v1.py-260-                continue
+pearl_stage5_nanoparl_runtime_v1.py-261-
+pearl_stage5_nanoparl_runtime_v1.py-262-            # A replacement/bonus is safe only when the current Target
+pearl_stage5_nanoparl_runtime_v1.py-263-            # prefix already contains the same prefetched token.  If Target
+pearl_stage5_nanoparl_runtime_v1.py-264-            # has not appended it yet, extra is empty and no token transfer
+pearl_stage5_nanoparl_runtime_v1.py-265-            # is needed in this round.
+pearl_stage5_nanoparl_runtime_v1.py-266-            if (
+pearl_stage5_nanoparl_runtime_v1.py-267-                result.replacement_token_id is not None
+pearl_stage5_nanoparl_runtime_v1.py-268-                and extra
+pearl_stage5_nanoparl_runtime_v1.py-269-                and int(extra[0]) != int(result.replacement_token_id)
+pearl_stage5_nanoparl_runtime_v1.py-270-            ):
+pearl_stage5_nanoparl_runtime_v1.py-271-                continue
+pearl_stage5_nanoparl_runtime_v1.py-272-            eligible.add(request.request_id)
+pearl_stage5_nanoparl_runtime_v1.py-273-
+pearl_stage5_nanoparl_runtime_v1.py-274-        if eligible:
+pearl_stage5_nanoparl_runtime_v1.py-275-            self._trace(
+pearl_stage5_nanoparl_runtime_v1.py:276:                "length_only_eligible "
+pearl_stage5_nanoparl_runtime_v1.py-277-                f"round={self.round_id} batch={len(eligible)} "
+pearl_stage5_nanoparl_runtime_v1.py-278-                f"rows={','.join(sorted(eligible))}"
+pearl_stage5_nanoparl_runtime_v1.py-279-            )
+pearl_stage5_nanoparl_runtime_v1.py-280-        return eligible
+pearl_stage5_nanoparl_runtime_v1.py-281-    def _commit_current(
+pearl_stage5_nanoparl_runtime_v1.py-282-        self,
+pearl_stage5_nanoparl_runtime_v1.py-283-        current: tuple[DraftRequest, ...],
+pearl_stage5_nanoparl_runtime_v1.py-284-        explicit: dict[str, VerifyResult],
+pearl_stage5_nanoparl_runtime_v1.py:285:        length_only_ids: set[str] | None = None,
+pearl_stage5_nanoparl_runtime_v1.py-286-    ) -> set[str]:
+pearl_stage5_nanoparl_runtime_v1.py-287-        """Commit boundaries; strict rows carry only accepted/valid lengths."""
+pearl_stage5_nanoparl_runtime_v1.py:288:        if self._commit_batch is None or not explicit:
+pearl_stage5_nanoparl_runtime_v1.py-289-            return set()
+pearl_stage5_nanoparl_runtime_v1.py-290-
+pearl_stage5_nanoparl_runtime_v1.py:291:        length_only_ids = length_only_ids or set()
+pearl_stage5_nanoparl_runtime_v1.py-292-        updates: list[dict] = []
+pearl_stage5_nanoparl_runtime_v1.py-293-        committed_ids: set[str] = set()
+pearl_stage5_nanoparl_runtime_v1.py-294-        for request in current:
+pearl_stage5_nanoparl_runtime_v1.py-295-            result = explicit.get(request.request_id)
+pearl_stage5_nanoparl_runtime_v1.py-296-            if result is None:
+pearl_stage5_nanoparl_runtime_v1.py-297-                continue
+pearl_stage5_nanoparl_runtime_v1.py:298:            valid_len = max(0, len(request.prefix_token_ids) - 1)
+pearl_stage5_nanoparl_runtime_v1.py:299:            length_only = (
+pearl_stage5_nanoparl_runtime_v1.py:300:                self._length_only_enabled
+pearl_stage5_nanoparl_runtime_v1.py:301:                and request.request_id in length_only_ids
+pearl_stage5_nanoparl_runtime_v1.py-302-            )
+pearl_stage5_nanoparl_runtime_v1.py:303:            if length_only:
+pearl_stage5_nanoparl_runtime_v1.py-304-                # Strict length-only payload.  The receiver derives the
+pearl_stage5_nanoparl_runtime_v1.py-305-                # target boundary from valid_len and uses its resident Draft
+pearl_stage5_nanoparl_runtime_v1.py-306-                # state for all token/KV bookkeeping.
+pearl_stage5_nanoparl_runtime_v1.py-307-                update = {
+pearl_stage5_nanoparl_runtime_v1.py-308-                    "request_id": request.request_id,
+pearl_stage5_nanoparl_runtime_v1.py-309-                    "accepted_len": result.accepted_len,
+pearl_stage5_nanoparl_runtime_v1.py-310-                    "valid_len": valid_len,
+pearl_stage5_nanoparl_runtime_v1.py:311:                    "length_only": True,
+pearl_stage5_nanoparl_runtime_v1.py-312-                }
+pearl_stage5_nanoparl_runtime_v1.py-313-            else:
+pearl_stage5_nanoparl_runtime_v1.py-314-                update = {
+pearl_stage5_nanoparl_runtime_v1.py-315-                    "request_id": request.request_id,
+pearl_stage5_nanoparl_runtime_v1.py-316-                    "gamma": request.gamma,
+pearl_stage5_nanoparl_runtime_v1.py-317-                    "accepted_len": result.accepted_len,
+pearl_stage5_nanoparl_runtime_v1.py-318-                    "draft_len": result.draft_len,
+pearl_stage5_nanoparl_runtime_v1.py-319-                    "valid_len": valid_len,
+pearl_stage5_nanoparl_runtime_v1.py:320:                    "target_prefix_len": len(request.prefix_token_ids),
+pearl_stage5_nanoparl_runtime_v1.py-321-                    "replacement_token_id": result.replacement_token_id,
+pearl_stage5_nanoparl_runtime_v1.py-322-                    "finished": result.finished,
+pearl_stage5_nanoparl_runtime_v1.py:323:                    "length_only": False,
+pearl_stage5_nanoparl_runtime_v1.py:324:                    "prefix_token_ids": list(request.prefix_token_ids),
+pearl_stage5_nanoparl_runtime_v1.py-325-                }
+pearl_stage5_nanoparl_runtime_v1.py-326-            updates.append(update)
+pearl_stage5_nanoparl_runtime_v1.py-327-            committed_ids.add(request.request_id)
+pearl_stage5_nanoparl_runtime_v1.py-328-
+pearl_stage5_nanoparl_runtime_v1.py-329-        if not updates:
+pearl_stage5_nanoparl_runtime_v1.py-330-            return set()
+pearl_stage5_nanoparl_runtime_v1.py-331-
+pearl_stage5_nanoparl_runtime_v1.py-332-        self._trace(
+pearl_stage5_nanoparl_runtime_v1.py:333:            "commit_batch_start "
+pearl_stage5_nanoparl_runtime_v1.py-334-            f"round={self.round_id} batch={len(updates)} "
+pearl_stage5_nanoparl_runtime_v1.py-335-            f"accepted={sum(item['accepted_len'] for item in updates)} "
+pearl_stage5_nanoparl_runtime_v1.py-336-            f"valid={sum(item['valid_len'] for item in updates)} "
+pearl_stage5_nanoparl_runtime_v1.py:337:            f"length_only={sum(bool(item['length_only']) for item in updates)} "
+pearl_stage5_nanoparl_runtime_v1.py-338-            "wire_length_fields=accepted_len,valid_len"
+pearl_stage5_nanoparl_runtime_v1.py-339-        )
+pearl_stage5_nanoparl_runtime_v1.py:340:        self._commit_batch(updates)
+pearl_stage5_nanoparl_runtime_v1.py-341-        self._trace(
+pearl_stage5_nanoparl_runtime_v1.py:342:            "commit_batch_done "
+pearl_stage5_nanoparl_runtime_v1.py-343-            f"round={self.round_id} batch={len(updates)} "
+pearl_stage5_nanoparl_runtime_v1.py-344-            f"rows={','.join(sorted(committed_ids))}"
+pearl_stage5_nanoparl_runtime_v1.py-345-        )
+pearl_stage5_nanoparl_runtime_v1.py-346-        return committed_ids
+pearl_stage5_nanoparl_runtime_v1.py-347-    def _call_batch(self, requests: tuple[DraftRequest, ...]) -> list[DraftResult]:
+pearl_stage5_nanoparl_runtime_v1.py-348-        rows = self._request_batch(self._to_wire(requests))
+pearl_stage5_nanoparl_runtime_v1.py-349-        if len(rows) != len(requests):
+pearl_stage5_nanoparl_runtime_v1.py-350-            raise RuntimeError(
+pearl_stage5_nanoparl_runtime_v1.py-351-                f"Draft returned {len(rows)} rows for {len(requests)} requests"
+pearl_stage5_nanoparl_runtime_v1.py-352-            )
+pearl_stage5_nanoparl_runtime_v1.py-353-        results: list[DraftResult] = []
+pearl_stage5_nanoparl_runtime_v1.py-354-        for request, row in zip(requests, rows):
+pearl_stage5_nanoparl_runtime_v1.py-355-            draft = tuple(int(x) for x in row[: request.gamma])
+pearl_stage5_nanoparl_runtime_v1.py-356-            results.append(
+pearl_stage5_nanoparl_runtime_v1.py-357-                DraftResult(
+pearl_stage5_nanoparl_runtime_v1.py-358-                    request_id=request.request_id,
+pearl_stage5_nanoparl_runtime_v1.py:359:                    prefix_token_ids=request.prefix_token_ids,
+pearl_stage5_nanoparl_runtime_v1.py-360-                    draft_token_ids=draft,
+pearl_stage5_nanoparl_runtime_v1.py-361-                )
+pearl_stage5_nanoparl_runtime_v1.py-362-            )
+pearl_stage5_nanoparl_runtime_v1.py-363-        return results
+pearl_stage5_nanoparl_runtime_v1.py-364-
+pearl_stage5_nanoparl_runtime_v1.py-365-    def _drain_stale(self, pending: _PendingPrefetch) -> None:
+pearl_stage5_nanoparl_runtime_v1.py:366:        # The transport is ordered.  Wait before sending rebase_batch so
+pearl_stage5_nanoparl_runtime_v1.py-367-        # response/round pairs cannot be mixed.
+pearl_stage5_nanoparl_runtime_v1.py-368-        try:
+pearl_stage5_nanoparl_runtime_v1.py-369-            pending.future.result()
+pearl_stage5_nanoparl_runtime_v1.py-370-        except Exception as exc:
+pearl_stage5_nanoparl_runtime_v1.py-371-            self._trace(f"prefetch_discard_error={exc!r}")
+pearl_stage5_nanoparl_runtime_v1.py-372-
+pearl_stage5_nanoparl_runtime_v1.py-373-    def _rebase_current(self, current: tuple[DraftRequest, ...]) -> None:
+pearl_stage5_nanoparl_runtime_v1.py:374:        if not self._rebase_on_discard or self._rebase_batch is None:
+pearl_stage5_nanoparl_runtime_v1.py-375-            return
+pearl_stage5_nanoparl_runtime_v1.py-376-        self._trace(
+pearl_stage5_nanoparl_runtime_v1.py-377-            "discard_rebase_start "
+pearl_stage5_nanoparl_runtime_v1.py-378-            f"round={self.round_id} batch={len(current)}"
+pearl_stage5_nanoparl_runtime_v1.py-379-        )
+pearl_stage5_nanoparl_runtime_v1.py-380-        try:
+pearl_stage5_nanoparl_runtime_v1.py:381:            self._rebase_batch(self._to_wire(current))
+pearl_stage5_nanoparl_runtime_v1.py-382-        except Exception as exc:
+pearl_stage5_nanoparl_runtime_v1.py-383-            self._trace(f"discard_rebase_error={exc!r}")
+pearl_stage5_nanoparl_runtime_v1.py-384-            raise
+pearl_stage5_nanoparl_runtime_v1.py-385-        self._trace(
+pearl_stage5_nanoparl_runtime_v1.py-386-            "discard_rebase_done "
+pearl_stage5_nanoparl_runtime_v1.py-387-            f"round={self.round_id} batch={len(current)}"
+pearl_stage5_nanoparl_runtime_v1.py-388-        )
+pearl_stage5_nanoparl_runtime_v1.py-389-
+pearl_stage5_nanoparl_runtime_v1.py-390-    def _start_prefetch(self, requests: tuple[DraftRequest, ...]) -> None:
+pearl_stage5_nanoparl_runtime_v1.py-391-        if self._closed:
+pearl_stage5_nanoparl_runtime_v1.py-392-            return
+pearl_stage5_nanoparl_runtime_v1.py-393-        if not requests:
+--
+pearl_stage5_nanoparl_runtime_v1.py-410-        self,
+pearl_stage5_nanoparl_runtime_v1.py-411-        requests: tuple[DraftRequest, ...],
+pearl_stage5_nanoparl_runtime_v1.py-412-        results: Sequence[DraftResult],
+pearl_stage5_nanoparl_runtime_v1.py-413-    ) -> tuple[DraftRequest, ...]:
+pearl_stage5_nanoparl_runtime_v1.py-414-        next_requests: list[DraftRequest] = []
+pearl_stage5_nanoparl_runtime_v1.py-415-        for request, result in zip(requests, results):
+pearl_stage5_nanoparl_runtime_v1.py-416-            draft = result.draft_token_ids
+pearl_stage5_nanoparl_runtime_v1.py-417-            if not draft:
+pearl_stage5_nanoparl_runtime_v1.py-418-                continue
+pearl_stage5_nanoparl_runtime_v1.py-419-            next_requests.append(
+pearl_stage5_nanoparl_runtime_v1.py-420-                DraftRequest(
+pearl_stage5_nanoparl_runtime_v1.py-421-                    request_id=request.request_id,
+pearl_stage5_nanoparl_runtime_v1.py:422:                    prefix_token_ids=request.prefix_token_ids + draft,
+pearl_stage5_nanoparl_runtime_v1.py-423-                    gamma=request.gamma,
+pearl_stage5_nanoparl_runtime_v1.py-424-                )
+pearl_stage5_nanoparl_runtime_v1.py-425-            )
+pearl_stage5_nanoparl_runtime_v1.py-426-        return tuple(next_requests)
+pearl_stage5_nanoparl_runtime_v1.py-427-
+pearl_stage5_nanoparl_runtime_v1.py-428-    def get_or_request(
+pearl_stage5_nanoparl_runtime_v1.py-429-        self,
+pearl_stage5_nanoparl_runtime_v1.py-430-        requests: Iterable[DraftRequest | dict],
+pearl_stage5_nanoparl_runtime_v1.py-431-        verify_results: Sequence[VerifyResult | dict] | None = None,
+pearl_stage5_nanoparl_runtime_v1.py-432-    ) -> list[DraftResult]:
+pearl_stage5_nanoparl_runtime_v1.py-433-        """Advance one batch using explicit Target verification when present.
+pearl_stage5_nanoparl_runtime_v1.py-434-
+--
+pearl_stage5_nanoparl_runtime_v1.py-468-        pending_error: Exception | None = None
+pearl_stage5_nanoparl_runtime_v1.py-469-        if pending is not None:
+pearl_stage5_nanoparl_runtime_v1.py-470-            try:
+pearl_stage5_nanoparl_runtime_v1.py-471-                pending_results = pending.future.result()
+pearl_stage5_nanoparl_runtime_v1.py-472-                pending_by_id = {
+pearl_stage5_nanoparl_runtime_v1.py-473-                    request.request_id: (request, result)
+pearl_stage5_nanoparl_runtime_v1.py-474-                    for request, result in zip(pending.requests, pending_results)
+pearl_stage5_nanoparl_runtime_v1.py-475-                }
+pearl_stage5_nanoparl_runtime_v1.py-476-            except Exception as exc:
+pearl_stage5_nanoparl_runtime_v1.py-477-                pending_error = exc
+pearl_stage5_nanoparl_runtime_v1.py-478-                self._trace(f"post_verify_prefetch_error={exc!r}")
+pearl_stage5_nanoparl_runtime_v1.py-479-
+pearl_stage5_nanoparl_runtime_v1.py:480:        length_only_ids = self._eligible_length_only_ids(
+pearl_stage5_nanoparl_runtime_v1.py-481-            current,
+pearl_stage5_nanoparl_runtime_v1.py-482-            explicit,
+pearl_stage5_nanoparl_runtime_v1.py-483-            pending_by_id,
+pearl_stage5_nanoparl_runtime_v1.py-484-            pending_error,
+pearl_stage5_nanoparl_runtime_v1.py-485-        )
+pearl_stage5_nanoparl_runtime_v1.py-486-        committed_ids = self._commit_current(
+pearl_stage5_nanoparl_runtime_v1.py:487:            current, explicit, length_only_ids
+pearl_stage5_nanoparl_runtime_v1.py-488-        )
+pearl_stage5_nanoparl_runtime_v1.py-489-
+pearl_stage5_nanoparl_runtime_v1.py-490-        selected: dict[str, DraftResult] = {}
+pearl_stage5_nanoparl_runtime_v1.py-491-        refresh_requests: list[DraftRequest] = []
+pearl_stage5_nanoparl_runtime_v1.py-492-        consumed_extra: dict[str, int] = {}
+pearl_stage5_nanoparl_runtime_v1.py-493-        explicit_rebase: list[str] = []
+pearl_stage5_nanoparl_runtime_v1.py-494-
+pearl_stage5_nanoparl_runtime_v1.py-495-        for request in current:
+pearl_stage5_nanoparl_runtime_v1.py-496-            matched = pending_by_id.get(request.request_id)
+pearl_stage5_nanoparl_runtime_v1.py-497-            verification = explicit.get(request.request_id)
+pearl_stage5_nanoparl_runtime_v1.py-498-            if matched is None or pending_error is not None:
+pearl_stage5_nanoparl_runtime_v1.py-499-                refresh_requests.append(request)
+pearl_stage5_nanoparl_runtime_v1.py-500-                continue
+pearl_stage5_nanoparl_runtime_v1.py-501-
+pearl_stage5_nanoparl_runtime_v1.py-502-            old_request, old_result = matched
+pearl_stage5_nanoparl_runtime_v1.py:503:            old_prefix = old_request.prefix_token_ids
+pearl_stage5_nanoparl_runtime_v1.py:504:            new_prefix = request.prefix_token_ids
+pearl_stage5_nanoparl_runtime_v1.py-505-            prefix_matches = (
+pearl_stage5_nanoparl_runtime_v1.py-506-                old_request.gamma == request.gamma
+pearl_stage5_nanoparl_runtime_v1.py-507-                and len(new_prefix) >= len(old_prefix)
+pearl_stage5_nanoparl_runtime_v1.py-508-                and new_prefix[: len(old_prefix)] == old_prefix
+pearl_stage5_nanoparl_runtime_v1.py-509-            )
+pearl_stage5_nanoparl_runtime_v1.py-510-            extra = new_prefix[len(old_prefix):] if prefix_matches else ()
+pearl_stage5_nanoparl_runtime_v1.py-511-            draft = old_result.draft_token_ids
+pearl_stage5_nanoparl_runtime_v1.py-512-
+pearl_stage5_nanoparl_runtime_v1.py-513-            # Explicit verification is authoritative.  A partial rejection
+pearl_stage5_nanoparl_runtime_v1.py-514-            # cannot consume the optimistic continuation; it must rebase from
+pearl_stage5_nanoparl_runtime_v1.py-515-            # the Target prefix.  The all-accepted case may consume when the
+pearl_stage5_nanoparl_runtime_v1.py-516-            # target bonus is exactly the first prefetched token (or when no
+--
+pearl_stage5_nanoparl_runtime_v1.py-529-                can_consume = (
+pearl_stage5_nanoparl_runtime_v1.py-530-                    prefix_matches
+pearl_stage5_nanoparl_runtime_v1.py-531-                    and draft_len_matches
+pearl_stage5_nanoparl_runtime_v1.py-532-                    and all_accepted
+pearl_stage5_nanoparl_runtime_v1.py-533-                    and bonus_matches
+pearl_stage5_nanoparl_runtime_v1.py-534-                    and len(extra) < len(draft)
+pearl_stage5_nanoparl_runtime_v1.py-535-                    and tuple(draft[: len(extra)]) == tuple(extra)
+pearl_stage5_nanoparl_runtime_v1.py-536-                    and bool(draft[len(extra):])
+pearl_stage5_nanoparl_runtime_v1.py-537-                )
+pearl_stage5_nanoparl_runtime_v1.py-538-                if can_consume:
+pearl_stage5_nanoparl_runtime_v1.py-539-                    selected[request.request_id] = DraftResult(
+pearl_stage5_nanoparl_runtime_v1.py-540-                        request_id=request.request_id,
+pearl_stage5_nanoparl_runtime_v1.py:541:                        prefix_token_ids=request.prefix_token_ids,
+pearl_stage5_nanoparl_runtime_v1.py-542-                        draft_token_ids=tuple(draft[len(extra):]),
+pearl_stage5_nanoparl_runtime_v1.py-543-                    )
+pearl_stage5_nanoparl_runtime_v1.py-544-                    consumed_extra[request.request_id] = len(extra)
+pearl_stage5_nanoparl_runtime_v1.py-545-                else:
+pearl_stage5_nanoparl_runtime_v1.py-546-                    refresh_requests.append(request)
+pearl_stage5_nanoparl_runtime_v1.py-547-                    explicit_rebase.append(request.request_id)
+pearl_stage5_nanoparl_runtime_v1.py-548-                continue
+pearl_stage5_nanoparl_runtime_v1.py-549-
+pearl_stage5_nanoparl_runtime_v1.py-550-            # Compatibility path for older ModelRunner callers.
+pearl_stage5_nanoparl_runtime_v1.py-551-            can_consume = (
+pearl_stage5_nanoparl_runtime_v1.py-552-                prefix_matches
+pearl_stage5_nanoparl_runtime_v1.py-553-                and len(extra) < len(draft)
+pearl_stage5_nanoparl_runtime_v1.py-554-                and tuple(draft[: len(extra)]) == tuple(extra)
+pearl_stage5_nanoparl_runtime_v1.py-555-                and bool(draft[len(extra):])
+pearl_stage5_nanoparl_runtime_v1.py-556-            )
+pearl_stage5_nanoparl_runtime_v1.py-557-            if can_consume:
+pearl_stage5_nanoparl_runtime_v1.py-558-                selected[request.request_id] = DraftResult(
+pearl_stage5_nanoparl_runtime_v1.py-559-                    request_id=request.request_id,
+pearl_stage5_nanoparl_runtime_v1.py:560:                    prefix_token_ids=request.prefix_token_ids,
+pearl_stage5_nanoparl_runtime_v1.py-561-                    draft_token_ids=tuple(draft[len(extra):]),
+pearl_stage5_nanoparl_runtime_v1.py-562-                )
+pearl_stage5_nanoparl_runtime_v1.py-563-                consumed_extra[request.request_id] = len(extra)
+pearl_stage5_nanoparl_runtime_v1.py-564-            else:
+pearl_stage5_nanoparl_runtime_v1.py-565-                refresh_requests.append(request)
+pearl_stage5_nanoparl_runtime_v1.py-566-
+pearl_stage5_nanoparl_runtime_v1.py-567-        if refresh_requests:
+pearl_stage5_nanoparl_runtime_v1.py-568-            if pending is not None:
+pearl_stage5_nanoparl_runtime_v1.py-569-                self._trace(
+pearl_stage5_nanoparl_runtime_v1.py-570-                    "pre_verify discard_prefetch "
+pearl_stage5_nanoparl_runtime_v1.py-571-                    f"round={self.round_id} batch={len(current)} "
+pearl_stage5_nanoparl_runtime_v1.py-572-                    f"refresh_rows={len(refresh_requests)} "
+--
+pearl_stage6_hccl_bridge_v3.py-18-SINGLE_REQUEST_MAGIC = 1606
+pearl_stage6_hccl_bridge_v3.py-19-SINGLE_RESPONSE_MAGIC = 1607
+pearl_stage6_hccl_bridge_v3.py-20-BATCH_REQUEST_MAGIC = 1608
+pearl_stage6_hccl_bridge_v3.py-21-BATCH_RESPONSE_MAGIC = 1609
+pearl_stage6_hccl_bridge_v3.py-22-COMMIT_REQUEST_MAGIC = 1610
+pearl_stage6_hccl_bridge_v3.py-23-COMMIT_RESPONSE_MAGIC = 1611
+pearl_stage6_hccl_bridge_v3.py-24-
+pearl_stage6_hccl_bridge_v3.py-25-
+pearl_stage6_hccl_bridge_v3.py-26-def validate_request(
+pearl_stage6_hccl_bridge_v3.py-27-    request: dict[str, Any], max_model_len: int, index: int
+pearl_stage6_hccl_bridge_v3.py-28-) -> tuple[str, list[int], int]:
+pearl_stage6_hccl_bridge_v3.py-29-    request_id = str(request.get("request_id", f"row-{index}"))
+pearl_stage6_hccl_bridge_v3.py:30:    prefix = request.get("prefix_token_ids")
+pearl_stage6_hccl_bridge_v3.py-31-    gamma = int(request.get("gamma", 0))
+pearl_stage6_hccl_bridge_v3.py-32-    if not isinstance(prefix, list) or not prefix:
+pearl_stage6_hccl_bridge_v3.py:33:        raise ValueError(f"prefix_token_ids must be non-empty for {request_id!r}")
+pearl_stage6_hccl_bridge_v3.py-34-    if len(prefix) > max_model_len:
+pearl_stage6_hccl_bridge_v3.py-35-        raise ValueError(
+pearl_stage6_hccl_bridge_v3.py-36-            f"prefix length {len(prefix)} exceeds max_model_len {max_model_len}"
+pearl_stage6_hccl_bridge_v3.py-37-        )
+pearl_stage6_hccl_bridge_v3.py-38-    if gamma <= 0:
+pearl_stage6_hccl_bridge_v3.py-39-        raise ValueError(f"gamma must be positive for {request_id!r}")
+pearl_stage6_hccl_bridge_v3.py-40-    return request_id, [int(token_id) for token_id in prefix], gamma
+pearl_stage6_hccl_bridge_v3.py-41-
+pearl_stage6_hccl_bridge_v3.py-42-
+pearl_stage6_hccl_bridge_v3.py-43-def recv_single_response(dist, device, sequence: int):
+pearl_stage6_hccl_bridge_v3.py-44-    header = base.recv_i32(dist, 3, device, src=0)
+pearl_stage6_hccl_bridge_v3.py-45-    if len(header) != 3 or header[0] not in (
+--
+pearl_stage6_hccl_bridge_v3.py-135-        with conn.makefile("r", encoding="utf-8") as reader:
+pearl_stage6_hccl_bridge_v3.py-136-            while True:
+pearl_stage6_hccl_bridge_v3.py-137-                message = base.receive_message(reader)
+pearl_stage6_hccl_bridge_v3.py-138-                if message is None:
+pearl_stage6_hccl_bridge_v3.py-139-                    return
+pearl_stage6_hccl_bridge_v3.py-140-                command = message.get("cmd")
+pearl_stage6_hccl_bridge_v3.py-141-                try:
+pearl_stage6_hccl_bridge_v3.py-142-                    if command == "draft":
+pearl_stage6_hccl_bridge_v3.py-143-                        request = {
+pearl_stage6_hccl_bridge_v3.py-144-                            "request_id": str(
+pearl_stage6_hccl_bridge_v3.py-145-                                message.get("request_id", "target-0")
+pearl_stage6_hccl_bridge_v3.py-146-                            ),
+pearl_stage6_hccl_bridge_v3.py:147:                            "prefix_token_ids": message.get("prefix_token_ids"),
+pearl_stage6_hccl_bridge_v3.py-148-                            "gamma": message.get("gamma", 0),
+pearl_stage6_hccl_bridge_v3.py-149-                        }
+pearl_stage6_hccl_bridge_v3.py-150-                        request_id, prefix, gamma = validate_request(
+pearl_stage6_hccl_bridge_v3.py-151-                            request, max_model_len, 0
+pearl_stage6_hccl_bridge_v3.py-152-                        )
+pearl_stage6_hccl_bridge_v3.py-153-                        sequence += 1
+pearl_stage6_hccl_bridge_v3.py-154-                        slot = slot_for(request_id)
+pearl_stage6_hccl_bridge_v3.py-155-                        base.send_i32(
+pearl_stage6_hccl_bridge_v3.py-156-                            dist,
+pearl_stage6_hccl_bridge_v3.py-157-                            [
+pearl_stage6_hccl_bridge_v3.py-158-                                SINGLE_REQUEST_MAGIC,
+pearl_stage6_hccl_bridge_v3.py-159-                                sequence,
+--
+pearl_stage6_hccl_bridge_v3.py-180-                                "prefix_len": len(prefix),
+pearl_stage6_hccl_bridge_v3.py-181-                            },
+pearl_stage6_hccl_bridge_v3.py-182-                        )
+pearl_stage6_hccl_bridge_v3.py-183-                        print(
+pearl_stage6_hccl_bridge_v3.py-184-                            "[stage6-hccl] target bridge v3 "
+pearl_stage6_hccl_bridge_v3.py-185-                            f"seq={sequence} slot={slot} "
+pearl_stage6_hccl_bridge_v3.py-186-                            f"prefix_len={len(prefix)} "
+pearl_stage6_hccl_bridge_v3.py-187-                            f"draft_len={len(draft_ids[:gamma])}",
+pearl_stage6_hccl_bridge_v3.py-188-                            flush=True,
+pearl_stage6_hccl_bridge_v3.py-189-                        )
+pearl_stage6_hccl_bridge_v3.py-190-                        continue
+pearl_stage6_hccl_bridge_v3.py-191-
+pearl_stage6_hccl_bridge_v3.py:192:                    if command == "commit_batch":
+pearl_stage6_hccl_bridge_v3.py-193-                        raw_updates = message.get("updates")
+pearl_stage6_hccl_bridge_v3.py-194-                        if not isinstance(raw_updates, list) or not raw_updates:
+pearl_stage6_hccl_bridge_v3.py-195-                            raise ValueError(
+pearl_stage6_hccl_bridge_v3.py:196:                                "commit_batch requires a non-empty updates list"
+pearl_stage6_hccl_bridge_v3.py-197-                            )
+pearl_stage6_hccl_bridge_v3.py-198-
+pearl_stage6_hccl_bridge_v3.py-199-                        wire_updates = []
+pearl_stage6_hccl_bridge_v3.py-200-                        for item in raw_updates:
+pearl_stage6_hccl_bridge_v3.py-201-                            if not isinstance(item, dict):
+pearl_stage6_hccl_bridge_v3.py:202:                                raise ValueError("commit_batch update must be a dict")
+pearl_stage6_hccl_bridge_v3.py-203-                            request_id = str(item.get("request_id", ""))
+pearl_stage6_hccl_bridge_v3.py-204-                            if request_id not in slots:
+pearl_stage6_hccl_bridge_v3.py-205-                                raise ValueError(
+pearl_stage6_hccl_bridge_v3.py-206-                                    f"unknown HCCL v3 request slot: {request_id!r}"
+pearl_stage6_hccl_bridge_v3.py-207-                                )
+pearl_stage6_hccl_bridge_v3.py:208:                            if item.get("length_only") is not True:
+pearl_stage6_hccl_bridge_v3.py-209-                                raise ValueError(
+pearl_stage6_hccl_bridge_v3.py:210:                                    "HCCL v3 commit_batch supports length-only updates only"
+pearl_stage6_hccl_bridge_v3.py-211-                                )
+pearl_stage6_hccl_bridge_v3.py-212-                            accepted_len = int(item["accepted_len"])
+pearl_stage6_hccl_bridge_v3.py-213-                            valid_len = int(item["valid_len"])
+pearl_stage6_hccl_bridge_v3.py-214-                            if accepted_len < 0 or valid_len < 0:
+pearl_stage6_hccl_bridge_v3.py-215-                                raise ValueError(
+pearl_stage6_hccl_bridge_v3.py-216-                                    "accepted_len and valid_len must be non-negative"
+pearl_stage6_hccl_bridge_v3.py-217-                                )
+pearl_stage6_hccl_bridge_v3.py-218-                            wire_updates.append(
+pearl_stage6_hccl_bridge_v3.py-219-                                (slots[request_id], accepted_len, valid_len)
+pearl_stage6_hccl_bridge_v3.py-220-                            )
+pearl_stage6_hccl_bridge_v3.py-221-
+pearl_stage6_hccl_bridge_v3.py-222-                        sequence += 1
+--
+pearl_stage6_hccl_bridge_v3.py-234-                                dst=0,
+pearl_stage6_hccl_bridge_v3.py-235-                            )
+pearl_stage6_hccl_bridge_v3.py-236-
+pearl_stage6_hccl_bridge_v3.py-237-                        ok = recv_commit_response(
+pearl_stage6_hccl_bridge_v3.py-238-                            dist, device, sequence, len(wire_updates)
+pearl_stage6_hccl_bridge_v3.py-239-                        )
+pearl_stage6_hccl_bridge_v3.py-240-                        if not ok:
+pearl_stage6_hccl_bridge_v3.py-241-                            raise RuntimeError(
+pearl_stage6_hccl_bridge_v3.py-242-                                "Draft batch sidecar returned an HCCL v3 commit error"
+pearl_stage6_hccl_bridge_v3.py-243-                            )
+pearl_stage6_hccl_bridge_v3.py-244-                        base.send_message(conn, {"status": "result"})
+pearl_stage6_hccl_bridge_v3.py-245-                        print(
+pearl_stage6_hccl_bridge_v3.py:246:                            "[stage6-hccl] target bridge commit_batch "
+pearl_stage6_hccl_bridge_v3.py-247-                            f"v3 seq={sequence} updates={len(wire_updates)}",
+pearl_stage6_hccl_bridge_v3.py-248-                            flush=True,
+pearl_stage6_hccl_bridge_v3.py-249-                        )
+pearl_stage6_hccl_bridge_v3.py-250-                        continue
+pearl_stage6_hccl_bridge_v3.py-251-
+pearl_stage6_hccl_bridge_v3.py-252-                    if command != "draft_batch":
+pearl_stage6_hccl_bridge_v3.py-253-                        raise ValueError(
+pearl_stage6_hccl_bridge_v3.py-254-                            f"unknown HCCL bridge command: {command!r}"
+pearl_stage6_hccl_bridge_v3.py-255-                        )
+pearl_stage6_hccl_bridge_v3.py-256-                    raw_requests = message.get("requests")
+pearl_stage6_hccl_bridge_v3.py-257-                    if not isinstance(raw_requests, list) or not raw_requests:
+pearl_stage6_hccl_bridge_v3.py-258-                        raise ValueError(
+--
+pearl_stage6_hccl_bridge_v3.py-331-                        raise RuntimeError(
+pearl_stage6_hccl_bridge_v3.py-332-                            f"invalid HCCL v3 single request header: {header}"
+pearl_stage6_hccl_bridge_v3.py-333-                        )
+pearl_stage6_hccl_bridge_v3.py-334-                    prefix = base.recv_i32(
+pearl_stage6_hccl_bridge_v3.py-335-                        dist, prefix_len, device, src=1
+pearl_stage6_hccl_bridge_v3.py-336-                    )
+pearl_stage6_hccl_bridge_v3.py-337-                    request_id = f"hccl-slot-{slot}"
+pearl_stage6_hccl_bridge_v3.py-338-                    base.send_message(
+pearl_stage6_hccl_bridge_v3.py-339-                        worker_conn,
+pearl_stage6_hccl_bridge_v3.py-340-                        {
+pearl_stage6_hccl_bridge_v3.py-341-                            "cmd": "draft",
+pearl_stage6_hccl_bridge_v3.py-342-                            "request_id": request_id,
+pearl_stage6_hccl_bridge_v3.py:343:                            "prefix_token_ids": prefix,
+pearl_stage6_hccl_bridge_v3.py-344-                            "gamma": gamma,
+pearl_stage6_hccl_bridge_v3.py-345-                        },
+pearl_stage6_hccl_bridge_v3.py-346-                    )
+pearl_stage6_hccl_bridge_v3.py-347-                    response = base.receive_message(worker_reader)
+pearl_stage6_hccl_bridge_v3.py-348-                    if response is None or response.get("status") == "error":
+pearl_stage6_hccl_bridge_v3.py-349-                        base.send_i32(
+pearl_stage6_hccl_bridge_v3.py-350-                            dist,
+pearl_stage6_hccl_bridge_v3.py-351-                            [base.ERROR_MAGIC, sequence, 0],
+pearl_stage6_hccl_bridge_v3.py-352-                            device,
+pearl_stage6_hccl_bridge_v3.py-353-                            dst=1,
+pearl_stage6_hccl_bridge_v3.py-354-                        )
+pearl_stage6_hccl_bridge_v3.py-355-                        continue
+--
+pearl_stage6_hccl_bridge_v3.py-383-                    for _ in range(count):
+pearl_stage6_hccl_bridge_v3.py-384-                        slot, accepted_len, valid_len = base.recv_i32(
+pearl_stage6_hccl_bridge_v3.py-385-                            dist, 3, device, src=1
+pearl_stage6_hccl_bridge_v3.py-386-                        )
+pearl_stage6_hccl_bridge_v3.py-387-                        if slot < 0 or accepted_len < 0 or valid_len < 0:
+pearl_stage6_hccl_bridge_v3.py-388-                            raise RuntimeError(
+pearl_stage6_hccl_bridge_v3.py-389-                                "invalid HCCL v3 commit update: "
+pearl_stage6_hccl_bridge_v3.py-390-                                f"{slot}, {accepted_len}, {valid_len}"
+pearl_stage6_hccl_bridge_v3.py-391-                            )
+pearl_stage6_hccl_bridge_v3.py-392-                        updates.append(
+pearl_stage6_hccl_bridge_v3.py-393-                            {
+pearl_stage6_hccl_bridge_v3.py-394-                                "request_id": f"hccl-slot-{slot}",
+pearl_stage6_hccl_bridge_v3.py:395:                                "length_only": True,
+pearl_stage6_hccl_bridge_v3.py-396-                                "accepted_len": accepted_len,
+pearl_stage6_hccl_bridge_v3.py-397-                                "valid_len": valid_len,
+pearl_stage6_hccl_bridge_v3.py-398-                            }
+pearl_stage6_hccl_bridge_v3.py-399-                        )
+pearl_stage6_hccl_bridge_v3.py-400-
+pearl_stage6_hccl_bridge_v3.py-401-                    base.send_message(
+pearl_stage6_hccl_bridge_v3.py-402-                        worker_conn,
+pearl_stage6_hccl_bridge_v3.py:403:                        {"cmd": "commit_batch", "updates": updates},
+pearl_stage6_hccl_bridge_v3.py-404-                    )
+pearl_stage6_hccl_bridge_v3.py-405-                    response = base.receive_message(worker_reader)
+pearl_stage6_hccl_bridge_v3.py-406-                    if response is None or response.get("status") != "result":
+pearl_stage6_hccl_bridge_v3.py-407-                        base.send_i32(
+pearl_stage6_hccl_bridge_v3.py-408-                            dist,
+pearl_stage6_hccl_bridge_v3.py-409-                            [base.ERROR_MAGIC, sequence, 0],
+pearl_stage6_hccl_bridge_v3.py-410-                            device,
+pearl_stage6_hccl_bridge_v3.py-411-                            dst=1,
+pearl_stage6_hccl_bridge_v3.py-412-                        )
+pearl_stage6_hccl_bridge_v3.py-413-                        continue
+pearl_stage6_hccl_bridge_v3.py-414-
+pearl_stage6_hccl_bridge_v3.py-415-                    base.send_i32(
+pearl_stage6_hccl_bridge_v3.py-416-                        dist,
+pearl_stage6_hccl_bridge_v3.py-417-                        [COMMIT_RESPONSE_MAGIC, sequence, count],
+pearl_stage6_hccl_bridge_v3.py-418-                        device,
+pearl_stage6_hccl_bridge_v3.py-419-                        dst=1,
+pearl_stage6_hccl_bridge_v3.py-420-                    )
+pearl_stage6_hccl_bridge_v3.py-421-                    print(
+pearl_stage6_hccl_bridge_v3.py:422:                        "[stage6-hccl] draft bridge commit_batch "
+pearl_stage6_hccl_bridge_v3.py-423-                        f"v3 seq={sequence} updates={count}",
+pearl_stage6_hccl_bridge_v3.py-424-                        flush=True,
+pearl_stage6_hccl_bridge_v3.py-425-                    )
+pearl_stage6_hccl_bridge_v3.py-426-                    continue
+pearl_stage6_hccl_bridge_v3.py-427-
+pearl_stage6_hccl_bridge_v3.py-428-                if magic != BATCH_REQUEST_MAGIC:
+pearl_stage6_hccl_bridge_v3.py-429-                    raise RuntimeError(
+pearl_stage6_hccl_bridge_v3.py-430-                        f"invalid HCCL v3 request header: {header}"
+pearl_stage6_hccl_bridge_v3.py-431-                    )
+pearl_stage6_hccl_bridge_v3.py-432-                batch_size = field2
+pearl_stage6_hccl_bridge_v3.py-433-                if batch_size <= 0:
+pearl_stage6_hccl_bridge_v3.py-434-                    raise RuntimeError(
+--
+pearl_stage6_hccl_bridge_v3.py-441-                    )
+pearl_stage6_hccl_bridge_v3.py-442-                    if slot < 0 or prefix_len <= 0 or gamma <= 0:
+pearl_stage6_hccl_bridge_v3.py-443-                        raise RuntimeError(
+pearl_stage6_hccl_bridge_v3.py-444-                            "invalid HCCL v3 batch row header: "
+pearl_stage6_hccl_bridge_v3.py-445-                            f"{slot, prefix_len, gamma}"
+pearl_stage6_hccl_bridge_v3.py-446-                        )
+pearl_stage6_hccl_bridge_v3.py-447-                    prefix = base.recv_i32(
+pearl_stage6_hccl_bridge_v3.py-448-                        dist, prefix_len, device, src=1
+pearl_stage6_hccl_bridge_v3.py-449-                    )
+pearl_stage6_hccl_bridge_v3.py-450-                    requests.append(
+pearl_stage6_hccl_bridge_v3.py-451-                        {
+pearl_stage6_hccl_bridge_v3.py-452-                            "request_id": f"hccl-slot-{slot}",
+pearl_stage6_hccl_bridge_v3.py:453:                            "prefix_token_ids": prefix,
+pearl_stage6_hccl_bridge_v3.py-454-                            "gamma": gamma,
+pearl_stage6_hccl_bridge_v3.py-455-                        }
+pearl_stage6_hccl_bridge_v3.py-456-                    )
+pearl_stage6_hccl_bridge_v3.py-457-
+pearl_stage6_hccl_bridge_v3.py-458-                base.send_message(
+pearl_stage6_hccl_bridge_v3.py-459-                    worker_conn,
+pearl_stage6_hccl_bridge_v3.py-460-                    {"cmd": "draft_batch", "requests": requests},
+pearl_stage6_hccl_bridge_v3.py-461-                )
+pearl_stage6_hccl_bridge_v3.py-462-                response = base.receive_message(worker_reader)
+pearl_stage6_hccl_bridge_v3.py-463-                if response is None:
+pearl_stage6_hccl_bridge_v3.py-464-                    raise ConnectionError(
+pearl_stage6_hccl_bridge_v3.py-465-                        "Draft worker closed its proposal socket"

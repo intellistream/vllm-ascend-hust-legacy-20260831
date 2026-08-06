@@ -1,3 +1,4 @@
+# PEARL_STAGE5_NANOPEARL_STRICT_PROPOSER_V1
 # PEARL_STAGE5_NANOPEARL_COMMIT_STATE_PROPOSER_V3
 # PEARL_STAGE5_NANOPEARL_EXPLICIT_VERIFY_PROPOSER_V1
 # PEARL_STAGE5_NANOPEARL_DISCARD_REBASE_PROPOSER_V1
@@ -6,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from pearl_stage5_nanoparl_proposer_v1 import (
@@ -51,6 +53,10 @@ class PearlNanoPearlProposer(_PearlNanoPearlProposerV1):
     def _rebase_batch_for_nano(
         self, requests: list[dict[str, Any]]
     ) -> None:
+        if os.environ.get("PEARL_STAGE5_NANOPEARL_STRICT", "0") == "1":
+            raise RuntimeError(
+                "nano-PEARL strict mode forbids rebase_batch commands"
+            )
         with self._nano_io_lock:
             response = self._request(
                 {"cmd": "rebase_batch", "requests": requests}
@@ -160,4 +166,3 @@ class PearlNanoPearlProposer(_PearlNanoPearlProposerV1):
         for row, result in zip(active_rows, results):
             output[row] = [int(x) for x in result.draft_token_ids[: self.gamma]]
         return output
-

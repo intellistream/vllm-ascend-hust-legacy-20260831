@@ -1,0 +1,195 @@
+engine_exit=0
+===== HCCL MARKERS =====
+4:[stage6-hccl] ready role=target rank=1 visible=7 socket=/tmp/nano_pearl_stage5_hccl_7cysqw3t/target.hccl.sock batch_protocol=v3 stable_slots=1
+5:[stage6-hccl] ready role=draft rank=0 visible=6 worker_socket=/tmp/nano_pearl_stage5_hccl_7cysqw3t/draft.proposal.sock batch_protocol=v3 stable_slots=1
+169:(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] length_only_eligible round=1 batch=1 rows=0-9ffe3b08
+170:(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_start round=1 batch=1 accepted=1 valid=7 length_only=1 wire_length_fields=accepted_len,valid_len
+171:[PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_V3] request_id='pearl-draft-281473107178960-2' target_prefix_len=8 adopted_local_tokens=1 action=update_lengths_only_keep_kv
+172:[PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_V1] request_id='hccl-slot-0' accepted_len=1 draft_len=1 valid_len=7 target_prefix_len=8 action=update_lengths_only_keep_kv
+173:[draft] commit_batch batch_size=1 accepted=1 valid=7 length_only=1 wire_length_fields=accepted_len,valid_len
+174:[stage6-hccl] draft bridge commit_batch v3 seq=3 updates=1
+175:[stage6-hccl] target bridge commit_batch v3 seq=3 updates=1
+176:(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_done round=1 batch=1 rows=0-9ffe3b08
+187:(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] length_only_eligible round=2 batch=1 rows=0-9ffe3b08
+188:(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_start round=2 batch=1 accepted=1 valid=9 length_only=1 wire_length_fields=accepted_len,valid_len
+189:[PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_V3] request_id='pearl-draft-281473107178960-3' target_prefix_len=10 adopted_local_tokens=1 action=update_lengths_only_keep_kv
+190:[PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_V1] request_id='hccl-slot-0' accepted_len=1 draft_len=1 valid_len=9 target_prefix_len=10 action=update_lengths_only_keep_kv
+191:[draft] commit_batch batch_size=1 accepted=1 valid=9 length_only=1 wire_length_fields=accepted_len,valid_len
+192:[stage6-hccl] draft bridge commit_batch v3 seq=6 updates=1
+193:[stage6-hccl] target bridge commit_batch v3 seq=6 updates=1
+194:(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_done round=2 batch=1 rows=0-9ffe3b08
+205:(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_start round=3 batch=1 accepted=0 valid=10 length_only=0 wire_length_fields=accepted_len,valid_len
+206:[PEARL_STAGE5_NANOPEARL_COMMIT_STATE_V1] request_id='hccl-slot-0' accepted_len=0 draft_len=1 valid_len=10 common_len=10 action=update_lengths_keep_kv
+207:[draft] commit_batch batch_size=1 accepted=0 valid=10 length_only=0 wire_length_fields=accepted_len,valid_len
+208:[stage6-hccl] draft bridge commit_batch v3 seq=9 updates=1
+209:[stage6-hccl] target bridge commit_batch v3 seq=9 updates=1
+210:(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_done round=3 batch=1 rows=0-9ffe3b08
+221:(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] length_only_eligible round=4 batch=1 rows=0-9ffe3b08
+222:(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_start round=4 batch=1 accepted=1 valid=12 length_only=1 wire_length_fields=accepted_len,valid_len
+223:[PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_V3] request_id='pearl-draft-281473107178960-5' target_prefix_len=13 adopted_local_tokens=1 action=update_lengths_only_keep_kv
+224:[PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_V1] request_id='hccl-slot-0' accepted_len=1 draft_len=1 valid_len=12 target_prefix_len=13 action=update_lengths_only_keep_kv
+225:[draft] commit_batch batch_size=1 accepted=1 valid=12 length_only=1 wire_length_fields=accepted_len,valid_len
+226:[stage6-hccl] draft bridge commit_batch v3 seq=12 updates=1
+227:[stage6-hccl] target bridge commit_batch v3 seq=12 updates=1
+228:(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_done round=4 batch=1 rows=0-9ffe3b08
+===== LAST 160 LINES =====
+INFO 08-05 13:12:13 [cpu_binding.py:454] The CPU allocation plan is as follows:
+INFO 08-05 13:12:13 [cpu_binding.py:459] NPU6: main=[122 123 124 125 126 127 128 129 130 131 132 133 134 135 136 137 138 139 140 141]  acl=[142]  release=[[143]]
+INFO 08-05 13:12:14 [cpu_binding.py:485] [migrate] NPU:6 -> NUMA [5]
+(EngineCore pid=521174) 2026-08-05 13:12:15,303 - 521174 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.23.1.post1.dev576+g4b7f49349.empty: default 1
+(EngineCore pid=521174) INFO 08-05 13:12:15 [__init__.py:112] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+(EngineCore pid=521174) INFO 08-05 13:12:15 [__init__.py:112] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(EngineCore pid=521174) INFO 08-05 13:12:15 [core.py:114] Initializing a V1 LLM engine (v0.23.1.post1.dev576+g4b7f49349) with config: model='/data/shared-models/Qwen3-8B', speculative_config=SpeculativeConfig(method='custom_class', model=None, num_spec_tokens=1), tokenizer='/data/shared-models/Qwen3-8B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=1024, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, quantization_config=None, enforce_eager=True, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=npu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=/data/shared-models/Qwen3-8B, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.NONE: 0>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'vllm_ascend.compilation.compiler_interface.AscendCompiler', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': 0, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, moe_backend='auto', linear_backend='auto')
+(EngineCore pid=521174) [transformers] `Qwen2VLImageProcessor` requires torchvision (not installed); falling back to `Qwen2VLImageProcessorPil` for backward compatibility. Install torchvision to use the default backend, or import `Qwen2VLImageProcessorPil` directly to silence this warning.
+(EngineCore pid=521174) INFO 08-05 13:12:17 [ascend_config.py:914] Dynamic EPLB is False
+(EngineCore pid=521174) INFO 08-05 13:12:17 [ascend_config.py:915] The number of redundant experts is 0
+INFO 08-05 13:12:19 [cpu_binding.py:584] NPU6(PCI 0000:82:00.0): sq_send_trigger_irq IRQ_ID=3137 -> CPU120, cq_update_irq IRQ_ID=3138 -> CPU121
+INFO 08-05 13:12:19 [core.py:349] init engine (profile, create kv cache, warmup model) took 12.61 s
+(EngineCore pid=521174) INFO 08-05 13:12:19 [parallel_state.py:1692] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://192.168.0.5:46745 backend=hccl
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[stage5] {'status': 'ready', 'role': 'draft', 'model': '/data/shared-models/Qwen3-0.6B', 'visible_device': '6', 'load_elapsed_ms': 45930.99, 'persistent_kv': True, 'enforce_eager': True}
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(EngineCore pid=521174) INFO 08-05 13:12:21 [parallel_state.py:2027] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(EngineCore pid=521174) INFO 08-05 13:12:21 [custom_class_proposer.py:67] Loaded custom proposer class 'pearl_stage5_nanoparl_proposer_v3.PearlNanoPearlProposer' with num_speculative_tokens=1
+(EngineCore pid=521174) WARNING 08-05 13:12:21 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(EngineCore pid=521174) INFO 08-05 13:12:21 [custom_class_proposer.py:67] Loaded custom proposer class 'pearl_stage5_nanoparl_proposer_v3.PearlNanoPearlProposer' with num_speculative_tokens=1
+(EngineCore pid=521174) WARNING 08-05 13:12:21 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(EngineCore pid=521174) INFO 08-05 13:12:21 [model_runner_v1.py:3879] Starting to load model /data/shared-models/Qwen3-8B...
+(EngineCore pid=521174) INFO 08-05 13:12:22 [weight_utils.py:854] Filesystem type for checkpoints: OVERLAY. Checkpoint size: 15.26 GiB. Available RAM: 1227.24 GiB.
+(EngineCore pid=521174) INFO 08-05 13:12:22 [weight_utils.py:877] Auto-prefetch is disabled because the filesystem (OVERLAY) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+(EngineCore pid=521174) Loading safetensors checkpoint shards:   0% Completed | 0/5 [00:00<?, ?it/s]
+(EngineCore pid=521174) Loading safetensors checkpoint shards:  20% Completed | 1/5 [00:02<00:09,  2.41s/it]
+(EngineCore pid=521174) Loading safetensors checkpoint shards:  40% Completed | 2/5 [00:04<00:06,  2.03s/it]
+(EngineCore pid=521174) Loading safetensors checkpoint shards:  60% Completed | 3/5 [00:06<00:04,  2.00s/it]
+(EngineCore pid=521174) Loading safetensors checkpoint shards:  80% Completed | 4/5 [00:07<00:01,  1.88s/it]
+(EngineCore pid=521174) Loading safetensors checkpoint shards: 100% Completed | 5/5 [00:08<00:00,  1.44s/it]
+(EngineCore pid=521174) Loading safetensors checkpoint shards: 100% Completed | 5/5 [00:08<00:00,  1.70s/it]
+(EngineCore pid=521174) 
+(EngineCore pid=521174) INFO 08-05 13:12:31 [default_loader.py:430] Loading weights took 8.58 seconds
+(EngineCore pid=521174) INFO 08-05 13:12:31 [model_runner_v1.py:3904] Loading drafter model...
+(EngineCore pid=521174) INFO 08-05 13:12:32 [model_runner_v1.py:3955] Loading model weights took 15.2859 GB
+(EngineCore pid=521174) INFO 08-05 13:12:32 [model_runner_v1.py:3982] Model runner load_model total time: 10.73 seconds
+(EngineCore pid=521174) INFO 08-05 13:12:32 [interface.py:620] Setting kv cache block size to 128 for CUSTOM backend.
+(EngineCore pid=521174) WARNING 08-05 13:12:32 [single_type_kv_cache_manager.py:1560] Knorm KV compression is disabled because prefix caching is enabled. Set --no-enable-prefix-caching to use Knorm.
+(EngineCore pid=521174) INFO 08-05 13:12:34 [worker.py:803] Available KV cache memory: 40.55 GiB
+(EngineCore pid=521174) INFO 08-05 13:12:34 [kv_cache_utils.py:2203] GPU KV cache size: 295,168 tokens
+(EngineCore pid=521174) INFO 08-05 13:12:34 [kv_cache_utils.py:2204] Maximum concurrency for 1,024 tokens per request: 288.25x
+(EngineCore pid=521174) INFO 08-05 13:12:36 [worker.py:1029] Free memory on device (60.54/60.96 GiB) on startup. Desired GPU memory utilization is (0.92, 56.08 GiB). Actual usage: 15.29 GiB for weights, 0.22 GiB for peak activation, 0.03 GiB for non-torch memory, 0.0 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=43383164518` (40.4 GiB) to fit into requested memory, or `--kv-cache-memory=48170895360` (44.86 GiB) to fully utilize NPU free memory. Current KV cache memory: 40.55 GiB.
+(EngineCore pid=521174) INFO 08-05 13:12:38 [cpu_binding.py:389] [cpu_bind_mode] mode=topo_affinity rank=0 visible_npus=[7]
+(EngineCore pid=521174) INFO 08-05 13:12:38 [cpu_binding.py:454] The CPU allocation plan is as follows:
+(EngineCore pid=521174) INFO 08-05 13:12:38 [cpu_binding.py:459] NPU7: main=[74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93]  acl=[94]  release=[[95]]
+(EngineCore pid=521174) INFO 08-05 13:12:39 [cpu_binding.py:485] [migrate] NPU:7 -> NUMA [3]
+(EngineCore pid=521174) INFO 08-05 13:12:47 [cpu_binding.py:584] NPU7(PCI 0000:42:00.0): sq_send_trigger_irq IRQ_ID=2625 -> CPU72, cq_update_irq IRQ_ID=2626 -> CPU73
+(EngineCore pid=521174) INFO 08-05 13:12:47 [core.py:349] init engine (profile, create kv cache, warmup model) took 14.91 s
+(EngineCore pid=521174) INFO 08-05 13:12:48 [vllm.py:1040] Asynchronous scheduling is disabled.
+(EngineCore pid=521174) WARNING 08-05 13:12:48 [vllm.py:1094] Enforce eager set, disabling torch.compile and CUDAGraphs. This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none
+(EngineCore pid=521174) WARNING 08-05 13:12:48 [vllm.py:1142] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+(EngineCore pid=521174) INFO 08-05 13:12:48 [kernel.py:286] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(EngineCore pid=521174) WARNING 08-05 13:12:48 [vllm.py:1646] max_num_scheduled_tokens is set to 2048 based on the speculative decoding settings. This may lead to suboptimal performance. Consider increasing max_num_batched_tokens to accommodate the additional draft token slots, or decrease num_speculative_tokens or max_num_seqs.
+(EngineCore pid=521174) INFO 08-05 13:12:48 [vllm.py:1320] Cudagraph is disabled under eager mode
+(EngineCore pid=521174) INFO 08-05 13:12:48 [utils.py:203] No quantization signature detected from model files for "/data/shared-models/Qwen3-8B". The model will be loaded as float. To force a quantization method, pass "--quantization <method>" explicitly.
+(EngineCore pid=521174) INFO 08-05 13:12:48 [platform.py:675] Compilation disabled, using eager mode by default
+(EngineCore pid=521174) INFO 08-05 13:12:48 [platform.py:893] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+(EngineCore pid=521174) INFO 08-05 13:12:48 [compilation.py:312] Enabled custom fusions: norm_quant, act_quant
+[stage5] {'status': 'ready', 'role': 'target', 'model': '/data/shared-models/Qwen3-8B', 'visible_device': '7', 'load_elapsed_ms': 74091.663, 'persistent_target_kv': True, 'enforce_eager': True}
+{'status': 'pong', 'role': 'draft'}
+{'status': 'pong', 'role': 'target'}
+[draft] proposal request_id='hccl-slot-0' prefix_len=6 gamma=1 draft_ids=[13]
+[stage6-hccl] draft bridge v3 seq=1 slot=0 draft_len=1
+[stage6-hccl] target bridge v3 seq=1 slot=0 prefix_len=6 draft_len=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] prefetch_start round=1 batch=1 lookahead=1
+[draft] proposal request_id='hccl-slot-0' prefix_len=7 gamma=1 draft_ids=[576]
+[stage6-hccl] draft bridge v3 seq=2 slot=0 draft_len=1
+[stage6-hccl] target bridge v3 seq=2 slot=0 prefix_len=7 draft_len=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] verify_result_received round=1 batch=1 accepted=1 draft=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] length_only_eligible round=1 batch=1 rows=0-9ffe3b08
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_start round=1 batch=1 accepted=1 valid=7 length_only=1 wire_length_fields=accepted_len,valid_len
+[PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_V3] request_id='pearl-draft-281473107178960-2' target_prefix_len=8 adopted_local_tokens=1 action=update_lengths_only_keep_kv
+[PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_V1] request_id='hccl-slot-0' accepted_len=1 draft_len=1 valid_len=7 target_prefix_len=8 action=update_lengths_only_keep_kv
+[draft] commit_batch batch_size=1 accepted=1 valid=7 length_only=1 wire_length_fields=accepted_len,valid_len
+[stage6-hccl] draft bridge commit_batch v3 seq=3 updates=1
+[stage6-hccl] target bridge commit_batch v3 seq=3 updates=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_done round=1 batch=1 rows=0-9ffe3b08
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] pre_verify discard_prefetch round=1 batch=1 refresh_rows=1 consume_rows=0 explicit_rebase_rows=1
+[draft] proposal request_id='hccl-slot-0' prefix_len=8 gamma=1 draft_ids=[6722]
+[stage6-hccl] draft bridge v3 seq=4 slot=0 draft_len=1
+[stage6-hccl] target bridge v3 seq=4 slot=0 prefix_len=8 draft_len=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] prefetch_start round=2 batch=1 lookahead=1
+(EngineCore pid=521174) [PEARL_ACCEPTANCE_DEBUG_V3] round_draft=1 round_accepted=1 round_rejected=0 round_rate=100.00% total_draft=1 total_accepted=1 total_rate=100.00% mean_acceptance_length=2.000
+[draft] proposal request_id='hccl-slot-0' prefix_len=9 gamma=1 draft_ids=[315]
+[stage6-hccl] draft bridge v3 seq=5 slot=0 draft_len=1
+[stage6-hccl] target bridge v3 seq=5 slot=0 prefix_len=9 draft_len=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] verify_result_received round=2 batch=1 accepted=1 draft=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] length_only_eligible round=2 batch=1 rows=0-9ffe3b08
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_start round=2 batch=1 accepted=1 valid=9 length_only=1 wire_length_fields=accepted_len,valid_len
+[PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_V3] request_id='pearl-draft-281473107178960-3' target_prefix_len=10 adopted_local_tokens=1 action=update_lengths_only_keep_kv
+[PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_V1] request_id='hccl-slot-0' accepted_len=1 draft_len=1 valid_len=9 target_prefix_len=10 action=update_lengths_only_keep_kv
+[draft] commit_batch batch_size=1 accepted=1 valid=9 length_only=1 wire_length_fields=accepted_len,valid_len
+[stage6-hccl] draft bridge commit_batch v3 seq=6 updates=1
+[stage6-hccl] target bridge commit_batch v3 seq=6 updates=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_done round=2 batch=1 rows=0-9ffe3b08
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] pre_verify discard_prefetch round=2 batch=1 refresh_rows=1 consume_rows=0 explicit_rebase_rows=1
+[draft] proposal request_id='hccl-slot-0' prefix_len=10 gamma=1 draft_ids=[9625]
+[stage6-hccl] draft bridge v3 seq=7 slot=0 draft_len=1
+[stage6-hccl] target bridge v3 seq=7 slot=0 prefix_len=10 draft_len=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] prefetch_start round=3 batch=1 lookahead=1
+(EngineCore pid=521174) [PEARL_ACCEPTANCE_DEBUG_V3] round_draft=1 round_accepted=1 round_rejected=0 round_rate=100.00% total_draft=2 total_accepted=2 total_rate=100.00% mean_acceptance_length=2.000
+[draft] proposal request_id='hccl-slot-0' prefix_len=11 gamma=1 draft_ids=[374]
+[stage6-hccl] draft bridge v3 seq=8 slot=0 draft_len=1
+[stage6-hccl] target bridge v3 seq=8 slot=0 prefix_len=11 draft_len=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] verify_result_received round=3 batch=1 accepted=0 draft=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_start round=3 batch=1 accepted=0 valid=10 length_only=0 wire_length_fields=accepted_len,valid_len
+[PEARL_STAGE5_NANOPEARL_COMMIT_STATE_V1] request_id='hccl-slot-0' accepted_len=0 draft_len=1 valid_len=10 common_len=10 action=update_lengths_keep_kv
+[draft] commit_batch batch_size=1 accepted=0 valid=10 length_only=0 wire_length_fields=accepted_len,valid_len
+[stage6-hccl] draft bridge commit_batch v3 seq=9 updates=1
+[stage6-hccl] target bridge commit_batch v3 seq=9 updates=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_done round=3 batch=1 rows=0-9ffe3b08
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] pre_verify discard_prefetch round=3 batch=1 refresh_rows=1 consume_rows=0 explicit_rebase_rows=1
+[draft] proposal request_id='hccl-slot-0' prefix_len=11 gamma=1 draft_ids=[374]
+[stage6-hccl] draft bridge v3 seq=10 slot=0 draft_len=1
+[stage6-hccl] target bridge v3 seq=10 slot=0 prefix_len=11 draft_len=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] prefetch_start round=4 batch=1 lookahead=1
+(EngineCore pid=521174) [PEARL_ACCEPTANCE_DEBUG_V3] round_draft=1 round_accepted=0 round_rejected=1 round_rate=0.00% total_draft=3 total_accepted=2 total_rate=66.67% mean_acceptance_length=1.667
+[draft] proposal request_id='hccl-slot-0' prefix_len=12 gamma=1 draft_ids=[21718]
+[stage6-hccl] draft bridge v3 seq=11 slot=0 draft_len=1
+[stage6-hccl] target bridge v3 seq=11 slot=0 prefix_len=12 draft_len=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] verify_result_received round=4 batch=1 accepted=1 draft=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] length_only_eligible round=4 batch=1 rows=0-9ffe3b08
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_start round=4 batch=1 accepted=1 valid=12 length_only=1 wire_length_fields=accepted_len,valid_len
+[PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_V3] request_id='pearl-draft-281473107178960-5' target_prefix_len=13 adopted_local_tokens=1 action=update_lengths_only_keep_kv
+[PEARL_STAGE5_NANOPEARL_LENGTH_ONLY_V1] request_id='hccl-slot-0' accepted_len=1 draft_len=1 valid_len=12 target_prefix_len=13 action=update_lengths_only_keep_kv
+[draft] commit_batch batch_size=1 accepted=1 valid=12 length_only=1 wire_length_fields=accepted_len,valid_len
+[stage6-hccl] draft bridge commit_batch v3 seq=12 updates=1
+[stage6-hccl] target bridge commit_batch v3 seq=12 updates=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] commit_batch_done round=4 batch=1 rows=0-9ffe3b08
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] pre_verify discard_prefetch round=4 batch=1 refresh_rows=1 consume_rows=0 explicit_rebase_rows=1
+[draft] proposal request_id='hccl-slot-0' prefix_len=13 gamma=1 draft_ids=[13]
+[stage6-hccl] draft bridge v3 seq=13 slot=0 draft_len=1
+[stage6-hccl] target bridge v3 seq=13 slot=0 prefix_len=13 draft_len=1
+(EngineCore pid=521174) [PEARL_STAGE5_NANOPEARL_V1] prefetch_start round=5 batch=1 lookahead=1
+(EngineCore pid=521174) [PEARL_ACCEPTANCE_DEBUG_V3] round_draft=1 round_accepted=1 round_rejected=0 round_rate=100.00% total_draft=4 total_accepted=3 total_rate=75.00% mean_acceptance_length=1.750
+[stage5-hccl] prompt 1: 'The capital of France is'; output_ids=[12095, 13, 576, 6722, 315, 15344, 374, 21718]; text=' Paris. The capital of Italy is Rome'; elapsed_ms=1878.338
+[stage5-hccl] Stage-5 HCCL Draft/Target path completed
+[draft] {'status': 'stopped', 'role': 'draft'}
+[target] {'status': 'stopped', 'role': 'target'}
+INFO 08-05 13:13:02 [core_client.py:659] [shutdown] MPClient: start timeout=default
+INFO 08-05 13:13:02 [core_client.py:661] [shutdown] MPClient: stopping engine manager
+(EngineCore pid=521174) INFO 08-05 13:13:02 [core.py:1219] [shutdown] EngineCore: trigger received signal=SIGTERM
+(EngineCore pid=521174) INFO 08-05 13:13:02 [core.py:1338] [shutdown] EngineCore: start mode=abort timeout=0s
+(EngineCore pid=521174) INFO 08-05 13:13:02 [core.py:1369] [shutdown] EngineCore: request processing complete; starting resource teardown
+(EngineCore pid=521174) INFO 08-05 13:13:02 [core.py:1232] [shutdown] EngineCore: exiting busy loop
+[draft] proposal request_id='hccl-slot-0' prefix_len=14 gamma=1 draft_ids=[576]
+[stage6-hccl] draft bridge v3 seq=14 slot=0 draft_len=1
+[stage6-hccl] target bridge v3 seq=14 slot=0 prefix_len=14 draft_len=1
+WARNING 08-05 13:13:02 [parallel_state.py:2228] torch._C._host_emptyCache() only available in Pytorch >=2.5
+(EngineCore pid=521174) WARNING 08-05 13:13:03 [parallel_state.py:2228] torch._C._host_emptyCache() only available in Pytorch >=2.5
+WARNING 08-05 13:13:07 [utils.py:635] [shutdown] Process manager: force killing remaining processes count=1
+INFO 08-05 13:13:07 [core_client.py:663] [shutdown] MPClient: engine manager stopped
+INFO 08-05 13:13:07 [core_client.py:664] [shutdown] MPClient: cleaning up background resources
+INFO 08-05 13:13:07 [core_client.py:666] [shutdown] MPClient: complete
+[target] shutdown compatibility fallback: ignored missing LLMEngine.model_executor after EngineCore cleanup
