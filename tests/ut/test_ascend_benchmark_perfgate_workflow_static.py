@@ -1199,12 +1199,16 @@ def test_benchmark_repo_publish_is_gated_and_reported() -> None:
 
     staging_index = sync_script.index("publication_staging_dir=$(mktemp -d")
     public_validator_index = sync_script.index("validate_public_leaderboard_snapshots.py")
-    trend_validator_index = sync_script.index("validate-trend --input")
+    trend_validator_index = sync_script.index('PYTHONPATH="$BENCHMARK_REPO_DIR/src', public_validator_index)
     git_add_index = sync_script.index('git -C "$BENCHMARK_REPO_DIR" add')
     git_commit_index = sync_script.index('git -C "$BENCHMARK_REPO_DIR" commit')
     git_push_index = sync_script.index('git -C "$BENCHMARK_REPO_DIR" push')
     verify_index = sync_script.index("verify_published_benchmark_repo_state", git_push_index)
     assert staging_index < public_validator_index < trend_validator_index < git_add_index
+    trend_validator_block = sync_script[trend_validator_index:git_add_index]
+    assert "from vllm_hust_benchmark.integration import" in trend_validator_block
+    assert "validate_public_snapshot_trend_admission" in trend_validator_block
+    assert "Path(sys.argv[1])" in trend_validator_block
     assert git_add_index < git_commit_index < git_push_index
     assert git_push_index < verify_index
     assert "write_github_env GITHUB_SNAPSHOT_SYNC_STATUS rejected" in sync_script
@@ -1284,7 +1288,11 @@ fi
 if [[ "$*" == *"validate_public_leaderboard_snapshots.py"* ]]; then
   exit "${FAKE_PUBLIC_VALIDATOR_EXIT:-0}"
 fi
-if [[ "$*" == *"validate-trend"* ]]; then
+if [[ "$1" == "-" && "$#" == "2" ]]; then
+  if [[ -n "${FAKE_TREND_VALIDATOR_INPUTS_FILE:-}" ]]; then
+    printf '%s\n' "$2" >> "$FAKE_TREND_VALIDATOR_INPUTS_FILE"
+  fi
+  cat >/dev/null
   exit "${FAKE_TREND_VALIDATOR_EXIT:-0}"
 fi
 exit 0
@@ -1385,6 +1393,43 @@ def test_snapshot_sync_rejects_invalid_publication_before_git_writes(tmp_path: P
 
     assert result.returncode == 2, result.stderr
     assert "publication admission failed at public snapshot validation" in result.stderr
+    git_commands = git_log.read_text(encoding="utf-8")
+    assert " add " not in f" {git_commands} "
+    assert " commit " not in f" {git_commands} "
+    assert " push " not in f" {git_commands} "
+    assert not (benchmark_repo / "submissions" / "test-run").exists()
+    assert not (benchmark_repo / "leaderboard-data" / "snapshots").exists()
+    assert "GITHUB_SNAPSHOT_SYNC_STATUS=rejected" in (tmp_path / "github-env").read_text(encoding="utf-8")
+
+
+def test_snapshot_sync_rejects_invalid_combined_trend_before_git_writes(
+    tmp_path: Path,
+) -> None:
+    fake_bin, git_log = _write_snapshot_sync_test_doubles(tmp_path)
+    env, benchmark_repo = _snapshot_sync_env(tmp_path, fake_bin, git_log)
+    trend_inputs = tmp_path / "trend-inputs"
+    env.update(
+        {
+            "FAKE_TREND_VALIDATOR_EXIT": "2",
+            "FAKE_TREND_VALIDATOR_INPUTS_FILE": str(trend_inputs),
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT_DIR / "sync_benchmark_snapshots_to_github.sh")],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2, result.stderr
+    assert "publication admission failed at trend validation" in result.stderr
+    recorded_inputs = trend_inputs.read_text(encoding="utf-8").splitlines()
+    assert len(recorded_inputs) == 1
+    trend_input = Path(recorded_inputs[0])
+    assert trend_input.name == "snapshots"
+    assert trend_input.parent.name.startswith(".snapshot-publication.")
     git_commands = git_log.read_text(encoding="utf-8")
     assert " add " not in f" {git_commands} "
     assert " commit " not in f" {git_commands} "
@@ -1510,7 +1555,8 @@ set -euo pipefail
 if [[ "$*" == *"validate_public_leaderboard_snapshots.py"* ]]; then
   exit 0
 fi
-if [[ "$*" == *"validate-trend"* ]]; then
+if [[ "$1" == "-" && "$#" == "2" ]]; then
+  cat >/dev/null
   exit 0
 fi
 
