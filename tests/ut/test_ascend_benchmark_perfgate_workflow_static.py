@@ -827,6 +827,37 @@ def test_plugin_producer_outcome_controls_publication_and_enforcement() -> None:
     assert "perfgate-producer.outputs.status" not in workflow
 
 
+def test_plugin_producer_only_finalizes_checksum_before_website_admission() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    runner = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
+
+    producer_start = workflow.index("- name: Run Plugin perfgate baseline producer")
+    producer_end = workflow.index("- name: Upload Plugin perfgate producer artifact")
+    producer = workflow[producer_start:producer_end]
+    assert 'PUBLISH_TO_BENCHMARK_REPO: "0"' in producer
+    assert 'PUBLISH_TO_HF: "0"' in producer
+
+    finalizer_index = runner.index("\nfinalize_submission_artifact\n")
+    website_publish_index = runner.index(
+        '"${PYTHON_BIN}" -m vllm_hust_benchmark.cli publish-website',
+        finalizer_index,
+    )
+    assert finalizer_index < website_publish_index
+    collector_index = runner.index("collect_submission_evidence()")
+    assert "collect-run-artifact.sh" in runner[collector_index:finalizer_index]
+    assert "submission evidence collector did not finalize STATUS=OK" in runner
+
+    success_gate = "steps.perfgate_producer.outcome == 'success'"
+    for step_name in (
+        "Upload Plugin perfgate producer artifact",
+        "Sanitize runner before Plugin baseline publication",
+        "Publish central Plugin perfgate baseline",
+    ):
+        step_start = workflow.index(f"- name: {step_name}")
+        next_step = workflow.index("\n      - name:", step_start + 1)
+        assert success_gate in workflow[step_start:next_step]
+
+
 def test_ssh_443_configuration_pins_github_host_key() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
