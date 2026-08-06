@@ -1100,6 +1100,31 @@ sync_benchmark_publication_to_github() {
   "$publisher_script"
 }
 
+collect_submission_evidence() {
+  local collector_script="$VLLM_HUST_BENCHMARK_REPO/scripts/collect-run-artifact.sh"
+  local current_vllm_hust_commit
+  local current_plugin_commit
+
+  if [[ ! -f "$collector_script" ]]; then
+    echo "submission evidence collector is missing: $collector_script" >&2
+    return 2
+  fi
+
+  current_vllm_hust_commit=$(git -C "$VLLM_HUST_REPO" rev-parse HEAD 2>/dev/null || true)
+  current_plugin_commit=$(git -C "$VLLM_ASCEND_HUST_REPO" rev-parse HEAD 2>/dev/null || true)
+
+  CURRENT_RUNTIME_PYTHON="$PYTHON_BIN" \
+  CURRENT_VLLM_HUST_REPO="$VLLM_HUST_REPO" \
+  CURRENT_VLLM_ASCEND_HUST_REPO="$VLLM_ASCEND_HUST_REPO" \
+  CURRENT_GIT_COMMIT="$current_vllm_hust_commit" \
+  CURRENT_PLUGIN_GIT_COMMIT="$current_plugin_commit" \
+    bash "$collector_script" "$SUBMISSION_DIR"
+}
+
+finalize_submission_artifact() {
+  collect_submission_evidence
+}
+
 allocate_local_port() {
   "${PYTHON_BIN}" - <<'PY'
 import socket
@@ -1689,7 +1714,11 @@ PY
     --submissions-dir "$SUBMISSIONS_ROOT"
 fi
 
-printf 'OK\n' > "$SUBMISSION_DIR/STATUS"
+finalize_submission_artifact
+if [[ ! -f "$SUBMISSION_DIR/STATUS" ]] || [[ "$(cat "$SUBMISSION_DIR/STATUS")" != "OK" ]]; then
+  echo "submission evidence collector did not finalize STATUS=OK: $SUBMISSION_DIR" >&2
+  exit 2
+fi
 
 if [[ "$PUBLISH_TO_BENCHMARK_REPO" == "1" ]]; then
   sync_benchmark_publication_to_github

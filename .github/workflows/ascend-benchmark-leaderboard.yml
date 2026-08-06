@@ -401,8 +401,6 @@ jobs:
       ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.cleanup_validation_mode || 'normal' }}
       ASCEND_BENCHMARK_CLEANUP_VALIDATION_TIMEOUT_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.cleanup_validation_timeout_minutes || '60' }}
       BENCHMARK_REPO_SLUG: vLLM-HUST/vllm-hust-benchmark
-      BENCHMARK_REPO_GH_TOKEN: ${{ (github.event_name != 'pull_request' && github.event_name != 'issue_comment') && secrets.VLLM_HUST_BENCHMARK_GH_TOKEN || '' }}
-      BENCHMARK_REPO_SSH_KEY: ${{ (github.event_name != 'pull_request' && github.event_name != 'issue_comment') && secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY || '' }}
       ISSUE_COMMENT_PR_NUMBER: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_number || '' }}
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
 
@@ -1108,6 +1106,9 @@ jobs:
           CI_HOME: ${{ env.CI_HOME }}
           CI_RUNTIME_ROOT: ${{ env.CI_RUNTIME_ROOT }}
           RESULT_ROOT: ${{ env.RESULT_ROOT }}
+          # Publication runs in a separate step so the writer credential is
+          # unavailable to the model server and benchmark client.
+          PUBLISH_TO_BENCHMARK_REPO: "0"
         run: |
           set +e
           benchmark_lock_file="${ASCEND_BENCHMARK_LOCK_FILE:-/tmp/vllm-ascend-hust-benchmark.lock}"
@@ -1170,27 +1171,28 @@ jobs:
           PERFGATE_REQUIRED: "1"
         run: bash .github/workflows/scripts/perfgate_validate_required.sh
 
-      - name: Sync GitHub leaderboard snapshots
-        if: ${{ success() && env.SYNC_GITHUB_SNAPSHOTS == '1' && steps.resolve-scenario.outputs.BENCH_SCENARIO_COUNT == '1' }}
+      - name: Sanitize runner before formal benchmark publication
+        if: ${{ success() && (env.PUBLISH_TO_BENCHMARK_REPO == '1' || env.SYNC_GITHUB_SNAPSHOTS == '1') && steps.run_benchmark_ci.outcome == 'success' && steps.resolve-scenario.outputs.BENCH_SCENARIO_COUNT == '1' }}
+        run: |
+          bash .github/workflows/scripts/cleanup_ascend_benchmark_processes.sh current
+          test -z "${GIT_ASKPASS:-}"
+          test -z "${PERFGATE_BASELINE_WRITER_TOKEN:-}"
+
+      - name: Publish formal benchmark to benchmark repository
+        if: ${{ success() && (env.PUBLISH_TO_BENCHMARK_REPO == '1' || env.SYNC_GITHUB_SNAPSHOTS == '1') && steps.run_benchmark_ci.outcome == 'success' && steps.resolve-scenario.outputs.BENCH_SCENARIO_COUNT == '1' }}
         env:
           BENCHMARK_REPO_DIR: ${{ github.workspace }}/vllm-hust-benchmark
           WEBSITE_REPO_DIR: ${{ github.workspace }}/vllm-hust-website
           SNAPSHOT_TARGET_BRANCH: ${{ env.GITHUB_SNAPSHOT_TARGET_BRANCH }}
           BENCHMARK_REPO_SLUG: ${{ env.BENCHMARK_REPO_SLUG }}
-          BENCHMARK_REPO_GH_TOKEN: ${{ env.BENCHMARK_REPO_GH_TOKEN }}
-          BENCHMARK_REPO_SSH_KEY: ${{ env.BENCHMARK_REPO_SSH_KEY }}
+          BENCHMARK_REPO_GH_TOKEN: ${{ secrets.VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN }}
+          CURRENT_SUBMISSION_DIR: ${{ env.SUBMISSION_DIR }}
+          SNAPSHOT_COMMIT_MESSAGE: "chore(data): sync vllm-ascend formal benchmark ${{ env.RUN_ID }}"
         run: |
-          if [[ "${BENCHMARK_EXIT_CODE:-}" != "0" ]]; then
-            echo "Skipping GitHub snapshot sync because BENCHMARK_EXIT_CODE=${BENCHMARK_EXIT_CODE:-unset}."
-            exit 0
-          fi
-
           source scripts/use_single_ascend_env.sh
           export PYTHONPATH="${GITHUB_WORKSPACE}/vllm-hust:${GITHUB_WORKSPACE}/vllm-hust-benchmark/src${PYTHONPATH:+:$PYTHONPATH}"
           PYTHON_BIN="$(hust_resolve_python_bin)"
           export PYTHON_BIN
-          export CURRENT_SUBMISSION_DIR="${SUBMISSION_DIR}"
-          export SNAPSHOT_COMMIT_MESSAGE="chore: sync vllm-ascend benchmark snapshots ${RUN_ID}"
           bash .github/workflows/scripts/sync_benchmark_snapshots_to_github.sh
 
       - name: Cleanup current Ascend benchmark processes
@@ -1518,7 +1520,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ascend-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.BENCHMARK_RESULTS_ROOT }}/
+          path: |
+            ${{ env.RESULT_ROOT }}/
+            ${{ env.BENCHMARK_RESULTS_ROOT }}/ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.ASCEND_HUST_TARGET_SHA_SHORT }}-perfgate/
           if-no-files-found: warn
           retention-days: 14
 

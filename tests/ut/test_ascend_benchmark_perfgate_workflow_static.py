@@ -12,10 +12,13 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import hashlib
 import os
 import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github/workflows/ascend-benchmark-leaderboard.yml"
@@ -543,7 +546,7 @@ def test_main_perfgate_producer_is_reachable_and_pins_dependencies() -> None:
     assert "store-main-perfgate-baseline:" not in workflow
     formal = workflow[formal_start : workflow.index("- name: Performance gate - Stage 1 comparison")]
     assert "!(github.event_name == 'push' && github.ref == 'refs/heads/main')" not in formal
-    snapshot_step = workflow[workflow.index("- name: Sync GitHub leaderboard snapshots") :]
+    snapshot_step = workflow[workflow.index("- name: Publish formal benchmark to benchmark repository") :]
     snapshot_step = snapshot_step[: snapshot_step.index("- name: Release Ascend hardware lock")]
     assert "!(github.event_name == 'push' && github.ref == 'refs/heads/main')" not in snapshot_step
 
@@ -589,11 +592,7 @@ def test_ssh_443_configuration_pins_github_host_key() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
     assert "HostKeyAlias github.com" in workflow
-    assert (
-        "github.com ssh-ed25519 "
-        "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
-        in workflow
-    )
+    assert "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" in workflow
     assert 'chmod 600 "$HOME/.ssh/known_hosts"' in workflow
 
 
@@ -628,11 +627,15 @@ def test_plugin_producer_preserves_measurement_and_provenance_evidence() -> None
     assert '--runtime-manager-sha "$RUNTIME_MANAGER_SHA"' in store
     assert "GIT_ASKPASS" in store
     assert "git worktree" not in store
-    assert workflow.count("secrets.VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN") == 1
     producer = workflow[workflow.index("- name: Run Plugin perfgate baseline producer") :]
     producer = producer[: producer.index("- name: Run benchmark CI and optional formal publish")]
+    assert producer.count("secrets.VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN") == 1
     assert "cleanup_ascend_benchmark_processes.sh current" in producer
     assert "cleanup_ascend_ci_processes.sh" not in workflow
+
+    formal_publish = workflow[workflow.index("- name: Publish formal benchmark to benchmark repository") :]
+    formal_publish = formal_publish[: formal_publish.index("- name: Cleanup current Ascend benchmark processes")]
+    assert formal_publish.count("secrets.VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN") == 1
 
 
 def test_plugin_scheme_c_is_producer_only() -> None:
@@ -904,10 +907,31 @@ def test_benchmark_repo_publish_is_gated_and_reported() -> None:
 
     assert "PUBLISH_TO_BENCHMARK_REPO:" in workflow
     assert "BENCHMARK_REPO_GH_TOKEN:" in workflow
-    assert "BENCHMARK_REPO_SSH_KEY:" in workflow
-    assert "VLLM_ASCEND_HUST_SYNC_BENCHMARK_SNAPSHOTS_TO_GITHUB || '0'" in workflow
-    assert ("github.event_name != 'issue_comment') && secrets.VLLM_HUST_BENCHMARK_GH_TOKEN") in workflow
+    assert "BENCHMARK_REPO_SSH_KEY:" not in workflow
+    assert "secrets.VLLM_HUST_BENCHMARK_GH_TOKEN" not in workflow
     assert "L3 Benchmark Repository Publication" in workflow
+
+    formal_start = workflow.index("- name: Run benchmark CI and optional formal publish")
+    formal_end = workflow.index("- name: Performance gate - Stage 1 comparison")
+    formal_step = workflow[formal_start:formal_end]
+    assert 'PUBLISH_TO_BENCHMARK_REPO: "0"' in formal_step
+    assert "CENTRAL_BASELINE_WRITER_TOKEN" not in formal_step
+
+    publication_start = workflow.index("- name: Publish formal benchmark to benchmark repository")
+    publication_end = workflow.index("- name: Cleanup current Ascend benchmark processes")
+    publication_step = workflow[publication_start:publication_end]
+    assert "env.SYNC_GITHUB_SNAPSHOTS == '1'" in publication_step
+    assert "steps.run_benchmark_ci.outcome == 'success'" in publication_step
+    assert "secrets.VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN" in publication_step
+    assert "BENCHMARK_REPO_SSH_KEY" not in publication_step
+    assert "CURRENT_SUBMISSION_DIR: ${{ env.SUBMISSION_DIR }}" in publication_step
+
+    sanitize_start = workflow.index("- name: Sanitize runner before formal benchmark publication")
+    sanitize_step = workflow[sanitize_start:publication_start]
+    assert "cleanup_ascend_benchmark_processes.sh current" in sanitize_step
+    assert 'test -z "${GIT_ASKPASS:-}"' in sanitize_step
+    assert 'test -z "${PERFGATE_BASELINE_WRITER_TOKEN:-}"' in sanitize_step
+    assert "CENTRAL_BASELINE_WRITER_TOKEN" not in sanitize_step
 
     assert "PUBLISH_TO_BENCHMARK_REPO=${PUBLISH_TO_BENCHMARK_REPO:-0}" in runner_script
     assert "PUBLISH_TO_BENCHMARK_REPO" in runner_script[runner_script.index("SUDO_PRESERVE_ENV_VARS=(") :]
@@ -935,13 +959,57 @@ def test_benchmark_repo_publish_is_gated_and_reported() -> None:
     assert git_add_index < git_commit_index < git_push_index
     assert git_push_index < verify_index
     assert "write_github_env GITHUB_SNAPSHOT_SYNC_STATUS rejected" in sync_script
-    assert "required_submission_files=(leaderboard_manifest.json run_leaderboard.json STATUS)" in sync_script
+    required_files = sync_script[
+        sync_script.index("required_submission_files=(") : sync_script.index("required_snapshot_files=(")
+    ]
+    for required_file in (
+        "leaderboard_manifest.json",
+        "run_leaderboard.json",
+        "env-manifest.json",
+        "pip-packages.json",
+        "checksums.sha256",
+        "STATUS",
+    ):
+        assert required_file in required_files
+    assert "fetch_target_branch_with_retry prepare" in sync_script
+    assert "fetch_target_branch_with_retry verify" in sync_script
+    assert "GIT_ASKPASS" in sync_script
+    assert "x-access-token:${BENCHMARK_REPO_GH_TOKEN}" not in sync_script
     assert "reset_publication_staging()" in sync_script
     assert "reset_publication_staging || return $?" in sync_script
     submit_index = runner_script.index('"${PYTHON_BIN}" -m vllm_hust_benchmark.cli submit')
-    status_index = runner_script.index("printf 'OK\\n' > \"$SUBMISSION_DIR/STATUS\"")
-    sync_index = runner_script.index("sync_benchmark_publication_to_github", status_index)
-    assert submit_index < status_index < sync_index
+    finalizer_index = runner_script.index("finalize_submission_artifact", submit_index)
+    status_guard_index = runner_script.index(
+        "submission evidence collector did not finalize STATUS=OK", finalizer_index
+    )
+    sync_index = runner_script.index("sync_benchmark_publication_to_github", status_guard_index)
+    assert submit_index < finalizer_index < status_guard_index < sync_index
+
+    upload_start = workflow.index("- name: Upload benchmark artifacts")
+    upload_end = workflow.index("- name: Enforce Plugin perfgate producer result")
+    upload_step = workflow[upload_start:upload_end]
+    assert "${{ env.RESULT_ROOT }}/" in upload_step
+    assert "${{ env.ASCEND_HUST_TARGET_SHA_SHORT }}-perfgate/" in upload_step
+    assert "path: ${{ env.BENCHMARK_RESULTS_ROOT }}/" not in upload_step
+
+
+def _write_complete_submission_evidence(submission_dir: Path) -> None:
+    submission_dir.mkdir(parents=True, exist_ok=True)
+    evidence = {
+        "leaderboard_manifest.json": "{}\n",
+        "run_leaderboard.json": "{}\n",
+        "env-manifest.json": '{"git_info": {}}\n',
+        "pip-packages.json": "[]\n",
+    }
+    for file_name, content in evidence.items():
+        (submission_dir / file_name).write_text(content, encoding="utf-8")
+
+    checksums = "".join(
+        f"{hashlib.sha256((submission_dir / file_name).read_bytes()).hexdigest()}  ./{file_name}\n"
+        for file_name in evidence
+    )
+    (submission_dir / "checksums.sha256").write_text(checksums, encoding="utf-8")
+    (submission_dir / "STATUS").write_text("OK\n", encoding="utf-8")
 
 
 def _write_snapshot_sync_test_doubles(tmp_path: Path) -> tuple[Path, Path]:
@@ -959,7 +1027,22 @@ if [[ "${args[0]:-}" == "-C" ]]; then
   args=("${args[@]:2}")
 fi
 if [[ "${args[0]:-}" == "fetch" && -n "${FAKE_GIT_FETCH_EXIT:-}" ]]; then
-  exit "$FAKE_GIT_FETCH_EXIT"
+  if [[ -n "${FAKE_GIT_FETCH_COUNT:-}" ]]; then
+    fetch_count=0
+    if [[ -f "$FAKE_GIT_FETCH_COUNT" ]]; then
+      read -r fetch_count < "$FAKE_GIT_FETCH_COUNT"
+    fi
+    fetch_count=$((fetch_count + 1))
+    printf '%s\n' "$fetch_count" > "$FAKE_GIT_FETCH_COUNT"
+    if (( fetch_count <= ${FAKE_GIT_FETCH_FAILURES:-0} )); then
+      exit "$FAKE_GIT_FETCH_EXIT"
+    fi
+    case ",${FAKE_GIT_FETCH_FAIL_CALLS:-}," in
+      *",${fetch_count},"*) exit "$FAKE_GIT_FETCH_EXIT" ;;
+    esac
+  else
+    exit "$FAKE_GIT_FETCH_EXIT"
+  fi
 fi
 if [[ "${args[0]:-}" == "diff" ]]; then
   exit "${FAKE_GIT_DIFF_EXIT:-1}"
@@ -1009,10 +1092,7 @@ def _snapshot_sync_env(tmp_path: Path, fake_bin: Path, git_log: Path) -> tuple[d
     (benchmark_repo / ".git").mkdir(parents=True)
     (benchmark_repo / "submissions").mkdir()
     current_submission = tmp_path / "current-submission"
-    current_submission.mkdir()
-    (current_submission / "leaderboard_manifest.json").write_text("{}\n", encoding="utf-8")
-    (current_submission / "run_leaderboard.json").write_text("{}\n", encoding="utf-8")
-    (current_submission / "STATUS").write_text("OK\n", encoding="utf-8")
+    _write_complete_submission_evidence(current_submission)
     website_repo = tmp_path / "website-repo"
     (website_repo / "scripts").mkdir(parents=True)
     (website_repo / "scripts" / "aggregate_results.py").write_text("", encoding="utf-8")
@@ -1034,9 +1114,30 @@ def _snapshot_sync_env(tmp_path: Path, fake_bin: Path, git_log: Path) -> tuple[d
             "GITHUB_ACTIONS": "true",
             "BENCHMARK_REPO_GH_TOKEN": "test-token",
             "GITHUB_ENV": str(tmp_path / "github-env"),
+            "SNAPSHOT_FETCH_RETRY_SECONDS": "0",
         },
         benchmark_repo,
     )
+
+
+def test_snapshot_sync_requires_complete_evidence_before_git(tmp_path: Path) -> None:
+    fake_bin, git_log = _write_snapshot_sync_test_doubles(tmp_path)
+    env, benchmark_repo = _snapshot_sync_env(tmp_path, fake_bin, git_log)
+    missing_checksum = Path(env["CURRENT_SUBMISSION_DIR"]) / "checksums.sha256"
+    missing_checksum.unlink()
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT_DIR / "sync_benchmark_snapshots_to_github.sh")],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert f"missing current submission file: {missing_checksum}" in result.stderr
+    assert not git_log.exists()
+    assert not (benchmark_repo / "submissions" / "test-run").exists()
 
 
 def test_snapshot_sync_rejects_invalid_publication_before_git_writes(tmp_path: Path) -> None:
@@ -1076,7 +1177,8 @@ def test_snapshot_sync_stops_when_prepare_step_fails(tmp_path: Path) -> None:
         check=False,
     )
 
-    assert result.returncode == 7, result.stderr
+    assert result.returncode == 1, result.stderr
+    assert "prepare fetch failed after 4 attempts" in result.stderr
     git_commands = git_log.read_text(encoding="utf-8")
     assert " checkout " not in f" {git_commands} "
     assert " add " not in f" {git_commands} "
@@ -1084,6 +1186,101 @@ def test_snapshot_sync_stops_when_prepare_step_fails(tmp_path: Path) -> None:
     assert " push " not in f" {git_commands} "
     assert not (benchmark_repo / "submissions" / "test-run").exists()
     assert "GITHUB_SNAPSHOT_SYNC_STATUS=rejected" in (tmp_path / "github-env").read_text(encoding="utf-8")
+
+
+def test_snapshot_sync_prepare_fetch_recovers_within_bound(tmp_path: Path) -> None:
+    fake_bin, git_log = _write_snapshot_sync_test_doubles(tmp_path)
+    env, _benchmark_repo = _snapshot_sync_env(tmp_path, fake_bin, git_log)
+    fetch_count = tmp_path / "fetch-count"
+    env.update(
+        {
+            "FAKE_GIT_FETCH_COUNT": str(fetch_count),
+            "FAKE_GIT_FETCH_EXIT": "7",
+            "FAKE_GIT_FETCH_FAILURES": "2",
+            "SNAPSHOT_MAX_FETCH_ATTEMPTS": "3",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT_DIR / "sync_benchmark_snapshots_to_github.sh")],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "prepare fetch failed; retrying origin/main" in result.stderr
+    assert fetch_count.read_text(encoding="utf-8").strip() == "4"
+
+
+def test_snapshot_sync_records_push_before_verify_fetch_exhaustion(tmp_path: Path) -> None:
+    fake_bin, git_log = _write_snapshot_sync_test_doubles(tmp_path)
+    env, _benchmark_repo = _snapshot_sync_env(tmp_path, fake_bin, git_log)
+    fetch_count = tmp_path / "verify-fetch-count"
+    env.update(
+        {
+            "FAKE_GIT_FETCH_COUNT": str(fetch_count),
+            "FAKE_GIT_FETCH_EXIT": "7",
+            "FAKE_GIT_FETCH_FAIL_CALLS": "2,3,4",
+            "SNAPSHOT_MAX_FETCH_ATTEMPTS": "3",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT_DIR / "sync_benchmark_snapshots_to_github.sh")],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    github_env = Path(env["GITHUB_ENV"]).read_text(encoding="utf-8")
+
+    assert result.returncode == 1
+    assert "verify fetch failed after 3 attempts" in result.stderr
+    assert "GITHUB_SNAPSHOT_SYNC_STATUS=pushed" in github_env
+    assert "GITHUB_SNAPSHOT_SYNC_VERIFICATION=failed" in github_env
+    assert fetch_count.read_text(encoding="utf-8").strip() == "4"
+
+
+@pytest.mark.parametrize(
+    ("variable", "value", "expected_message"),
+    [
+        (
+            "SNAPSHOT_MAX_FETCH_ATTEMPTS",
+            "0",
+            "SNAPSHOT_MAX_FETCH_ATTEMPTS must be a positive integer",
+        ),
+        (
+            "SNAPSHOT_MAX_FETCH_ATTEMPTS",
+            "invalid",
+            "SNAPSHOT_MAX_FETCH_ATTEMPTS must be a positive integer",
+        ),
+        (
+            "SNAPSHOT_FETCH_RETRY_SECONDS",
+            "-1",
+            "SNAPSHOT_FETCH_RETRY_SECONDS must be a non-negative integer",
+        ),
+    ],
+)
+def test_snapshot_sync_invalid_fetch_retry_config_fails_before_git(
+    tmp_path: Path, variable: str, value: str, expected_message: str
+) -> None:
+    fake_bin, git_log = _write_snapshot_sync_test_doubles(tmp_path)
+    env, _benchmark_repo = _snapshot_sync_env(tmp_path, fake_bin, git_log)
+    env[variable] = value
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT_DIR / "sync_benchmark_snapshots_to_github.sh")],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert expected_message in result.stderr
+    assert not git_log.exists()
 
 
 def test_snapshot_sync_rejects_git_diff_errors(tmp_path: Path) -> None:
@@ -1101,6 +1298,7 @@ def test_snapshot_sync_rejects_git_diff_errors(tmp_path: Path) -> None:
 
     assert result.returncode == 128, result.stderr
     git_commands = git_log.read_text(encoding="utf-8")
+    assert "test-token" not in git_commands
     assert " add " in f" {git_commands} "
     assert " commit " not in f" {git_commands} "
     assert " push " not in f" {git_commands} "
@@ -1124,6 +1322,8 @@ def test_snapshot_sync_publishes_only_after_validating_staged_output(tmp_path: P
     submission_dir = benchmark_repo / "submissions" / "test-run"
     assert (submission_dir / "leaderboard_manifest.json").read_text(encoding="utf-8") == "{}\n"
     assert (submission_dir / "run_leaderboard.json").read_text(encoding="utf-8") == "{}\n"
+    assert (submission_dir / "env-manifest.json").is_file()
+    assert (submission_dir / "checksums.sha256").is_file()
     assert (submission_dir / "STATUS").read_text(encoding="utf-8") == "OK\n"
     snapshot_dir = benchmark_repo / "leaderboard-data" / "snapshots"
     for snapshot_name in (
@@ -1139,6 +1339,7 @@ def test_snapshot_sync_publishes_only_after_validating_staged_output(tmp_path: P
     assert " push " in f" {git_commands} "
     assert "GITHUB_SNAPSHOT_SYNC_STATUS=pushed" in (tmp_path / "github-env").read_text(encoding="utf-8")
     assert "GITHUB_SNAPSHOT_SYNC_VERIFICATION=verified" in (tmp_path / "github-env").read_text(encoding="utf-8")
+    assert not list(benchmark_repo.glob(".benchmark-publisher-askpass.*"))
 
 
 def _run_git(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -1258,10 +1459,7 @@ def test_snapshot_sync_rebuilds_staging_before_push_retry(tmp_path: Path) -> Non
     (website_repo / "scripts" / "aggregate_results.py").write_text("# fake\n", encoding="utf-8")
     hust_repo.mkdir()
     (hust_repo / "pyproject.toml").write_text("[project]\nname='fake'\n", encoding="utf-8")
-    current_submission.mkdir()
-    (current_submission / "leaderboard_manifest.json").write_text("{}\n", encoding="utf-8")
-    (current_submission / "run_leaderboard.json").write_text("{}\n", encoding="utf-8")
-    (current_submission / "STATUS").write_text("OK\n", encoding="utf-8")
+    _write_complete_submission_evidence(current_submission)
 
     env = {
         **os.environ,
@@ -1281,6 +1479,7 @@ def test_snapshot_sync_rebuilds_staging_before_push_retry(tmp_path: Path) -> Non
         "REAL_GIT": shutil.which("git") or "git",
         "RUN_ID": "retry-ci-test",
         "SNAPSHOT_MAX_PUSH_ATTEMPTS": "2",
+        "SNAPSHOT_FETCH_RETRY_SECONDS": "0",
         "SNAPSHOT_PUSH_RETRY_SECONDS": "0",
         "SNAPSHOT_TARGET_BRANCH": "main",
         "VLLM_HUST_REPO_DIR": str(hust_repo),
