@@ -51,6 +51,9 @@ shared page-pool capacity.
 `max_aclgraph_entries` defaults to 16 and bounds both graph-resident workspaces
 and total capture attempts; unseen low-frequency shapes use eager execution
 after the limit is reached, including when earlier captures were rejected.
+FIA graphs are admitted only for the full request batch with uniform per-request
+query lengths. Mixed verification shapes and shrinking batch tails execute
+eagerly without consuming the capture budget.
 
 `elapsed_time` follows upstream benchmark semantics and includes model prefill
 plus generation. ACLGraph capture is warmed outside the reported interval. The
@@ -145,9 +148,10 @@ tokens. `aggregate_mat` is the mean of each request's `num_acc_tokens` segments,
 matching upstream benchmark scripts; these metrics are not interchangeable.
 Per-request metadata also reports `aclgraph_captures`, `aclgraph_replays`, and
 `aclgraph_failed_captures`, plus `aclgraph_capture_attempts` and
-`aclgraph_capacity_fallbacks`. A failed first-replay check disables that graph
-shape and falls back to eager execution instead of returning unchecked tokens.
-The controller aggregates these counters across every draft and target worker.
+`aclgraph_capacity_fallbacks`, plus `aclgraph_shape_fallbacks`. A failed
+first-replay check disables that graph shape and falls back to eager execution
+instead of returning unchecked tokens. The controller aggregates these
+counters across every draft and target worker.
 
 For a target-only comparison against production vLLM-Ascend, use the two
 benchmark entry points below. Both apply the same chat template and emit the

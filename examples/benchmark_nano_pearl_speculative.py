@@ -110,6 +110,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "aclgraph_replays": max(metric["aclgraph_replays"] for metric in metrics),
                     "aclgraph_failed_captures": max(metric["aclgraph_failed_captures"] for metric in metrics),
                     "aclgraph_capacity_fallbacks": max(metric["aclgraph_capacity_fallbacks"] for metric in metrics),
+                    "aclgraph_shape_fallbacks": max(metric["aclgraph_shape_fallbacks"] for metric in metrics),
                     "first_output_token_ids": metrics[0]["completion_token_ids"],
                 }
             )

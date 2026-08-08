@@ -331,6 +331,7 @@ class NativePearlEngine:
             "aclgraph_replays": self.graph_runner.replay_count,
             "aclgraph_failed_captures": self.graph_runner.failed_capture_count,
             "aclgraph_capacity_fallbacks": self.graph_runner.capacity_fallback_count,
+            "aclgraph_shape_fallbacks": self.graph_runner.shape_fallback_count,
         }
 
     def _resolve_num_cache_blocks(self) -> int:
@@ -448,6 +449,7 @@ class NativePearlEngine:
                 raise ValueError("Prompt plus PEARL completion exceeds max_model_len.")
 
         initial_tokens = [[int(token_id) for token_id in prompt] for prompt in prompt_token_ids]
+        self.graph_runner.set_expected_fia_batch_size(len(initial_tokens))
         self._allocate_cache(
             initial_tokens,
             enable_prefix_caching=self.config.enable_prefix_caching,

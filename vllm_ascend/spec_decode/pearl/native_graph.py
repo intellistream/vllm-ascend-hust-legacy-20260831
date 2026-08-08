@@ -279,7 +279,15 @@ class NativeACLGraphRunner:
         self.replay_count = 0
         self.failed_capture_count = 0
         self.capacity_fallback_count = 0
+        self.shape_fallback_count = 0
         self.disabled_entry_keys: set[tuple[str, int]] = set()
+        self.expected_fia_batch_size: int | None = None
+
+    def set_expected_fia_batch_size(self, batch_size: int) -> None:
+        """Restrict FIA capture to the stable, full request batch."""
+        if batch_size <= 0:
+            raise ValueError("Native PEARL FIA batch size must be positive.")
+        self.expected_fia_batch_size = batch_size
 
     def __call__(self, input_ids: torch.Tensor, positions: torch.Tensor, attention_metadata) -> torch.Tensor:
         return self._run(
@@ -321,6 +329,9 @@ class NativeACLGraphRunner:
         if not self.enabled or num_tokens > self.max_graph_tokens:
             return self._execute(input_ids, positions, attention_metadata, output_transform)
         if attention_metadata.use_fused_infer_attention:
+            if not self._is_reusable_fia_shape(attention_metadata.actual_seq_lengths_q):
+                self.shape_fallback_count += 1
+                return self._execute(input_ids, positions, attention_metadata, output_transform)
             query_shape = ",".join(str(length) for length in attention_metadata.actual_seq_lengths_q)
             output_kind = f"{output_kind}|fia:{query_shape}"
             capture_size = num_tokens
@@ -378,6 +389,16 @@ class NativeACLGraphRunner:
                 return reference_output
             entry.runtime_validated = True
         return entry.output[:num_tokens]
+
+    def _is_reusable_fia_shape(self, actual_seq_lengths_q: tuple[int, ...]) -> bool:
+        if not actual_seq_lengths_q:
+            return False
+        if self.expected_fia_batch_size is not None and len(actual_seq_lengths_q) != self.expected_fia_batch_size:
+            return False
+        segment_lengths = (actual_seq_lengths_q[0],) + tuple(
+            current - previous for previous, current in zip(actual_seq_lengths_q, actual_seq_lengths_q[1:])
+        )
+        return len(set(segment_lengths)) == 1
 
     def _execute(
         self,

@@ -727,12 +727,14 @@ def test_public_engine_aggregates_aclgraph_metrics_from_every_worker():
         "aclgraph_replays": 3,
         "aclgraph_failed_captures": 0,
         "aclgraph_capacity_fallbacks": 0,
+        "aclgraph_shape_fallbacks": 0,
     }
     failed_rank_metrics = {
         **base_metrics,
         "aclgraph_capture_attempts": 8,
         "aclgraph_failed_captures": 6,
         "aclgraph_capacity_fallbacks": 9,
+        "aclgraph_shape_fallbacks": 11,
     }
     engine._receive_all = MagicMock(
         return_value=[
@@ -748,6 +750,7 @@ def test_public_engine_aggregates_aclgraph_metrics_from_every_worker():
     assert engine.last_metrics[0]["aclgraph_capture_attempts"] == 8
     assert engine.last_metrics[0]["aclgraph_failed_captures"] == 6
     assert engine.last_metrics[0]["aclgraph_capacity_fallbacks"] == 9
+    assert engine.last_metrics[0]["aclgraph_shape_fallbacks"] == 11
 
 
 def test_greedy_verdict_finds_first_mismatch_in_packed_mixed_windows():
@@ -853,6 +856,46 @@ def test_native_aclgraph_capacity_counts_failed_capture_attempts():
     assert runner.entries == {}
     assert runner.capacity_fallback_count == 1
     runner._execute.assert_called_once()
+
+
+def test_native_aclgraph_skips_dynamic_fia_tail_without_spending_capture_budget():
+    model = MagicMock()
+    metadata = SimpleNamespace(
+        use_fused_infer_attention=True,
+        actual_seq_lengths_q=(1, 2, 3, 4, 5, 6, 7),
+    )
+    with patch("vllm_ascend.spec_decode.pearl.native_graph.torch.npu.Stream"):
+        runner = NativeACLGraphRunner(model, enabled=True, max_graph_entries=1)
+    runner.set_expected_fia_batch_size(8)
+    runner._execute = MagicMock(return_value=torch.tensor([7]))
+
+    output = runner.run_greedy(
+        torch.tensor([1]),
+        torch.tensor([0]),
+        metadata,
+        vocabulary_size=8,
+    )
+
+    assert output.tolist() == [7]
+    assert runner.capture_attempt_count == 0
+    assert runner.shape_fallback_count == 1
+    runner._execute.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("actual_seq_lengths_q", "expected"),
+    [
+        ((1, 2, 3, 4), True),
+        ((4, 8, 12, 16), True),
+        ((1, 5, 6, 10), False),
+    ],
+)
+def test_native_aclgraph_only_reuses_uniform_fia_segments(actual_seq_lengths_q, expected):
+    with patch("vllm_ascend.spec_decode.pearl.native_graph.torch.npu.Stream"):
+        runner = NativeACLGraphRunner(MagicMock(), enabled=True)
+    runner.set_expected_fia_batch_size(4)
+
+    assert runner._is_reusable_fia_shape(actual_seq_lengths_q) is expected
 
 
 def test_native_aclgraph_rejects_nonpositive_entry_capacity():
