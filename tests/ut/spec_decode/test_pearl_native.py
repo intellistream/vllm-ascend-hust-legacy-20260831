@@ -580,11 +580,14 @@ def test_direct_worker_cli_exposes_cache_capacity_controls():
             "0.98",
             "--num-kvcache-blocks",
             "32",
+            "--max-aclgraph-entries",
+            "8",
         ]
     )
 
     assert args.gpu_memory_utilization == 0.98
     assert args.num_kvcache_blocks == 32
+    assert args.max_aclgraph_entries == 8
 
 
 def test_public_pearl_config_maps_upstream_fields_to_native_runtime():
@@ -618,6 +621,7 @@ def test_public_pearl_config_maps_upstream_fields_to_native_runtime():
     assert native.draft_model == "draft"
     assert native.target_tp_size == 2
     assert native.max_num_batched_tokens == 1024
+    assert native.max_aclgraph_entries == 16
     assert native.max_num_seqs == 8
 
 
@@ -698,6 +702,54 @@ def test_public_engine_validates_pipeline_and_benchmark_cache_capacity_before_di
         engine.bench_generate(num_pearl_steps=1)
 
 
+def test_public_engine_aggregates_aclgraph_metrics_from_every_worker():
+    engine = PEARLEngine.__new__(PEARLEngine)
+    engine.config = SimpleNamespace(
+        gamma=4,
+        max_model_len=32,
+        max_num_seqs=1,
+        max_num_batched_tokens=32,
+        worker_timeout_seconds=1,
+    )
+    engine._requests = [(0, [1], SamplingParams(max_tokens=1))]
+    engine.last_metrics = []
+    engine.tokenizer = MagicMock()
+    engine.tokenizer.decode.return_value = "result"
+    engine._send_all = MagicMock()
+    leader_result = {
+        "completion_token_ids": [2],
+        "num_acc_tokens": [1],
+        "elapsed_seconds": 1.0,
+    }
+    base_metrics = {
+        "aclgraph_captures": 2,
+        "aclgraph_capture_attempts": 2,
+        "aclgraph_replays": 3,
+        "aclgraph_failed_captures": 0,
+        "aclgraph_capacity_fallbacks": 0,
+    }
+    failed_rank_metrics = {
+        **base_metrics,
+        "aclgraph_capture_attempts": 8,
+        "aclgraph_failed_captures": 6,
+        "aclgraph_capacity_fallbacks": 9,
+    }
+    engine._receive_all = MagicMock(
+        return_value=[
+            ("result", None, failed_rank_metrics),
+            ("result", [leader_result], base_metrics),
+        ]
+    )
+
+    _, num_tokens, _, elapsed = engine._generate("pearl")
+
+    assert num_tokens == [1]
+    assert elapsed == 1.0
+    assert engine.last_metrics[0]["aclgraph_capture_attempts"] == 8
+    assert engine.last_metrics[0]["aclgraph_failed_captures"] == 6
+    assert engine.last_metrics[0]["aclgraph_capacity_fallbacks"] == 9
+
+
 def test_greedy_verdict_finds_first_mismatch_in_packed_mixed_windows():
     target_tokens = torch.tensor([5, 10, 21, 32, 40, 51, 61, 71, 81])
     draft_tokens = torch.tensor([5, 10, 20, 30, 40, 50, 60, 70, 80])
@@ -754,6 +806,58 @@ def test_native_aclgraph_eager_greedy_path_includes_lm_head_sampling():
 
     assert tokens.tolist() == [3, 5]
     model.compute_greedy_tokens.assert_called_once_with(hidden_states, 8)
+
+
+def test_native_aclgraph_capacity_uses_eager_for_new_shapes():
+    model = MagicMock()
+    metadata = SimpleNamespace(
+        use_fused_infer_attention=True,
+        actual_seq_lengths_q=(1,),
+    )
+    with patch("vllm_ascend.spec_decode.pearl.native_graph.torch.npu.Stream"):
+        runner = NativeACLGraphRunner(model, enabled=True, max_graph_entries=1)
+    runner.entries[("existing", 1)] = MagicMock()
+    runner._execute = MagicMock(return_value=torch.tensor([7]))
+
+    output = runner.run_greedy(
+        torch.tensor([1]),
+        torch.tensor([0]),
+        metadata,
+        vocabulary_size=8,
+    )
+
+    assert output.tolist() == [7]
+    assert runner.capacity_fallback_count == 1
+    runner._execute.assert_called_once()
+
+
+def test_native_aclgraph_capacity_counts_failed_capture_attempts():
+    model = MagicMock()
+    metadata = SimpleNamespace(
+        use_fused_infer_attention=True,
+        actual_seq_lengths_q=(1,),
+    )
+    with patch("vllm_ascend.spec_decode.pearl.native_graph.torch.npu.Stream"):
+        runner = NativeACLGraphRunner(model, enabled=True, max_graph_entries=1)
+    runner.capture_attempt_count = 1
+    runner._execute = MagicMock(return_value=torch.tensor([7]))
+
+    output = runner.run_greedy(
+        torch.tensor([1]),
+        torch.tensor([0]),
+        metadata,
+        vocabulary_size=8,
+    )
+
+    assert output.tolist() == [7]
+    assert runner.entries == {}
+    assert runner.capacity_fallback_count == 1
+    runner._execute.assert_called_once()
+
+
+def test_native_aclgraph_rejects_nonpositive_entry_capacity():
+    with pytest.raises(ValueError, match="max_graph_entries"):
+        NativeACLGraphRunner(MagicMock(), enabled=False, max_graph_entries=0)
 
 
 def test_native_weight_loader_uses_safe_open_keys_api(tmp_path):

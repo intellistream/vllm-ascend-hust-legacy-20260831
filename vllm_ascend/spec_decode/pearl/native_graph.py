@@ -13,6 +13,8 @@ from typing import Any
 import torch
 import torch_npu
 
+DEFAULT_MAX_ACLGRAPH_ENTRIES = 16
+
 
 @dataclass
 class NativePagedAttentionGraphTask:
@@ -257,15 +259,26 @@ def run_native_fused_infer_attention(
 class NativeACLGraphRunner:
     """Capture native Qwen model decode graphs keyed by packed token count."""
 
-    def __init__(self, model, enabled: bool = True, max_graph_tokens: int = 512) -> None:
+    def __init__(
+        self,
+        model,
+        enabled: bool = True,
+        max_graph_tokens: int = 512,
+        max_graph_entries: int = DEFAULT_MAX_ACLGRAPH_ENTRIES,
+    ) -> None:
+        if max_graph_entries <= 0:
+            raise ValueError("Native PEARL max_graph_entries must be positive.")
         self.model = model
         self.enabled = enabled
         self.max_graph_tokens = max_graph_tokens
+        self.max_graph_entries = max_graph_entries
         self.entries: dict[tuple[str, int], NativeACLGraphEntry] = {}
         self.update_stream = torch.npu.Stream() if enabled else None
+        self.capture_attempt_count = 0
         self.capture_count = 0
         self.replay_count = 0
         self.failed_capture_count = 0
+        self.capacity_fallback_count = 0
         self.disabled_entry_keys: set[tuple[str, int]] = set()
 
     def __call__(self, input_ids: torch.Tensor, positions: torch.Tensor, attention_metadata) -> torch.Tensor:
@@ -323,6 +336,10 @@ class NativeACLGraphRunner:
             return self._execute(input_ids, positions, attention_metadata, output_transform)
         entry = self.entries.get(entry_key)
         if entry is None:
+            if len(self.entries) >= self.max_graph_entries or self.capture_attempt_count >= self.max_graph_entries:
+                self.capacity_fallback_count += 1
+                return self._execute(input_ids, positions, attention_metadata, output_transform)
+            self.capture_attempt_count += 1
             output = self._capture(
                 entry_key,
                 padded_input_ids,
@@ -350,6 +367,8 @@ class NativeACLGraphRunner:
                 self.entries.pop(entry_key)
                 self.disabled_entry_keys.add(entry_key)
                 self.failed_capture_count += 1
+                del entry
+                torch.npu.empty_cache()
                 warnings.warn(
                     "Native PEARL disabled an ACLGraph entry whose runtime replay did not match eager execution: "
                     f"{entry_key!r}; {self._mismatch_summary(graph_output, reference_output)}",
@@ -472,6 +491,7 @@ class NativeACLGraphRunner:
             self.entries.pop(entry_key)
             self.disabled_entry_keys.add(entry_key)
             self.failed_capture_count += 1
+            torch.npu.empty_cache()
             warnings.warn(
                 "Native PEARL disabled an ACLGraph entry whose first replay did not match eager execution: "
                 f"{entry_key!r}; {self._mismatch_summary(output, reference_output)}",

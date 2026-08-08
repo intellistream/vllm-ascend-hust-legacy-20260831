@@ -48,6 +48,9 @@ the compatible configuration surface but must be 128; this is the native
 vLLM-Ascend paged-attention constraint rather than the upstream CUDA default.
 `gpu_memory_utilization` or an explicit `num_kvcache_blocks` controls the
 shared page-pool capacity.
+`max_aclgraph_entries` defaults to 16 and bounds both graph-resident workspaces
+and total capture attempts; unseen low-frequency shapes use eager execution
+after the limit is reached, including when earlier captures were rejected.
 
 `elapsed_time` follows upstream benchmark semantics and includes model prefill
 plus generation. ACLGraph capture is warmed outside the reported interval. The
@@ -141,8 +144,10 @@ The JSON summary reports both raw draft-token acceptance and upstream MAT.
 tokens. `aggregate_mat` is the mean of each request's `num_acc_tokens` segments,
 matching upstream benchmark scripts; these metrics are not interchangeable.
 Per-request metadata also reports `aclgraph_captures`, `aclgraph_replays`, and
-`aclgraph_failed_captures`. A failed first-replay check disables that graph
+`aclgraph_failed_captures`, plus `aclgraph_capture_attempts` and
+`aclgraph_capacity_fallbacks`. A failed first-replay check disables that graph
 shape and falls back to eager execution instead of returning unchecked tokens.
+The controller aggregates these counters across every draft and target worker.
 
 For a target-only comparison against production vLLM-Ascend, use the two
 benchmark entry points below. Both apply the same chat template and emit the

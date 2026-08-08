@@ -212,6 +212,7 @@ class NativePearlConfig:
     gpu_memory_utilization: float = 0.9
     kvcache_block_size: int = PAGED_ATTENTION_BLOCK_SIZE
     num_kvcache_blocks: int = -1
+    max_aclgraph_entries: int = 16
     enable_prefix_caching: bool = True
     enforce_eager: bool = False
     seed: int | None = None
@@ -231,6 +232,8 @@ class NativePearlConfig:
             raise ValueError(f"Native Ascend PEARL requires kvcache_block_size={PAGED_ATTENTION_BLOCK_SIZE}.")
         if self.num_kvcache_blocks == 0 or self.num_kvcache_blocks < -1:
             raise ValueError("PEARL num_kvcache_blocks must be positive, or -1 for automatic sizing.")
+        if self.max_aclgraph_entries <= 0:
+            raise ValueError("PEARL max_aclgraph_entries must be positive.")
         if self.seed is not None and self.seed < 0:
             raise ValueError("PEARL sampling seed must be non-negative.")
 
@@ -306,7 +309,11 @@ class NativePearlEngine:
         if config.seed is not None:
             torch.manual_seed(config.seed)
             torch.npu.manual_seed_all(config.seed)
-        self.graph_runner = NativeACLGraphRunner(self.model, enabled=not config.enforce_eager)
+        self.graph_runner = NativeACLGraphRunner(
+            self.model,
+            enabled=not config.enforce_eager,
+            max_graph_entries=config.max_aclgraph_entries,
+        )
         self.tokenizer = AutoTokenizer.from_pretrained(config.draft_model)
         # validate_model_pair above permits a target-only vocabulary suffix and
         # verifies that every draft token keeps the same target token ID.
@@ -315,6 +322,16 @@ class NativePearlEngine:
         if config.gamma == -1:
             self.gamma_profiles = self._profile_auto_gammas()
         dist.barrier()
+
+    def graph_metrics(self) -> dict[str, int]:
+        """Return this worker's cumulative ACLGraph counters."""
+        return {
+            "aclgraph_captures": self.graph_runner.capture_count,
+            "aclgraph_capture_attempts": self.graph_runner.capture_attempt_count,
+            "aclgraph_replays": self.graph_runner.replay_count,
+            "aclgraph_failed_captures": self.graph_runner.failed_capture_count,
+            "aclgraph_capacity_fallbacks": self.graph_runner.capacity_fallback_count,
+        }
 
     def _resolve_num_cache_blocks(self) -> int:
         if self.config.num_kvcache_blocks > 0:
@@ -547,9 +564,7 @@ class NativePearlEngine:
                     "decode_elapsed_seconds": decode_elapsed,
                     "cached_prompt_tokens": self.cache_allocation.num_cached_tokens[sequence_index],
                     "gamma": self.gamma,
-                    "aclgraph_captures": self.graph_runner.capture_count,
-                    "aclgraph_replays": self.graph_runner.replay_count,
-                    "aclgraph_failed_captures": self.graph_runner.failed_capture_count,
+                    **self.graph_metrics(),
                 }
             )
         self._release_cache()
@@ -653,9 +668,7 @@ class NativePearlEngine:
                     "decode_elapsed_seconds": decode_elapsed,
                     "cached_prompt_tokens": self.cache_allocation.num_cached_tokens[sequence_index],
                     "gamma": 0,
-                    "aclgraph_captures": self.graph_runner.capture_count,
-                    "aclgraph_replays": self.graph_runner.replay_count,
-                    "aclgraph_failed_captures": self.graph_runner.failed_capture_count,
+                    **self.graph_metrics(),
                 }
             )
         self._release_cache()
@@ -1374,6 +1387,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--num-kvcache-blocks", type=int, default=-1)
+    parser.add_argument("--max-aclgraph-entries", type=int, default=16)
     parser.add_argument("--disable-prefix-caching", action="store_true")
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--prompt")
@@ -1401,6 +1415,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         max_num_seqs=args.batch_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
         num_kvcache_blocks=args.num_kvcache_blocks,
+        max_aclgraph_entries=args.max_aclgraph_entries,
         enable_prefix_caching=not args.disable_prefix_caching,
         enforce_eager=args.enforce_eager,
         seed=args.seed,

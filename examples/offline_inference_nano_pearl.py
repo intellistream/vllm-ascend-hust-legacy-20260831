@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-num-seqs", type=int, default=8)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--num-kvcache-blocks", type=int, default=-1)
+    parser.add_argument("--max-aclgraph-entries", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--ignore-eos", action="store_true")
@@ -42,6 +43,7 @@ def main() -> None:
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         num_kvcache_blocks=args.num_kvcache_blocks,
+        max_aclgraph_entries=args.max_aclgraph_entries,
         enforce_eager=args.enforce_eager,
         gamma=args.gamma,
         worker_timeout_seconds=args.worker_timeout_seconds,

@@ -21,6 +21,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 8, 32])
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--num-kvcache-blocks", type=int, default=-1)
+    parser.add_argument("--max-aclgraph-entries", type=int, default=16)
     parser.add_argument("--worker-timeout-seconds", type=float, default=300.0)
     parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--enable-prefix-caching", action="store_true")
@@ -65,6 +66,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         num_kvcache_blocks=args.num_kvcache_blocks,
+        max_aclgraph_entries=args.max_aclgraph_entries,
         enable_prefix_caching=args.enable_prefix_caching,
         enforce_eager=args.enforce_eager,
         gamma=args.gamma,
@@ -104,8 +106,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "acceptance_rate": accepted_tokens / verified_tokens if verified_tokens else 0.0,
                     "mean_accept_tokens": sum(metric["mean_accept_tokens"] for metric in metrics) / len(metrics),
                     "aclgraph_captures": max(metric["aclgraph_captures"] for metric in metrics),
+                    "aclgraph_capture_attempts": max(metric["aclgraph_capture_attempts"] for metric in metrics),
                     "aclgraph_replays": max(metric["aclgraph_replays"] for metric in metrics),
                     "aclgraph_failed_captures": max(metric["aclgraph_failed_captures"] for metric in metrics),
+                    "aclgraph_capacity_fallbacks": max(metric["aclgraph_capacity_fallbacks"] for metric in metrics),
                     "first_output_token_ids": metrics[0]["completion_token_ids"],
                 }
             )

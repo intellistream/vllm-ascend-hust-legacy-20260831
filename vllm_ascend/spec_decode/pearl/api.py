@@ -62,6 +62,7 @@ class PEARLConfig:
     gpu_memory_utilization: float = 0.9
     kvcache_block_size: int = PAGED_ATTENTION_BLOCK_SIZE
     num_kvcache_blocks: int = -1
+    max_aclgraph_entries: int = 16
     enforce_eager: bool = False
     gamma: int = -1
     enable_prefix_caching: bool = True
@@ -88,6 +89,8 @@ class PEARLConfig:
             )
         if self.num_kvcache_blocks == 0 or self.num_kvcache_blocks < -1:
             raise ValueError("PEARL num_kvcache_blocks must be positive, or -1 for automatic sizing.")
+        if self.max_aclgraph_entries <= 0:
+            raise ValueError("PEARL max_aclgraph_entries must be positive.")
         if self.gamma == 0 or self.gamma < -1:
             raise ValueError("PEARL gamma must be positive, or -1 for automatic selection.")
         if self.seed is not None and self.seed < 0:
@@ -159,6 +162,7 @@ class PEARLConfig:
             gpu_memory_utilization=self.gpu_memory_utilization,
             kvcache_block_size=self.kvcache_block_size,
             num_kvcache_blocks=self.num_kvcache_blocks,
+            max_aclgraph_entries=self.max_aclgraph_entries,
             enable_prefix_caching=self.enable_prefix_caching,
             enforce_eager=self.enforce_eager,
             seed=self.seed,
@@ -281,6 +285,13 @@ class PEARLEngine:
                 if len(leader_payloads) != 1:
                     raise RuntimeError("PEARL target leader did not return exactly one result batch.")
                 batch_results = leader_payloads[0]
+                worker_graph_metrics = [reply[2] for reply in replies if len(reply) > 2]
+                if worker_graph_metrics:
+                    aggregate_graph_metrics = {
+                        name: max(metrics[name] for metrics in worker_graph_metrics) for name in worker_graph_metrics[0]
+                    }
+                    for result in batch_results:
+                        result.update(aggregate_graph_metrics)
                 total_elapsed += batch_results[0]["elapsed_seconds"] if batch_results else 0.0
                 outputs.extend(zip(request_ids, batch_results))
         except Exception:
@@ -421,7 +432,7 @@ def _pearl_worker(
                 )
             else:
                 raise ValueError(f"Unknown PEARL worker command {mode!r}.")
-            connection.send(("result", result))
+            connection.send(("result", result, engine.graph_metrics()))
     except BaseException:
         with suppress(BrokenPipeError, EOFError):
             connection.send(("error", traceback.format_exc()))
