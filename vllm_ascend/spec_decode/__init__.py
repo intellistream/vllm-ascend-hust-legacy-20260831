@@ -17,8 +17,13 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+
 def get_spec_decode_method(method, vllm_config, device, runner):
-    if method == "ngram":
+    if method == "custom_class":
+        from vllm.v1.spec_decode.custom_class_proposer import create_custom_proposer
+
+        return create_custom_proposer(vllm_config)
+    elif method == "ngram":
         from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 
         return AscendNgramProposer(vllm_config, runner)

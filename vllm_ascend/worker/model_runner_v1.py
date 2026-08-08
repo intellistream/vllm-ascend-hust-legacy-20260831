@@ -651,6 +651,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
+        self.pearl_vocab_projection = None
         self.drafter: (
             AscendNgramProposer
             | AscendNgramProposerNPU
@@ -671,6 +672,7 @@ class NPUModelRunner(GPUModelRunner):
             self.decode_token_per_req = 1 + spec_token_num
             if get_pp_group().is_last_rank:
                 self.drafter = self._get_drafter()
+                self.pearl_vocab_projection = getattr(self.drafter, "pearl_vocab_projection", None)
                 if self.speculative_config.method == "eagle3":
                     assert isinstance(self.drafter, AscendEagleProposer)
                     self.use_aux_hidden_state_outputs = self.drafter.eagle3_use_aux_hidden_state
@@ -1757,6 +1759,17 @@ class NPUModelRunner(GPUModelRunner):
                 )
             else:
                 draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
+        elif self.speculative_config.method == "custom_class":
+            assert isinstance(valid_sampled_token_ids, list), (
+                "sampled_token_ids must be a Python list for custom speculative proposers."
+            )
+            assert self.drafter is not None
+            draft_token_ids = self.drafter.propose(
+                valid_sampled_token_ids,
+                self.input_batch.num_tokens_no_spec,
+                self.input_batch.token_ids_cpu,
+                slot_mappings=None,
+            )
         elif isinstance(self.drafter, AscendNgramProposerNPU):
             batch_size = min(self.input_batch.num_reqs, self.token_ids_gpu_tensor.shape[0])
 
@@ -2505,6 +2518,8 @@ class NPUModelRunner(GPUModelRunner):
             apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
             logits = logits.to(self.device).to(logits_dtype)
 
+        logits = self._project_pearl_target_logits(logits)
+
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
@@ -2691,6 +2706,12 @@ class NPUModelRunner(GPUModelRunner):
             sampling_metadata,
         )
         return sampler_output
+
+    def _project_pearl_target_logits(self, logits: torch.Tensor | None) -> torch.Tensor | None:
+        """Crop a verified PEARL target vocabulary before sampling logits."""
+        if logits is None or self.pearl_vocab_projection is None:
+            return logits
+        return self.pearl_vocab_projection.project_target_logits(logits)
 
     # TODO: remove this func after eagle_proposer is refactored and
     #  _bookkeeping_sync is moved after propose_draft_token_ids
@@ -3677,7 +3698,16 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states = outputs
             dummy_compute_logits(hidden_states)
 
-            if self.drafter and not profile_cpp:
+            if (
+                self.drafter
+                and not profile_cpp
+                and self.speculative_config
+                and (
+                    self.speculative_config.use_eagle()
+                    or self.speculative_config.uses_draft_model()
+                    or self.speculative_config.uses_extract_hidden_states()
+                )
+            ):
                 self.drafter.dummy_run(
                     num_tokens=num_tokens_padded,
                     with_prefill=with_prefill,
@@ -3778,7 +3808,7 @@ class NPUModelRunner(GPUModelRunner):
                 if "sink" in name:
                     self._has_sinks = True
                     break
-            if self.drafter:
+            if self.drafter and hasattr(self.drafter, "load_model"):
                 logger.info("Loading drafter model...")
                 if self.vllm_config.quant_config is not None:
                     patch_load_weights(self.vllm_config)

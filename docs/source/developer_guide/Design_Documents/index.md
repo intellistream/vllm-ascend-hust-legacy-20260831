@@ -11,6 +11,7 @@ ModelRunner_prepare_inputs
 disaggregated_prefill
 eplb_swift_balancer
 ACL_Graph
+nano_pearl
 KV_Cache_Pool_Guide
 add_custom_aclnn_op
 context_parallel

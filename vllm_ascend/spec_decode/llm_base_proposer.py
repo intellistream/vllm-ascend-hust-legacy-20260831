@@ -53,7 +53,12 @@ from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled
+from vllm_ascend.utils import (
+    enable_custom_op,
+    enable_sp,
+    lmhead_tp_enable,
+    shared_expert_dp_enabled,
+)
 
 
 @contextmanager
@@ -1498,6 +1503,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             query_end_loc = cad.query_start_loc[1:] - 1
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
+
+            if not enable_custom_op():
+                raise RuntimeError("CopyAndExpandEagleInputs requires vllm_ascend custom ops")
 
             (
                 out_input_ids,

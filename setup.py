@@ -483,6 +483,10 @@ class cmake_build_ext(build_ext):
 
         # find PYTHON_EXECUTABLE
         check_or_set_default_env(cmake_args, "PYTHON_EXECUTABLE", sys.executable)
+        # Modern CMake FindPython and pybind11 use the CamelCase spelling.
+        # Keep the uppercase value above for older CMake consumers as well.
+        cmake_args += [f"-DPython_EXECUTABLE={python_executable}"]
+        cmake_args += [f"-DPython_INCLUDE_DIR={get_paths()['include']}"]
 
         # find PYTHON_INCLUDE_PATH
         check_or_set_default_env(cmake_args, "PYTHON_INCLUDE_PATH", get_paths()["include"])

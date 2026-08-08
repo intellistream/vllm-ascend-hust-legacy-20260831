@@ -1,0 +1,866 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Tensor-parallel Qwen2, Qwen3, and Llama models for native PEARL.
+
+The upstream nano-PEARL model uses CUDA-only FlashAttention and Triton cache
+write kernels. This port keeps its weight layout and tensor-parallel scheme.
+On Ascend, packed prefill, verification, and decode use the same CANN paged KV
+cache and ``_npu_paged_attention`` operator as the vLLM Ascend attention
+backend. Every packed token carries its own page table and context length,
+matching nano-PEARL's static-batch attention contract. Dense SDPA is retained
+only as the CPU test fallback.
+"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass
+from math import ceil
+from pathlib import Path
+
+import torch
+import torch.distributed as dist
+import torch.nn.functional as F
+import torch_npu
+from safetensors import safe_open
+from torch import nn
+from vllm.model_executor.layers.rotary_embedding import get_rope
+
+from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.spec_decode.pearl.native_graph import (
+    run_native_fused_infer_attention,
+    run_native_paged_attention,
+)
+
+PAGED_ATTENTION_BLOCK_SIZE = 128
+"""CANN's recommended page size for paged attention."""
+
+MIN_PAGED_ATTENTION_BLOCKS = 16
+"""Smallest CANN paged cache allocation accepted by the runtime."""
+
+SUPPORTED_NATIVE_ARCHITECTURES = frozenset(("LlamaForCausalLM", "Qwen2ForCausalLM", "Qwen3ForCausalLM"))
+TENSOR_CORE_TILE_SIZE = 128
+
+
+def _divide(numerator: int, denominator: int) -> int:
+    if numerator % denominator:
+        raise ValueError(f"Cannot partition {numerator} values across TP={denominator}.")
+    return numerator // denominator
+
+
+def prepare_native_model_config(config, tensor_parallel_size: int):
+    """Copy and pad a Hugging Face config using nano-PEARL's dynamic-TP rules."""
+    if tensor_parallel_size <= 0:
+        raise ValueError("PEARL tensor-parallel size must be positive.")
+    architecture = config.architectures[0]
+    if architecture not in SUPPORTED_NATIVE_ARCHITECTURES:
+        raise ValueError(
+            f"Native PEARL does not support architecture {architecture!r}; "
+            f"expected one of {sorted(SUPPORTED_NATIVE_ARCHITECTURES)}."
+        )
+
+    prepared = deepcopy(config)
+    prepared.valid_vocab_size = config.vocab_size
+    prepared.valid_num_attention_heads = config.num_attention_heads
+    prepared.valid_num_key_value_heads = config.num_key_value_heads
+    prepared.valid_intermediate_size = config.intermediate_size
+    prepared.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+    if tensor_parallel_size in (1, 2, 4, 8):
+        for name in ("num_attention_heads", "num_key_value_heads", "intermediate_size", "vocab_size"):
+            if getattr(prepared, name) % tensor_parallel_size:
+                raise ValueError(
+                    f"Cannot partition {name}={getattr(prepared, name)} across TP={tensor_parallel_size}. "
+                    "Upstream nano-PEARL only pads non-power-of-two TP sizes."
+                )
+        return prepared
+
+    if config.num_attention_heads % config.num_key_value_heads:
+        raise ValueError("Dynamic PEARL TP requires an integral grouped-query attention ratio.")
+    gqa_ratio = config.num_attention_heads // config.num_key_value_heads
+    prepared.num_key_value_heads = ceil(config.num_key_value_heads / tensor_parallel_size) * tensor_parallel_size
+    prepared.num_attention_heads = prepared.num_key_value_heads * gqa_ratio
+    prepared.intermediate_size = (
+        ceil(config.intermediate_size / (tensor_parallel_size * TENSOR_CORE_TILE_SIZE))
+        * tensor_parallel_size
+        * TENSOR_CORE_TILE_SIZE
+    )
+    prepared.vocab_size = ceil(config.vocab_size / tensor_parallel_size) * tensor_parallel_size
+    return prepared
+
+
+def _copy_padded_shard(
+    destination: torch.Tensor,
+    loaded: torch.Tensor,
+    *,
+    dim: int,
+    start: int,
+) -> None:
+    """Copy one shard from a logically zero-padded checkpoint tensor."""
+    destination.zero_()
+    available = max(0, min(destination.shape[dim], loaded.shape[dim] - start))
+    if available:
+        destination.narrow(dim, 0, available).copy_(loaded.narrow(dim, start, available))
+
+
+@dataclass(frozen=True)
+class NativeTPContext:
+    """The model-parallel coordinates for one PEARL model group."""
+
+    group: dist.ProcessGroup
+    rank: int
+    size: int
+    leader_rank: int
+
+
+@dataclass(frozen=True)
+class NativeAttentionMetadata:
+    """Paged-cache coordinates for every token in a packed model invocation."""
+
+    slot_mapping: torch.Tensor
+    context_lens: torch.Tensor
+    block_tables: torch.Tensor
+    actual_seq_lengths_q: tuple[int, ...] = ()
+    sequence_lens: tuple[int, ...] = ()
+    request_block_tables: torch.Tensor | None = None
+    attention_mask: torch.Tensor | None = None
+    use_fused_infer_attention: bool = False
+
+
+class NativeRMSNorm(nn.Module):
+    def __init__(self, hidden_size: int, eps: float) -> None:
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if hidden_states.device.type == "npu":
+            if residual is None:
+                normalized, _ = torch_npu.npu_rms_norm(
+                    hidden_states,
+                    self.weight,
+                    self.eps,
+                )
+                return normalized
+            normalized, _, residual = torch_npu.npu_add_rms_norm(
+                hidden_states,
+                residual,
+                self.weight,
+                self.eps,
+            )
+            return normalized, residual
+
+        if residual is not None:
+            residual = hidden_states.float().add(residual.float()).to(hidden_states.dtype)
+            hidden_states = residual
+        variance = hidden_states.float().pow(2).mean(dim=-1, keepdim=True)
+        normalized = hidden_states.float() * torch.rsqrt(variance + self.eps)
+        normalized = normalized.to(hidden_states.dtype) * self.weight
+        if residual is None:
+            return normalized
+        return normalized, residual
+
+
+class NativeColumnLinear(nn.Module):
+    def __init__(self, input_size: int, output_size: int, context: NativeTPContext, bias: bool = False) -> None:
+        super().__init__()
+        self.context = context
+        self.output_size = output_size
+        self.output_size_per_rank = _divide(output_size, context.size)
+        self.weight = nn.Parameter(torch.empty(self.output_size_per_rank, input_size))
+        self.bias = nn.Parameter(torch.empty(self.output_size_per_rank)) if bias else None
+
+    def load_weight(self, loaded_weight: torch.Tensor) -> None:
+        start = self.context.rank * self.output_size_per_rank
+        _copy_padded_shard(self.weight.data, loaded_weight, dim=0, start=start)
+
+    def load_bias(self, loaded_bias: torch.Tensor) -> None:
+        assert self.bias is not None
+        start = self.context.rank * self.output_size_per_rank
+        _copy_padded_shard(self.bias.data, loaded_bias, dim=0, start=start)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return F.linear(hidden_states, self.weight, self.bias)
+
+
+class NativeMergedColumnLinear(NativeColumnLinear):
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: tuple[int, int],
+        context: NativeTPContext,
+        bias: bool = False,
+    ) -> None:
+        self.output_sizes = output_sizes
+        super().__init__(input_size, sum(output_sizes), context, bias=bias)
+
+    def load_shard(self, loaded_weight: torch.Tensor, shard_id: int, is_bias: bool = False) -> None:
+        shard_output_size = self.output_sizes[shard_id]
+        shard_per_rank = _divide(shard_output_size, self.context.size)
+        destination_start = sum(self.output_sizes[:shard_id]) // self.context.size
+        source_start = self.context.rank * shard_per_rank
+        destination = self.bias if is_bias else self.weight
+        assert destination is not None
+        _copy_padded_shard(
+            destination.data.narrow(0, destination_start, shard_per_rank),
+            loaded_weight,
+            dim=0,
+            start=source_start,
+        )
+
+
+class NativeQKVLinear(NativeColumnLinear):
+    def __init__(
+        self,
+        hidden_size: int,
+        head_dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        context: NativeTPContext,
+        bias: bool,
+    ) -> None:
+        self.head_dim = head_dim
+        self.num_heads_per_rank = _divide(num_heads, context.size)
+        self.num_kv_heads_per_rank = _divide(num_kv_heads, context.size)
+        self.q_size = self.num_heads_per_rank * head_dim
+        self.kv_size = self.num_kv_heads_per_rank * head_dim
+        super().__init__(
+            hidden_size,
+            (num_heads + 2 * num_kv_heads) * head_dim,
+            context,
+            bias=bias,
+        )
+
+    def load_shard(self, loaded_weight: torch.Tensor, shard_id: str, is_bias: bool = False) -> None:
+        if shard_id == "q":
+            destination_start, shard_size = 0, self.q_size
+        elif shard_id == "k":
+            destination_start, shard_size = self.q_size, self.kv_size
+        elif shard_id == "v":
+            destination_start, shard_size = self.q_size + self.kv_size, self.kv_size
+        else:
+            raise ValueError(f"Unknown QKV shard {shard_id!r}.")
+        source_start = self.context.rank * shard_size
+        destination = self.bias if is_bias else self.weight
+        assert destination is not None
+        _copy_padded_shard(
+            destination.data.narrow(0, destination_start, shard_size),
+            loaded_weight,
+            dim=0,
+            start=source_start,
+        )
+
+
+class NativeRowLinear(nn.Module):
+    def __init__(self, input_size: int, output_size: int, context: NativeTPContext, bias: bool = False) -> None:
+        super().__init__()
+        self.context = context
+        self.input_size_per_rank = _divide(input_size, context.size)
+        self.weight = nn.Parameter(torch.empty(output_size, self.input_size_per_rank))
+        self.bias = nn.Parameter(torch.empty(output_size)) if bias else None
+
+    def load_weight(self, loaded_weight: torch.Tensor) -> None:
+        start = self.context.rank * self.input_size_per_rank
+        _copy_padded_shard(self.weight.data, loaded_weight, dim=1, start=start)
+
+    def load_bias(self, loaded_bias: torch.Tensor) -> None:
+        assert self.bias is not None
+        if self.context.rank == 0:
+            self.bias.data.copy_(loaded_bias)
+        else:
+            self.bias.data.zero_()
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        output = F.linear(hidden_states, self.weight, self.bias)
+        if self.context.size > 1:
+            dist.all_reduce(output, group=self.context.group)
+        return output
+
+
+class NativeVocabEmbedding(nn.Module):
+    def __init__(self, vocab_size: int, hidden_size: int, context: NativeTPContext) -> None:
+        super().__init__()
+        self.context = context
+        self.vocab_size = vocab_size
+        self.vocab_size_per_rank = _divide(vocab_size, context.size)
+        self.vocab_start = context.rank * self.vocab_size_per_rank
+        self.vocab_end = self.vocab_start + self.vocab_size_per_rank
+        self.weight = nn.Parameter(torch.empty(self.vocab_size_per_rank, hidden_size))
+
+    def load_weight(self, loaded_weight: torch.Tensor) -> None:
+        _copy_padded_shard(self.weight.data, loaded_weight, dim=0, start=self.vocab_start)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if self.context.size == 1:
+            return F.embedding(input_ids, self.weight)
+        in_partition = (input_ids >= self.vocab_start) & (input_ids < self.vocab_end)
+        local_ids = torch.where(in_partition, input_ids - self.vocab_start, torch.zeros_like(input_ids))
+        output = F.embedding(local_ids, self.weight) * in_partition.unsqueeze(-1)
+        dist.all_reduce(output, group=self.context.group)
+        return output
+
+
+class NativeLMHead(NativeVocabEmbedding):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        local_logits = F.linear(hidden_states, self.weight)
+        if self.context.size == 1:
+            return local_logits
+        gathered_logits = [torch.empty_like(local_logits) for _ in range(self.context.size)]
+        dist.all_gather(gathered_logits, local_logits, group=self.context.group)
+        return torch.cat(gathered_logits, dim=-1)
+
+    def greedy(self, hidden_states: torch.Tensor, vocabulary_size: int) -> torch.Tensor:
+        local_vocabulary_size = min(self.vocab_end, vocabulary_size) - self.vocab_start
+        if local_vocabulary_size <= 0:
+            local_values = torch.full(
+                (hidden_states.shape[0],),
+                -torch.inf,
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            local_token_ids = torch.zeros(hidden_states.shape[0], dtype=torch.long, device=hidden_states.device)
+        else:
+            local_logits = F.linear(hidden_states, self.weight[:local_vocabulary_size])
+            local_values, local_token_ids = local_logits.max(dim=-1)
+            local_token_ids += self.vocab_start
+        if self.context.size == 1:
+            return local_token_ids
+
+        local_candidates = torch.stack(
+            (local_values.float(), local_token_ids.float()),
+            dim=-1,
+        )
+        gathered_candidates = [torch.empty_like(local_candidates) for _ in range(self.context.size)]
+        dist.all_gather(gathered_candidates, local_candidates, group=self.context.group)
+        candidates = torch.stack(gathered_candidates, dim=1)
+        values = candidates[..., 0]
+        token_ids = candidates[..., 1].to(dtype=torch.long)
+        winning_rank = values.argmax(dim=-1, keepdim=True)
+        return token_ids.gather(dim=-1, index=winning_rank).squeeze(-1)
+
+
+class NativeRotaryEmbedding(nn.Module):
+    def __init__(self, head_dim: int, max_position_embeddings: int, rope_theta: float) -> None:
+        super().__init__()
+        inverse_frequencies = 1.0 / (rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
+        positions = torch.arange(max_position_embeddings, dtype=torch.float32)
+        frequencies = torch.outer(positions, inverse_frequencies)
+        cache_dtype = torch.get_default_dtype()
+        self.register_buffer("cos", frequencies.cos().to(cache_dtype), persistent=False)
+        self.register_buffer("sin", frequencies.sin().to(cache_dtype), persistent=False)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cos = self.cos[positions].unsqueeze(1)
+        sin = self.sin[positions].unsqueeze(1)
+        if query.device.type == "npu":
+            cos = torch.cat((cos, cos), dim=-1)
+            sin = torch.cat((sin, sin), dim=-1)
+            return (
+                torch_npu.npu_rotary_mul(query, cos, sin),
+                torch_npu.npu_rotary_mul(key, cos, sin),
+            )
+        return _apply_rope(query, cos, sin), _apply_rope(key, cos, sin)
+
+
+def _apply_rope(value: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    first, second = value.float().chunk(2, dim=-1)
+    rotated = torch.cat((first * cos - second * sin, second * cos + first * sin), dim=-1)
+    return rotated.to(value.dtype)
+
+
+class NativeAttention(nn.Module):
+    def __init__(self, config, context: NativeTPContext) -> None:
+        super().__init__()
+        self.context = context
+        architecture = getattr(config, "architectures", ("Qwen2ForCausalLM",))[0]
+        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.num_heads = _divide(config.num_attention_heads, context.size)
+        self.num_kv_heads = _divide(config.num_key_value_heads, context.size)
+        self.scale = self.head_dim**-0.5
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        attention_bias = bool(getattr(config, "attention_bias", False) or getattr(config, "bias", False))
+        qkv_bias = bool(getattr(config, "qkv_bias", attention_bias))
+        if architecture == "Qwen2ForCausalLM":
+            qkv_bias = True
+        self.qkv_proj = NativeQKVLinear(
+            config.hidden_size,
+            self.head_dim,
+            config.num_attention_heads,
+            config.num_key_value_heads,
+            context,
+            bias=qkv_bias,
+        )
+        self.o_proj = NativeRowLinear(
+            config.num_attention_heads * self.head_dim,
+            config.hidden_size,
+            context,
+            bias=attention_bias if architecture == "LlamaForCausalLM" else False,
+        )
+        rope_parameters = getattr(config, "rope_parameters", None) or getattr(config, "rope_scaling", None)
+        rope_type = (rope_parameters or {}).get("rope_type", "default")
+        if rope_type == "default":
+            self.rotary_emb = NativeRotaryEmbedding(
+                self.head_dim,
+                config.max_position_embeddings,
+                getattr(config, "rope_theta", (rope_parameters or {}).get("rope_theta", 10_000.0)),
+            )
+        else:
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                config.max_position_embeddings,
+                is_neox_style=True,
+                rope_parameters=rope_parameters,
+            )
+        if architecture == "Qwen3ForCausalLM":
+            self.q_norm = NativeRMSNorm(self.head_dim, config.rms_norm_eps)
+            self.k_norm = NativeRMSNorm(self.head_dim, config.rms_norm_eps)
+        else:
+            self.q_norm = nn.Identity()
+            self.k_norm = nn.Identity()
+        self.key_cache: torch.Tensor | None = None
+        self.value_cache: torch.Tensor | None = None
+        self.register_buffer("block_table", None, persistent=False)
+        self.register_buffer("context_lens", None, persistent=False)
+        self.uses_paged_attention = False
+        self.max_model_len = 0
+        self.blocks_per_sequence = 0
+        self.block_size = PAGED_ATTENTION_BLOCK_SIZE
+
+    def configure_cache(
+        self,
+        max_model_len: int,
+        max_num_seqs: int = 1,
+        use_paged_attention: bool | None = None,
+        block_size: int = PAGED_ATTENTION_BLOCK_SIZE,
+        num_cache_blocks: int | None = None,
+    ) -> None:
+        """Allocate a vLLM-compatible paged cache when running on an NPU.
+
+        Each static-batch sequence owns a disjoint physical-page range. Rollback
+        only changes its logical length; later rounds overwrite stale slots.
+        """
+        if max_model_len <= 0 or max_num_seqs <= 0 or block_size <= 0:
+            raise ValueError("PEARL cache dimensions must be positive.")
+        device = self.qkv_proj.weight.device
+        if use_paged_attention is None:
+            use_paged_attention = device.type == "npu"
+        self.uses_paged_attention = use_paged_attention
+        self.max_model_len = max_model_len
+        self.block_size = block_size
+        self.blocks_per_sequence = ceil(max_model_len / block_size)
+        required_blocks = self.blocks_per_sequence * max_num_seqs
+        if num_cache_blocks is not None and num_cache_blocks < max_num_seqs:
+            raise ValueError("PEARL needs at least one KV cache block per configured sequence.")
+        num_blocks = max(MIN_PAGED_ATTENTION_BLOCKS, num_cache_blocks or required_blocks)
+        paged_cache_shape = (num_blocks, block_size, self.num_kv_heads, self.head_dim)
+        cache_shape = (
+            paged_cache_shape if self.uses_paged_attention else (num_blocks * block_size,) + paged_cache_shape[2:]
+        )
+        self.key_cache = torch.empty(cache_shape, dtype=self.qkv_proj.weight.dtype, device=device)
+        self.value_cache = torch.empty_like(self.key_cache)
+        if num_blocks >= required_blocks:
+            self.block_table = torch.arange(required_blocks, dtype=torch.int32, device=device).view(
+                max_num_seqs, self.blocks_per_sequence
+            )
+        else:
+            self.block_table = torch.zeros((max_num_seqs, self.blocks_per_sequence), dtype=torch.int32, device=device)
+        # CANN's eager paged-attention ABI takes sequence lengths from CPU.
+        self.context_lens = torch.empty(max_num_seqs, dtype=torch.int32)
+
+    def _write_to_cache(self, slot_mapping: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> None:
+        assert self.key_cache is not None and self.value_cache is not None
+        if self.uses_paged_attention:
+            DeviceOperator.reshape_and_cache(
+                key=key,
+                value=value,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                slot_mapping=slot_mapping.to(dtype=torch.int32),
+            )
+            return
+        self.key_cache[slot_mapping] = key
+        self.value_cache[slot_mapping] = value
+
+    def _paged_attention(self, query: torch.Tensor, metadata: NativeAttentionMetadata) -> torch.Tensor:
+        assert self.key_cache is not None and self.value_cache is not None
+        attended = torch.empty_like(query)
+        run_native_paged_attention(
+            query=query,
+            key_cache=self.key_cache,
+            value_cache=self.value_cache,
+            num_kv_heads=self.num_kv_heads,
+            num_heads=self.num_heads,
+            scale=self.scale,
+            block_table=metadata.block_tables,
+            context_lens=metadata.context_lens,
+            output=attended,
+        )
+        return attended
+
+    def _fused_infer_attention(self, query: torch.Tensor, metadata: NativeAttentionMetadata) -> torch.Tensor:
+        assert self.key_cache is not None and self.value_cache is not None
+        assert metadata.request_block_tables is not None and metadata.attention_mask is not None
+        attended = torch.empty_like(query)
+        run_native_fused_infer_attention(
+            query=query,
+            key_cache=self.key_cache.view(self.key_cache.shape[0], self.block_size, -1),
+            value_cache=self.value_cache.view(self.value_cache.shape[0], self.block_size, -1),
+            attention_mask=metadata.attention_mask,
+            block_table=metadata.request_block_tables,
+            block_size=self.block_size,
+            actual_seq_lengths_q=list(metadata.actual_seq_lengths_q),
+            actual_seq_lengths_kv=list(metadata.sequence_lens),
+            num_kv_heads=self.num_kv_heads,
+            num_heads=self.num_heads,
+            scale=self.scale,
+            output=attended,
+        )
+        return attended
+
+    def _dense_attention(self, query: torch.Tensor, metadata: NativeAttentionMetadata) -> torch.Tensor:
+        assert self.key_cache is not None and self.value_cache is not None
+        attended = torch.empty_like(query)
+        repeat_factor = self.num_heads // self.num_kv_heads
+        for offset in range(query.shape[0]):
+            context_length = int(metadata.context_lens[offset].item())
+            sequence_start = int(metadata.block_tables[offset, 0].item()) * self.block_size
+            keys = self.key_cache[sequence_start : sequence_start + context_length]
+            values = self.value_cache[sequence_start : sequence_start + context_length]
+            keys = keys.transpose(0, 1).repeat_interleave(repeat_factor, dim=0)
+            values = values.transpose(0, 1).repeat_interleave(repeat_factor, dim=0)
+            attended[offset] = (
+                F.scaled_dot_product_attention(
+                    query[offset].unsqueeze(0).unsqueeze(2),
+                    keys.unsqueeze(0),
+                    values.unsqueeze(0),
+                    dropout_p=0.0,
+                    is_causal=False,
+                    scale=self.scale,
+                )
+                .squeeze(0)
+                .squeeze(1)
+            )
+        return attended
+
+    def _default_metadata(self, positions: torch.Tensor) -> NativeAttentionMetadata:
+        assert self.block_table is not None
+        return NativeAttentionMetadata(
+            slot_mapping=positions.to(dtype=torch.long),
+            context_lens=(positions + 1).to(device="cpu", dtype=torch.int32),
+            block_tables=self.block_table[:1].expand(positions.shape[0], -1),
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        attention_metadata: NativeAttentionMetadata | None = None,
+    ) -> torch.Tensor:
+        if self.key_cache is None or self.value_cache is None:
+            raise RuntimeError("Configure the PEARL KV cache before running the model.")
+        qkv = self.qkv_proj(hidden_states)
+        query, key, value = qkv.split((self.q_size, self.kv_size, self.kv_size), dim=-1)
+        query = self.q_norm(query.view(-1, self.num_heads, self.head_dim))
+        key = self.k_norm(key.view(-1, self.num_kv_heads, self.head_dim))
+        value = value.view(-1, self.num_kv_heads, self.head_dim)
+        query, key = self.rotary_emb(positions, query, key)
+        metadata = attention_metadata or self._default_metadata(positions)
+        self._write_to_cache(metadata.slot_mapping, key, value)
+
+        if metadata.use_fused_infer_attention:
+            attended = self._fused_infer_attention(query, metadata)
+        elif self.uses_paged_attention:
+            attended = self._paged_attention(query, metadata)
+        else:
+            attended = self._dense_attention(query, metadata)
+        return self.o_proj(attended.flatten(1))
+
+
+class NativeQwen2MLP(nn.Module):
+    def __init__(self, config, context: NativeTPContext) -> None:
+        super().__init__()
+        self.gate_up_proj = NativeMergedColumnLinear(
+            config.hidden_size,
+            (config.intermediate_size, config.intermediate_size),
+            context,
+            bias=bool(getattr(config, "mlp_bias", False)),
+        )
+        self.down_proj = NativeRowLinear(
+            config.intermediate_size,
+            config.hidden_size,
+            context,
+            bias=bool(getattr(config, "mlp_bias", False)),
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        gate_up = self.gate_up_proj(hidden_states)
+        if gate_up.device.type == "npu":
+            return self.down_proj(torch_npu.npu_swiglu(gate_up))
+        gate, up = gate_up.chunk(2, dim=-1)
+        return self.down_proj(F.silu(gate) * up)
+
+
+class NativeQwen2DecoderLayer(nn.Module):
+    def __init__(self, config, context: NativeTPContext) -> None:
+        super().__init__()
+        self.self_attn = NativeAttention(config, context)
+        self.input_layernorm = NativeRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.post_attention_layernorm = NativeRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.mlp = NativeQwen2MLP(config, context)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        attention_metadata: NativeAttentionMetadata | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states = self.self_attn(positions, hidden_states, attention_metadata)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual
+
+
+class NativeQwen2ForCausalLM(nn.Module):
+    """Upstream-supported decoder model with a persistent paged KV cache."""
+
+    packed_modules_mapping = {
+        "q_proj": ("qkv_proj", "q"),
+        "k_proj": ("qkv_proj", "k"),
+        "v_proj": ("qkv_proj", "v"),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
+    def __init__(self, config, context: NativeTPContext) -> None:
+        super().__init__()
+        self.config = config
+        self.context = context
+        self.embed_tokens = NativeVocabEmbedding(config.vocab_size, config.hidden_size, context)
+        self.layers = nn.ModuleList(NativeQwen2DecoderLayer(config, context) for _ in range(config.num_hidden_layers))
+        self.norm = NativeRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.lm_head = NativeLMHead(config.vocab_size, config.hidden_size, context)
+        self.register_buffer("attention_mask", None, persistent=False)
+        if getattr(config, "tie_word_embeddings", False):
+            self.lm_head.weight = self.embed_tokens.weight
+
+    def configure_cache(
+        self,
+        max_model_len: int,
+        max_num_seqs: int = 1,
+        block_size: int = PAGED_ATTENTION_BLOCK_SIZE,
+        num_cache_blocks: int | None = None,
+    ) -> None:
+        for layer in self.layers:
+            layer.self_attn.configure_cache(
+                max_model_len,
+                max_num_seqs,
+                block_size=block_size,
+                num_cache_blocks=num_cache_blocks,
+            )
+        if self.embed_tokens.weight.device.type == "npu" and self.attention_mask is None:
+            self.attention_mask = torch.triu(
+                torch.ones(2048, 2048, dtype=torch.int8, device=self.embed_tokens.weight.device),
+                diagonal=1,
+            )
+
+    def make_attention_metadata(
+        self,
+        sequence_ids: list[int],
+        positions: list[int],
+        block_tables: list[list[int]] | torch.Tensor | None = None,
+        slot_mapping: list[int] | None = None,
+        use_fused_infer_attention: bool = False,
+    ) -> tuple[torch.Tensor, NativeAttentionMetadata]:
+        if len(sequence_ids) != len(positions):
+            raise ValueError("Every packed token needs a sequence ID and position.")
+        attention = self.layers[0].self_attn
+        assert attention.block_table is not None
+        device = self.embed_tokens.weight.device
+        sequence_tensor = torch.tensor(sequence_ids, dtype=torch.long, device=device)
+        position_tensor = torch.tensor(positions, dtype=torch.long, device=device)
+        if block_tables is None:
+            physical_block_tables = attention.block_table
+        elif isinstance(block_tables, torch.Tensor):
+            physical_block_tables = block_tables.to(device=device, dtype=torch.int32)
+        else:
+            if not block_tables or any(len(table) != attention.blocks_per_sequence for table in block_tables):
+                raise ValueError(
+                    f"Every PEARL block table must contain {attention.blocks_per_sequence} physical pages."
+                )
+            for sequence_id, position in zip(sequence_ids, positions):
+                logical_block = position // attention.block_size
+                if sequence_id >= len(block_tables) or block_tables[sequence_id][logical_block] < 0:
+                    raise RuntimeError("PEARL attention referenced an unallocated KV cache page.")
+            physical_block_tables = torch.tensor(block_tables, dtype=torch.int32, device=device)
+        if physical_block_tables.ndim != 2 or physical_block_tables.shape[1] != attention.blocks_per_sequence:
+            raise ValueError(f"Every PEARL block table must contain {attention.blocks_per_sequence} physical pages.")
+        if physical_block_tables.shape[0] <= max(sequence_ids):
+            raise ValueError("PEARL block tables do not cover every packed sequence ID.")
+        if slot_mapping is not None and len(slot_mapping) != len(positions):
+            raise ValueError("Every packed token needs one PEARL KV slot.")
+        if slot_mapping is None:
+            logical_blocks = torch.div(position_tensor, attention.block_size, rounding_mode="floor")
+            physical_blocks = physical_block_tables[sequence_tensor, logical_blocks]
+            slot_mapping_tensor = physical_blocks * attention.block_size + position_tensor.remainder(
+                attention.block_size
+            )
+        else:
+            slot_mapping_tensor = torch.tensor(slot_mapping, dtype=torch.int32, device=device)
+        query_lengths: list[int] = []
+        request_sequence_ids: list[int] = []
+        sequence_lens: list[int] = []
+        for sequence_id, position in zip(sequence_ids, positions):
+            if not request_sequence_ids or request_sequence_ids[-1] != sequence_id:
+                if sequence_id in request_sequence_ids:
+                    raise ValueError("Packed PEARL tokens for a request must be contiguous.")
+                request_sequence_ids.append(sequence_id)
+                query_lengths.append(0)
+                sequence_lens.append(0)
+            query_lengths[-1] += 1
+            sequence_lens[-1] = position + 1
+        cumulative_query_lengths: list[int] = []
+        for query_length in query_lengths:
+            previous_length = cumulative_query_lengths[-1] if cumulative_query_lengths else 0
+            cumulative_query_lengths.append(query_length + previous_length)
+        request_sequence_tensor = torch.tensor(request_sequence_ids, dtype=torch.long, device=device)
+        metadata = NativeAttentionMetadata(
+            slot_mapping=slot_mapping_tensor,
+            context_lens=torch.tensor([position + 1 for position in positions], dtype=torch.int32),
+            block_tables=physical_block_tables.index_select(0, sequence_tensor),
+            actual_seq_lengths_q=tuple(cumulative_query_lengths),
+            sequence_lens=tuple(sequence_lens),
+            request_block_tables=physical_block_tables.index_select(0, request_sequence_tensor),
+            attention_mask=self.attention_mask,
+            use_fused_infer_attention=use_fused_infer_attention,
+        )
+        return position_tensor, metadata
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        attention_metadata: NativeAttentionMetadata | None = None,
+    ) -> torch.Tensor:
+        hidden_states = self.embed_tokens(input_ids)
+        residual = None
+        for layer in self.layers:
+            hidden_states, residual = layer(positions, hidden_states, residual, attention_metadata)
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.lm_head(hidden_states)
+
+    def compute_greedy_tokens(self, hidden_states: torch.Tensor, vocabulary_size: int) -> torch.Tensor:
+        return self.lm_head.greedy(hidden_states, vocabulary_size)
+
+
+def build_native_model(
+    config,
+    context: NativeTPContext,
+    max_model_len: int,
+    max_num_seqs: int = 1,
+    *,
+    configure_cache: bool = True,
+    block_size: int = PAGED_ATTENTION_BLOCK_SIZE,
+    num_cache_blocks: int | None = None,
+) -> NativeQwen2ForCausalLM:
+    """Construct an upstream-supported model directly on NPU."""
+    config = prepare_native_model_config(config, context.size)
+    original_dtype = torch.get_default_dtype()
+    original_device = torch.get_default_device()
+    model_dtype = getattr(config, "torch_dtype", torch.bfloat16)
+    if isinstance(model_dtype, str):
+        model_dtype = getattr(torch, model_dtype)
+    try:
+        torch.set_default_dtype(model_dtype)
+        torch.set_default_device("npu")
+        model = NativeQwen2ForCausalLM(config, context)
+    finally:
+        torch.set_default_dtype(original_dtype)
+        torch.set_default_device(original_device)
+    if configure_cache:
+        model.configure_cache(max_model_len, max_num_seqs, block_size, num_cache_blocks)
+    return model
+
+
+def build_native_qwen2_model(
+    config,
+    context: NativeTPContext,
+    max_model_len: int,
+    max_num_seqs: int = 1,
+) -> NativeQwen2ForCausalLM:
+    """Backward-compatible alias for the original Qwen2-only builder."""
+    return build_native_model(config, context, max_model_len, max_num_seqs)
+
+
+def load_native_model_weights(model: NativeQwen2ForCausalLM, model_path: str) -> None:
+    """Load supported Hugging Face safetensors with padded TP sharding."""
+    weight_files = sorted(Path(model_path).glob("*.safetensors"))
+    if not weight_files:
+        raise FileNotFoundError(f"No safetensors checkpoints found under {model_path!r}.")
+    packed_mapping = model.packed_modules_mapping
+    for weight_file in weight_files:
+        with safe_open(weight_file, framework="pt", device="cpu") as checkpoint:
+            weight_names = checkpoint.keys()
+            for weight_name in weight_names:
+                loaded_weight = checkpoint.get_tensor(weight_name)
+                parameter_base_name = weight_name.removeprefix("model.")
+                packed_match = next(
+                    (
+                        (source, replacement, shard_id)
+                        for source, (replacement, shard_id) in packed_mapping.items()
+                        if source in weight_name
+                    ),
+                    None,
+                )
+                try:
+                    if packed_match is not None:
+                        source, replacement, shard_id = packed_match
+                        parameter_name = parameter_base_name.replace(source, replacement)
+                        if replacement == "qkv_proj":
+                            model.get_submodule(parameter_name.rsplit(".", 1)[0]).load_shard(
+                                loaded_weight,
+                                shard_id,
+                                parameter_name.endswith(".bias"),
+                            )
+                        else:
+                            model.get_submodule(parameter_name.rsplit(".", 1)[0]).load_shard(
+                                loaded_weight,
+                                shard_id,
+                                parameter_name.endswith(".bias"),
+                            )
+                    else:
+                        parameter = model.get_parameter(parameter_base_name)
+                        module = model.get_submodule(parameter_base_name.rsplit(".", 1)[0])
+                        if parameter_base_name.endswith(".weight") and hasattr(module, "load_weight"):
+                            module.load_weight(loaded_weight)
+                        elif parameter_base_name.endswith(".bias") and hasattr(module, "load_bias"):
+                            module.load_bias(loaded_weight)
+                        else:
+                            parameter.data.copy_(loaded_weight)
+                except AttributeError:
+                    # HF checkpoints may retain rotary buffers that are derived
+                    # from config in this implementation.
+                    if "rotary_emb" not in weight_name:
+                        raise
+
+
+def load_native_qwen2_weights(model: NativeQwen2ForCausalLM, model_path: str) -> None:
+    """Backward-compatible alias for the original Qwen2-only loader."""
+    load_native_model_weights(model, model_path)
