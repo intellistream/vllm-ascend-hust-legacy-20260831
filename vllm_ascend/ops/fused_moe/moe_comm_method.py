@@ -119,10 +119,19 @@ class MoECommMethod(ABC):
         hidden_states = self.prepare_finalize.finalize(hidden_states, reduce_results, padded_hidden_states_shape)
         return hidden_states
 
+    def _maybe_apply_moe_offload_plan(
+        self,
+        fused_experts_input: MoEFusedExpertsInput,
+    ) -> MoEFusedExpertsInput:
+        """Extension point for an optional external MoE offload runtime."""
+        return fused_experts_input
+
     def fused_experts(
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ):
+        fused_experts_input = self._maybe_apply_moe_offload_plan(fused_experts_input)
+
         # Check constraints
         assert fused_experts_input.hidden_states.dtype in [
             torch.float32,

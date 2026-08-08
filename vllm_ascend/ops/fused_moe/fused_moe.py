@@ -49,6 +49,11 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 
+
+def get_moe_offload_runtime():
+    """Return an optional runtime injected by an external MoE offload plugin."""
+    return None
+
 if vllm_version_is("0.21.0"):
     from vllm.model_executor.layers.fused_moe.layer import get_compressed_expert_map
 else:
@@ -232,6 +237,17 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w1_scale_bias = None
             w2_scale_bias = None
 
+        offload_runtime = get_moe_offload_runtime()
+        offload_enabled = False
+        offload_step_id = -1
+        layer_id = int(getattr(layer, "layer_id", -1))
+        if offload_runtime is not None:
+            offload_enabled = bool(
+                offload_runtime.should_use_fixed_slot_plan_for_layer(layer_id)
+            )
+            if offload_enabled:
+                offload_step_id = int(offload_runtime.next_step_id())
+
         final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
@@ -255,6 +271,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 swiglu_limit=layer.swiglu_limit,
+                offload_enabled=offload_enabled,
+                offload_layer_id=layer_id,
+                offload_num_logical_experts=num_logical_experts,
+                offload_expected_device_type=x.device.type,
+                offload_step_id=offload_step_id,
             )
         )
         if zero_expert_num > 0 and zero_expert_type is not None:

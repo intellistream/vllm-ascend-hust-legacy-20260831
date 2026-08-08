@@ -56,6 +56,18 @@ class MoEWeights:
 
 
 @dataclass(frozen=True, slots=True)
+class MoEOffloadParams:
+    """Optional metadata supplied by an external MoE offload runtime."""
+
+    enabled: bool = False
+    profile_only: bool = False
+    layer_id: int = -1
+    num_logical_experts: int = -1
+    expected_device_type: str = "npu"
+    step_id: int = -1
+
+
+@dataclass(frozen=True, slots=True)
 class MoEFusedExpertsInput:
     """Top-level input for the routed experts pipeline."""
 
@@ -69,6 +81,7 @@ class MoEFusedExpertsInput:
     need_trans: bool = False
     dynamic_eplb: bool = False
     swiglu_limit: float = 0.0
+    offload: MoEOffloadParams | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +159,7 @@ class MoEMlpComputeInput:
 __all__ = [
     "MoEPrepareOutput",
     "MoEWeights",
+    "MoEOffloadParams",
     "MoEFusedExpertsInput",
     "MoETokenDispatchInput",
     "MoEMC2CombineMetadata",
