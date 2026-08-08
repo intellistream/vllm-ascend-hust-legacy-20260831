@@ -39,6 +39,9 @@ else:
     triton_q_rms = None  # type: ignore
 
 
+_MOE_INIT_ROUTING_CUSTOM_AVAILABLE = True
+
+
 class BaseDeviceAdaptor:
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
@@ -59,16 +62,47 @@ class BaseDeviceAdaptor:
         active_expert_range=None,
         quant_mode: int = -1,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
+        global _MOE_INIT_ROUTING_CUSTOM_AVAILABLE
+
+        if _MOE_INIT_ROUTING_CUSTOM_AVAILABLE:
+            try:
+                return torch.ops._C_ascend.npu_moe_init_routing_custom(
+                    hidden_states,
+                    topk_ids,
+                    scale=scale,
+                    active_num=active_num,
+                    expert_num=expert_num,
+                    expert_tokens_num_type=expert_tokens_num_type,
+                    expert_tokens_num_flag=expert_tokens_num_flag,
+                    active_expert_range=active_expert_range,
+                    quant_mode=quant_mode,
+                )
+            except RuntimeError as exc:
+                if "aclnnMoeInitRoutingCustom" not in str(exc):
+                    raise
+                _MOE_INIT_ROUTING_CUSTOM_AVAILABLE = False
+
+        if quant_mode not in (-1, 1):
+            raise RuntimeError(
+                "native npu_moe_init_routing_v2 supports only quant modes -1 and 1"
+            )
+        if active_num <= 0:
+            active_num = int(hidden_states.shape[0] * topk_ids.shape[1])
+        if active_expert_range is None:
+            active_expert_range = [0, int(expert_num)]
+        return torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
             scale=scale,
             active_num=active_num,
+            expert_capacity=-1,
             expert_num=expert_num,
+            drop_pad_mode=0,
             expert_tokens_num_type=expert_tokens_num_type,
             expert_tokens_num_flag=expert_tokens_num_flag,
-            active_expert_range=active_expert_range,
             quant_mode=quant_mode,
+            active_expert_range=active_expert_range,
+            row_idx_type=0,
         )
 
     @staticmethod
