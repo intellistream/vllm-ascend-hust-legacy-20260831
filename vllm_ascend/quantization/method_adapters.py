@@ -212,6 +212,23 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         super().__init__(moe_config)
         self.quant_method = scheme
         self.tid2eid = tid2eid
+        # Register the communication implementation for legacy Ascend MoE
+        # schemes as well as the newer fused-MoE kernel path.
+        from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
+
+        setup_moe_comm_method(moe_config)
+
+    @property
+    def is_monolithic(self) -> bool:
+        """Keep the Ascend fused-MoE routing in the backend implementation.
+
+        Recent vLLM versions call ``apply`` with precomputed ``topk_weights``
+        for modular methods.  Ascend's quantization schemes still own routing
+        and expect ``router_logits`` instead.  Advertising the method as
+        monolithic makes RoutedExperts use ``apply_monolithic`` and preserves
+        the backend's fused operator contract.
+        """
+        return True
 
     def create_weights(
         self,
@@ -300,6 +317,33 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
+
+    def apply_monolithic(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Compatibility adapter for vLLM's current RoutedExperts API."""
+        return self.apply(
+            layer=layer,
+            x=x,
+            router_logits=router_logits,
+            top_k=layer.top_k,
+            renormalize=layer.renormalize,
+            use_grouped_topk=layer.use_grouped_topk,
+            num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            topk_group=layer.topk_group,
+            num_expert_group=layer.num_expert_group,
+            custom_routing_function=layer.custom_routing_function,
+            scoring_func=layer.scoring_func,
+            routed_scaling_factor=layer.routed_scaling_factor,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            activation=layer.activation,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+        )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module):
         pass

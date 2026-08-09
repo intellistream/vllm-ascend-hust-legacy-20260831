@@ -27,6 +27,7 @@
 #   2. from vllm_ascend import ops
 #   3. model loading  ->  deepseek_v2 imported  ->  gets patched FusedMoE  ✓
 
+import sys
 from vllm_ascend.utils import is_310p, vllm_version_is
 
 if not vllm_version_is("0.23.0"):
@@ -55,3 +56,12 @@ if not vllm_version_is("0.23.0"):
 
     _fused_moe_layer.FusedMoE = _ascend_FusedMoE
     _fused_moe_pkg.FusedMoE = _ascend_FusedMoE
+
+    # Model-registry discovery can import model modules before the platform
+    # patch runs. Replace any cached direct-import binding as well so those
+    # modules do not keep constructing the upstream default MoERunner.
+    for _module in tuple(sys.modules.values()):
+        if _module is None:
+            continue
+        if getattr(_module, "FusedMoE", None) is _original_FusedMoE:
+            setattr(_module, "FusedMoE", _ascend_FusedMoE)

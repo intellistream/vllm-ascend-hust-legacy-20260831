@@ -876,12 +876,35 @@ _ascend_device_type = None
 
 def _init_ascend_device_type():
     global _ascend_device_type
-    from vllm_ascend import _build_info  # type: ignore
+    try:
+        from vllm_ascend import _build_info  # type: ignore
 
-    device_type = getattr(_build_info, "__device_type__", None)
-    if device_type is None:
-        soc_version = getattr(_build_info, "__soc_version__", "ASCEND910B1").upper()
-        device_type = "_310P" if "310P" in soc_version else "A2"
+        device_type = getattr(_build_info, "__device_type__", None)
+        if device_type is None:
+            soc_version = getattr(_build_info, "__soc_version__", "ASCEND910B1").upper()
+            device_type = "_310P" if "310P" in soc_version else "A2"
+    except Exception:
+        # In editable/source layouts, `_build_info.py` may not be generated yet.
+        # Infer from runtime soc version so startup does not hard-fail.
+        try:
+            soc_version = torch_npu.npu.get_soc_version()  # type: ignore[attr-defined]
+            if 220 <= soc_version <= 225:
+                device_type = "A2"
+            elif 250 <= soc_version <= 255:
+                device_type = "A3"
+            elif 200 <= soc_version <= 205:
+                device_type = "_310P"
+            elif soc_version == 260:
+                device_type = "A5"
+            else:
+                raise RuntimeError(f"Can not infer soc version from runtime: {soc_version}")
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to initialize vllm_ascend build info. "
+                "Please run the vllm-ascend build/install step to generate vllm_ascend/_build_info.py. "
+                f"(original error: {exc})"
+            ) from exc
+
     _ascend_device_type = AscendDeviceType[device_type]
 
 

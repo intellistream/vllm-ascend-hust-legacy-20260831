@@ -306,6 +306,16 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
+        if moe_comm_method is None:
+            # vLLM V1 profile/warmup forwards can use the base context before
+            # Ascend's extended context is installed.  The quantization
+            # adapter registers the all-gather implementation during model
+            # construction, so use it as a safe fallback for TP-only MoE.
+            from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl
+
+            moe_comm_method = AllGatherCommImpl(layer.moe_config)
+        if moe_comm_method is None:
+            raise RuntimeError("Ascend MoE communication method is not initialized")
         fused_scale_flag = (
             _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2 and get_ascend_config().enable_fused_mc2 == 1
         )

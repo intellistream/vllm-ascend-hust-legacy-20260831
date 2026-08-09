@@ -145,6 +145,12 @@ def check_npu_moe_gating_top_k(
     scoring_func: str = "softmax",
     custom_routing_function: Callable | None = None,
 ):
+    # Some vLLM-Ascend container builds expose the Python selector but do not
+    # ship the matching CANN ``moe_gating_top_k`` operator.  Keep routing on
+    # the native PyTorch path in that case instead of failing at first model
+    # warmup with an opaque missing-op AttributeError.
+    if not hasattr(torch.ops._C_ascend, "moe_gating_top_k"):
+        return False
     if scoring_func == "sigmoid" and not renormalize:  # sigmoid + renorm=0 is not supported in current branch
         return False
     if custom_routing_function is not None:
