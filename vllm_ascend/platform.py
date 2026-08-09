@@ -184,6 +184,43 @@ def prune_capture_sizes_for_950(vllm_config):
     )
 
 
+def _resolve_npu_alloc_conf(kv_transfer_config: object | None) -> str:
+    """Resolve the PYTORCH_NPU_ALLOC_CONF value for the current process.
+
+    expandable_segments allocates memory in 2MB expandable segments that
+    cannot be exported through HCCL IPC (rtsIpcMemGetExportKey). KV transfer
+    connectors (e.g. Mooncake in disaggregated prefill/decode) must export
+    the KV cache to the peer instance, so expandable_segments is disabled by
+    default when KV transfer is enabled. Users can still override this via
+    PYTORCH_NPU_ALLOC_CONF.
+    """
+    npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "")
+    if kv_transfer_config and kv_transfer_config.kv_connector:
+        # KV transfer requires expandable_segments=False. Append the
+        # override even when the user set other config keys (e.g.
+        # page_size:1g), symmetric with the non-KV branch below.
+        if "expandable_segments" not in npu_alloc_configs:
+            if npu_alloc_configs:
+                npu_alloc_configs += ",expandable_segments:False"
+            else:
+                npu_alloc_configs = "expandable_segments:False"
+        return npu_alloc_configs
+    if not npu_alloc_configs:
+        npu_alloc_configs = "expandable_segments:True"
+    # This environment variable may have more than one key-value pairs.
+    # We should append ",expandable_segments:True" to the current configs.
+    # For example: "page_size:1g" + ",expandable_segments:True".
+    # NOTE: `max_split_size_mb` or `garbage_collection_threshold` cannot
+    # be enabled together with `expandable_segments=True`.
+    if (
+        "expandable_segments" not in npu_alloc_configs
+        and "max_split_size_mb" not in npu_alloc_configs
+        and "garbage_collection_threshold" not in npu_alloc_configs
+    ):
+        npu_alloc_configs += ",expandable_segments:True"
+    return npu_alloc_configs
+
+
 class NPUPlatform(Platform):
     _enum = PlatformEnum.OOT
     device_name: str = "npu"
@@ -876,29 +913,7 @@ class NPUPlatform(Platform):
         # NOTE: We should not set this environment variable in RL (sleep mode) scenarios.
         # Find more details about how to configure this environment variable at https://www.hiascend.com/document/detail/zh/Pytorch/720/comref/Envvariables/Envir_012.html
         if model_config and not model_config.enable_sleep_mode:
-            # expandable_segments allocates memory in 2MB expandable segments
-            # that cannot be exported through HCCL IPC
-            # (rtsIpcMemGetExportKey). KV transfer connectors (e.g. Mooncake
-            # in disaggregated prefill/decode) must export the KV cache to
-            # the peer instance, so expandable_segments is disabled by
-            # default when KV transfer is enabled. Users can still override
-            # this via PYTORCH_NPU_ALLOC_CONF.
-            kv_transfer_config = vllm_config.kv_transfer_config
-            if kv_transfer_config and kv_transfer_config.kv_connector:
-                npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:False")
-            else:
-                npu_alloc_configs = os.getenv("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
-                # This environment variable may have more than one key-value pairs.
-                # We should append ",expandable_segments:True" to the current configs.
-                # For example: "page_size:1g" + ",expandable_segments:True".
-                # NOTE: `max_split_size_mb` or `garbage_collection_threshold` cannot
-                # be enabled together with `expandable_segments=True`.
-                if (
-                    "expandable_segments" not in npu_alloc_configs
-                    and "max_split_size_mb" not in npu_alloc_configs
-                    and "garbage_collection_threshold" not in npu_alloc_configs
-                ):
-                    npu_alloc_configs += ",expandable_segments:True"
+            npu_alloc_configs = _resolve_npu_alloc_conf(vllm_config.kv_transfer_config)
             os.environ["PYTORCH_NPU_ALLOC_CONF"] = npu_alloc_configs
             logger.info("Set PYTORCH_NPU_ALLOC_CONF=%s", npu_alloc_configs)
 
