@@ -399,12 +399,23 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             _, topk = topk_weights.shape
             assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
-        if self.ep_world_size > 1:
+        physical_expert_count = token_dispatch_input.routing.physical_expert_count
+        if physical_expert_count is not None:
+            if self.ep_world_size != 1:
+                raise RuntimeError("physical_expert_count requires ep_size=1")
+            if physical_expert_count <= 0:
+                raise ValueError("physical_expert_count must be positive")
+            global_num_experts = int(physical_expert_count)
+            first_expert_idx = 0
+            last_expert_idx = global_num_experts
+        elif self.ep_world_size > 1:
+            global_num_experts = self.global_num_experts
             first_expert_idx = self.first_expert_idx
             last_expert_idx = self.last_expert_idx
             mask = (topk_ids >= first_expert_idx) & (topk_ids < last_expert_idx)
             topk_weights = topk_weights * mask
         else:
+            global_num_experts = self.global_num_experts
             first_expert_idx = 0
             last_expert_idx = self.num_experts_local
         sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
@@ -414,7 +425,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             # Zero means all routed tokens. Keeping this scalar static avoids
             # specializing the graph on a dynamic token count.
             active_num=0,
-            expert_num=self.global_num_experts,
+            expert_num=global_num_experts,
             expert_tokens_num_type=1,
             expert_tokens_num_flag=True,
             active_expert_range=[first_expert_idx, last_expert_idx],
