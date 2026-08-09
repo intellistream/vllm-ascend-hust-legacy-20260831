@@ -62,10 +62,22 @@ def _deepseek_v2_mla_attention_init(
     prefix: str = "",
     topk_indices_buffer: torch.Tensor | None = None,
     input_size: int | None = None,
+    **extra_kwargs,
 ) -> None:
     # 这里不能使用 super().__init__()，因为当前函数定义在原类之外，
     # 最后通过赋值的方式替换 DeepseekV2MLAAttention.__init__。
     nn.Module.__init__(self)
+
+    # Upstream versions periodically add new kwargs to the MLA attention init.
+    # The Ascend wrapper used in this repository ignores these parameters in the
+    # wrapper path, so keep compatibility by consuming known extension points
+    # explicitly and ignoring the rest.
+    if "reduce_results" in extra_kwargs:
+        extra_kwargs.pop("reduce_results")
+    if extra_kwargs:
+        # A defensive no-op: preserve forward compatibility without changing the
+        # instantiated object signature.
+        extra_kwargs = {}
 
     self.hidden_size = hidden_size
     self.qk_nope_head_dim = qk_nope_head_dim

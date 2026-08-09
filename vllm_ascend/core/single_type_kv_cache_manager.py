@@ -162,7 +162,7 @@ class CompressAttentionManager(FullAttentionManager):
         retention_interval: int | None = None,
         *,
         alignment_tokens: int | None = None,
-    ) -> None:
+    ) -> int:
         """
         Cache the blocks for the request.
 
@@ -179,7 +179,7 @@ class CompressAttentionManager(FullAttentionManager):
         num_full_blocks = num_tokens // (self.block_size * self.compress_ratio)
 
         if num_cached_blocks >= num_full_blocks:
-            return
+            return 0
 
         self.block_pool.cache_full_blocks(
             request=request,
@@ -190,6 +190,7 @@ class CompressAttentionManager(FullAttentionManager):
             kv_cache_group_id=self.kv_cache_group_id,
         )
         self.num_cached_block[request.request_id] = num_full_blocks
+        return num_full_blocks - num_cached_blocks
 
     @classmethod
     def find_longest_cache_hit(
