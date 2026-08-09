@@ -172,6 +172,36 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(runner.input_ids.gpu.tolist(), [11, 0, 33, 0])
         self.assertEqual(runner.input_ids.cpu.tolist(), [11, -1, 33, -1])
 
+    @patch("vllm_ascend.worker.model_runner_v1.get_ascend_config")
+    @patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable")
+    def test_eagle_does_not_export_nanoparl_verify_results(
+        self,
+        mock_lmhead_tp_enable,
+        mock_get_ascend_config,
+    ):
+        mock_lmhead_tp_enable.return_value = False
+        mock_get_ascend_config.return_value.enable_reduce_sample = False
+
+        runner = self._build_runner()
+        runner.speculative_config = SimpleNamespace(method="eagle")
+        runner._nanoparl_active_vocab_size = MagicMock(return_value=0)
+        runner._constrain_nano_pearl_logits = MagicMock(
+            side_effect=lambda logits: logits
+        )
+        runner.input_batch = MagicMock()
+        runner.input_batch.sampling_metadata.top_k = None
+        runner.rejection_sampler = MagicMock(return_value=MagicMock())
+        runner.rejection_sampler.last_verify_results = [
+            {"request_id": "should-not-leak"}
+        ]
+
+        runner._sample(
+            logits=torch.randn(2, 32),
+            spec_decode_metadata=MagicMock(),
+        )
+
+        self.assertIsNone(runner._pearl_verify_results)
+
     def test_placeholder_sanitization_is_scoped_to_current_forward(self):
         runner = self._build_runner()
         runner.input_ids = SimpleNamespace(

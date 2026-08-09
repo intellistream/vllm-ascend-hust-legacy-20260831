@@ -795,6 +795,7 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs: int,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         batch_desc_num_reqs: int | None = None,
+        batch_desc_uniform: bool | None = None,
     ) -> int:
         """
         This function is only designed to satisfied the constraint that when the layout is TND,
@@ -811,8 +812,24 @@ class NPUModelRunner(GPUModelRunner):
         # avoid corner case of cudagraph config mode FULL to enter the first padding logic
         # e.g. 1 request with 1 token when num_spec > 1 (num_spec = 3 and cudagraph_batch_size = 4 for example)
         # will cause tokens are padded but requests are not
+        uniform_decode_query_len = self.uniform_decode_query_len
+        if batch_desc_uniform is True:
+            if num_reqs_padded <= 0 or num_tokens_padded % num_reqs_padded:
+                raise RuntimeError(
+                    "invalid uniform graph descriptor: "
+                    f"tokens={num_tokens_padded}, reqs={num_reqs_padded}"
+                )
+            uniform_decode_query_len = num_tokens_padded // num_reqs_padded
+        is_uniform_batch = (
+            batch_desc_uniform
+            if batch_desc_uniform is not None
+            else num_tokens_padded
+            == num_reqs_padded * uniform_decode_query_len
+        )
         if (
-            num_tokens_padded == num_reqs_padded * self.uniform_decode_query_len
+            is_uniform_batch
+            and num_tokens_padded
+            == num_reqs_padded * uniform_decode_query_len
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.FULL
         ):
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
@@ -820,7 +837,9 @@ class NPUModelRunner(GPUModelRunner):
 
             last_loc = query_start_loc.np[num_reqs]
             query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1] = (
-                self.arange_np[1 : num_reqs_padded + 1 - num_reqs] * self.uniform_decode_query_len + last_loc
+                self.arange_np[1 : num_reqs_padded + 1 - num_reqs]
+                * uniform_decode_query_len
+                + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
@@ -2948,9 +2967,16 @@ class NPUModelRunner(GPUModelRunner):
             logits,
             sampling_metadata,
         )
-        self._pearl_verify_results = getattr(
-            self.rejection_sampler, "last_verify_results", None
-        )
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method
+            in ("custom_class", "nano_pearl")
+        ):
+            self._pearl_verify_results = getattr(
+                self.rejection_sampler, "last_verify_results", None
+            )
+        else:
+            self._pearl_verify_results = None
         # PEARL_STAGE5_SAMPLE_OUTPUT_TRACE_V1
         if __import__("os").environ.get("PEARL_STAGE5_SAMPLE_OUTPUT_TRACE") == "1":
             _raw_ids = sampler_output.sampled_token_ids.detach().cpu().tolist()

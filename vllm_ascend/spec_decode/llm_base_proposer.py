@@ -140,6 +140,28 @@ def _is_glm_model(model_config) -> bool:
     return "glm" in str(model_type).lower()
 
 
+def _pad_draft_query_start_loc_for_full_graph(
+    runner: Any,
+    query_start_loc: Any,
+    num_input_tokens: int,
+    num_reqs: int,
+    runtime_mode: CUDAGraphMode,
+    batch_descriptor: BatchDescriptor,
+) -> int:
+    descriptor_num_reqs = batch_descriptor.num_reqs
+    return runner._pad_query_start_loc_for_fia(
+        query_start_loc,
+        num_input_tokens,
+        descriptor_num_reqs
+        if descriptor_num_reqs is not None
+        else num_reqs,
+        num_reqs,
+        runtime_mode,
+        descriptor_num_reqs,
+        batch_descriptor.uniform,
+    )
+
+
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
@@ -809,13 +831,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_reqs = common_attn_metadata.query_start_loc.shape[0]
             self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
-            num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
+            num_reqs_padded = _pad_draft_query_start_loc_for_full_graph(
+                self.runner,
                 self.query_start_loc,
                 num_input_tokens,
-                batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
                 common_attn_metadata.num_reqs,
                 aclgraph_runtime_mode,
-                batch_descriptor.num_reqs,
+                batch_descriptor,
             )
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]

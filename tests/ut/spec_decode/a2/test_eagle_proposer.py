@@ -138,6 +138,39 @@ def assert_attr_equal(attr: str | tuple[str, Any, Any], expect: Any, actual: Any
         assert expect_value == actual_value, f"{attr_name} value mismatch"
 
 
+def test_full_graph_padding_uses_descriptor_uniform():
+    runner = MagicMock()
+    runner._pad_query_start_loc_for_fia.return_value = 8
+    query_start_loc = MagicMock()
+    descriptor = BatchDescriptor(
+        num_tokens=24,
+        num_reqs=8,
+        uniform=True,
+        has_lora=False,
+        num_active_loras=0,
+    )
+
+    result = llm_base_proposer._pad_draft_query_start_loc_for_full_graph(
+        runner,
+        query_start_loc,
+        num_input_tokens=24,
+        num_reqs=6,
+        runtime_mode=CUDAGraphMode.FULL,
+        batch_descriptor=descriptor,
+    )
+
+    assert result == 8
+    runner._pad_query_start_loc_for_fia.assert_called_once_with(
+        query_start_loc,
+        24,
+        8,
+        6,
+        CUDAGraphMode.FULL,
+        8,
+        True,
+    )
+
+
 def test_prepare_inputs_padded_preserves_internal_seq_lens_cpu():
     proposer = AscendEagleProposer.__new__(AscendEagleProposer)
     proposer.pcp_size = 1
@@ -1160,6 +1193,7 @@ class TestEagleProposerPropose:
         original_method = self.proposer.attn_update_stack_num_spec_norm
         mock_bd = MagicMock()
         mock_bd.num_tokens = 16
+        mock_bd.uniform = True
         self.proposer.query_start_loc = MagicMock()
         self.proposer.query_start_loc.gpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
         self.proposer.query_start_loc.cpu = torch.tensor([0, 4, 8, 12, 16], device=torch.device("cpu"), dtype=torch.int32)
@@ -1309,6 +1343,9 @@ class TestEagleProposerPropose:
                                 scheduler_output, num_scheduled_tokens, num_rejected_tokens_gpu,
                                 )
             self.assert_value_common_attn_metadata(captured_common_attn_metadata, flag_prefill_decode, model_type, graphmode)
+            if graphmode == 'full':
+                pad_call = self.runner._pad_query_start_loc_for_fia.call_args
+                assert pad_call.args[-1] is True
 
     # give common_attn_metadata value
     def value_mock_common_attn_metadata(self, mock_common_attn_metadata, query_start_loc, query_start_loc_cpu, seq_lens, num_reqs,
@@ -1586,7 +1623,7 @@ class TestEagleProposerPropose:
         assert hasattr(RunnerCls, "_pad_query_start_loc_for_fia")
         sig = inspect.signature(RunnerCls._pad_query_start_loc_for_fia)
         sig_name = self.get_param_names(sig)
-        assert sig_name == ['self', 'query_start_loc', 'num_tokens_padded', 'num_reqs_padded', 'num_reqs', 'cudagraph_runtime_mode', 'batch_desc_num_reqs']
+        assert sig_name == ['self', 'query_start_loc', 'num_tokens_padded', 'num_reqs_padded', 'num_reqs', 'cudagraph_runtime_mode', 'batch_desc_num_reqs', 'batch_desc_uniform']
 
 
         import vllm_ascend.spec_decode.llm_base_proposer
