@@ -1228,6 +1228,10 @@ def test_benchmark_repo_publish_is_gated_and_reported() -> None:
     assert git_add_index < git_commit_index < git_push_index
     assert git_push_index < verify_index
     assert "write_github_env GITHUB_SNAPSHOT_SYNC_STATUS rejected" in sync_script
+    unchanged_verify_start = sync_script.index("write_github_env GITHUB_SNAPSHOT_SYNC_STATUS unchanged")
+    unchanged_verify_block = sync_script[unchanged_verify_start:]
+    assert "GITHUB_SNAPSHOT_SYNC_VERIFICATION failed" in unchanged_verify_block
+    assert "benchmark publication was already present, but verification failed" in unchanged_verify_block
     required_submission_files = sync_script[
         sync_script.index("required_submission_files=(") : sync_script.index(
             "\n)", sync_script.index("required_submission_files=(")
@@ -1632,6 +1636,91 @@ exec "$REAL_GIT" "$@"
     )
     fake_git.chmod(0o755)
     return fake_bin, fake_python
+
+
+def test_snapshot_sync_unchanged_verification_failure_is_nonzero(tmp_path: Path) -> None:
+    remote, seed = _init_retry_remote(tmp_path)
+    (seed / "submissions").mkdir()
+    (seed / "submissions" / ".gitkeep").write_text("", encoding="utf-8")
+    _run_git(["git", "add", "submissions"], seed)
+    _run_git(["git", "commit", "-m", "add submissions root"], seed)
+    _run_git(["git", "push", "origin", "HEAD:main"], seed)
+    benchmark_repo = tmp_path / "benchmark-repo"
+    _run_git(["git", "clone", str(remote), str(benchmark_repo)], tmp_path)
+
+    website_repo = tmp_path / "website-repo"
+    (website_repo / "scripts").mkdir(parents=True)
+    (website_repo / "scripts" / "aggregate_results.py").write_text("# fake\n", encoding="utf-8")
+    hust_repo = tmp_path / "vllm-hust"
+    hust_repo.mkdir()
+    (hust_repo / "pyproject.toml").write_text("[project]\nname='fake'\n", encoding="utf-8")
+    current_submission = tmp_path / "current-submission"
+    _write_complete_submission_evidence(current_submission)
+    _fake_bin, fake_python = _write_retry_test_doubles(tmp_path)
+    github_env = tmp_path / "github-env"
+
+    env = {
+        **os.environ,
+        "ALLOW_LOCAL_GIT_RESET": "1",
+        "BENCHMARK_REPO_DIR": str(benchmark_repo),
+        "BENCHMARK_REPO_REMOTE": "origin",
+        "BENCHMARK_REPO_SLUG": "local/benchmark",
+        "CURRENT_SUBMISSION_DIR": str(current_submission),
+        "GITHUB_ACTIONS": "false",
+        "GITHUB_ENV": str(github_env),
+        "PYTHON_BIN": str(fake_python),
+        "SNAPSHOT_FETCH_RETRY_SECONDS": "0",
+        "SNAPSHOT_PUSH_RETRY_SECONDS": "0",
+        "SNAPSHOT_TARGET_BRANCH": "main",
+        "VLLM_HUST_REPO_DIR": str(hust_repo),
+        "WEBSITE_REPO_DIR": str(website_repo),
+    }
+
+    first_result = subprocess.run(
+        ["bash", str(SCRIPT_DIR / "sync_benchmark_snapshots_to_github.sh")],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert first_result.returncode == 0, first_result.stdout + first_result.stderr
+
+    failing_git_bin = tmp_path / "failing-git-bin"
+    failing_git_bin.mkdir()
+    failing_git = failing_git_bin / "git"
+    failing_git.write_text(
+        """#!/bin/bash
+set -euo pipefail
+if [[ "$*" == *" cat-file -e "* ]]; then
+  exit 9
+fi
+exec "$REAL_GIT" "$@"
+""",
+        encoding="utf-8",
+    )
+    failing_git.chmod(0o755)
+    env.update(
+        {
+            "PATH": f"{failing_git_bin}:{os.environ['PATH']}",
+            "REAL_GIT": shutil.which("git") or "git",
+        }
+    )
+
+    second_result = subprocess.run(
+        ["bash", str(SCRIPT_DIR / "sync_benchmark_snapshots_to_github.sh")],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    github_env_text = github_env.read_text(encoding="utf-8")
+
+    assert second_result.returncode == 1, second_result.stdout + second_result.stderr
+    assert "benchmark publication was already present, but verification failed" in second_result.stderr
+    assert "GITHUB_SNAPSHOT_SYNC_STATUS=unchanged" in github_env_text
+    assert "GITHUB_SNAPSHOT_SYNC_VERIFICATION=failed" in github_env_text
 
 
 def test_snapshot_sync_rebuilds_staging_before_push_retry(tmp_path: Path) -> None:
