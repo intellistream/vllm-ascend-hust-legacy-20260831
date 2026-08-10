@@ -313,3 +313,29 @@ def test_select_moe_comm_method_a2_fused_float_token_domain():
         # an unsafe per-forward communication-family switch.
         with pytest.raises(RuntimeError, match="outside the scheduler domain"):
             select_moe_comm_method(65, vllm_config)
+
+
+def test_select_moe_comm_method_a2_w8a8_owns_scheduler_domain():
+    """W8A8 dynamic fused MC2 inherits the immutable A2 token domain.
+
+    Every legal batch, including one token and the upper boundary, stays in the
+    fused family. Crossing the startup scheduler limit fails fast instead of
+    switching a compiled model to all-gather.
+    """
+    vllm_config = _make_moe_config(ep_size=2, quant_type="w8a8_dynamic", num_experts=16)
+    ep_group = SimpleNamespace(world_size=2)
+    ascend_config = SimpleNamespace(enable_fused_mc2=1)
+
+    with (
+        patch("vllm_ascend.ascend_forward_context.is_moe_model", return_value=True),
+        patch("vllm_ascend.ascend_forward_context.get_mc2_tokens_capacity", return_value=64),
+        patch("vllm_ascend.ascend_forward_context.get_mc2_tokens_limit", return_value=64),
+        patch("vllm_ascend.ascend_forward_context.get_ascend_device_type", return_value=AscendDeviceType.A2),
+        patch("vllm_ascend.ascend_forward_context.get_ep_group", return_value=ep_group),
+        patch("vllm_ascend.ascend_forward_context.get_ascend_config", return_value=ascend_config),
+    ):
+        assert select_moe_comm_method(1, vllm_config) is MoECommType.FUSED_MC2
+        assert select_moe_comm_method(32, vllm_config) is MoECommType.FUSED_MC2
+        assert select_moe_comm_method(64, vllm_config) is MoECommType.FUSED_MC2
+        with pytest.raises(RuntimeError, match="outside the scheduler domain"):
+            select_moe_comm_method(65, vllm_config)
