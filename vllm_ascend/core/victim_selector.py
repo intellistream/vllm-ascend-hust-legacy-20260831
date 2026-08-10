@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from vllm.v1.core.sched.request_queue import SchedulingPolicy
+from vllm.v1.core.sched.victim_selector import NoOpVictimSelector
 from vllm.v1.request import Request
 
 _DEFAULT_MAX_TOKENS = 1024
@@ -444,11 +445,7 @@ def get_ascend_victim_selector(vllm_config, core_selector):
     after the core scheduler has initialized it. When no native choice is made,
     retain the historical Ascend utility-selector configuration path.
     """
-    additional_config = getattr(vllm_config, "additional_config", None) or {}
-    if (
-        "victim_selector_plugin" in additional_config
-        or additional_config.get("victim_selector_plugin_disabled")
-    ):
+    if not isinstance(core_selector, NoOpVictimSelector):
         return core_selector
     return UnifiedVictimSelector.from_vllm_config(vllm_config)
 

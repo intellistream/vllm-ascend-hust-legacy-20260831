@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 from vllm.v1.core.sched.request_queue import SchedulingPolicy
+from vllm.v1.core.sched.victim_selector import NoOpVictimSelector
 
 from vllm_ascend.core.victim_selector import (
     UnifiedVictimSelector,
@@ -51,7 +52,7 @@ class TestUnifiedVictimSelector:
 
     def test_legacy_ascend_selector_remains_default(self):
         selector = get_ascend_victim_selector(
-            SimpleNamespace(additional_config={}), object()
+            SimpleNamespace(additional_config={}), NoOpVictimSelector()
         )
 
         assert isinstance(selector, UnifiedVictimSelector)
