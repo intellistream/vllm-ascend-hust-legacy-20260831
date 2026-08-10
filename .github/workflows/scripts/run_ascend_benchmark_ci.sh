@@ -800,6 +800,37 @@ run_same_spec_current_benchmark() {
   local runtime_manager_commit
   local same_spec_exit_code=0
 
+  validate_same_spec_identity() {
+    local spec_file=$1
+    local spec_model spec_parameters spec_precision expected_dtype
+    spec_model=$(jq -r '.model // empty' "$spec_file")
+    spec_parameters=$(jq -r '.model_parameters // empty' "$spec_file")
+    spec_precision=$(jq -r '.model_precision // empty' "$spec_file")
+    case "${spec_precision,,}" in
+      bf16|bfloat16) expected_dtype="bfloat16" ;;
+      fp16|float16) expected_dtype="float16" ;;
+      *) expected_dtype="" ;;
+    esac
+
+    if [[ -n "$spec_model" && -n "$MODEL_NAME" && "$spec_model" != "$MODEL_NAME" ]]; then
+      echo "same-spec model identity mismatch: spec=$spec_model runtime=$MODEL_NAME" >&2
+      return 2
+    fi
+    if [[ -n "$spec_parameters" && "$spec_parameters" != "$MODEL_PARAMETERS" ]]; then
+      echo "same-spec model parameter mismatch: spec=$spec_parameters runtime=$MODEL_PARAMETERS" >&2
+      return 2
+    fi
+    if [[ -n "$spec_precision" && "$spec_precision" != "$MODEL_PRECISION" ]]; then
+      echo "same-spec model precision mismatch: spec=$spec_precision runtime=$MODEL_PRECISION" >&2
+      return 2
+    fi
+    if [[ -n "$expected_dtype" && "$expected_dtype" != "$DTYPE" ]]; then
+      echo "same-spec runtime dtype mismatch: spec=$expected_dtype runtime=$DTYPE" >&2
+      return 2
+    fi
+    echo "same-spec model identity: spec=$spec_model parameters=$spec_parameters precision=$spec_precision dtype=$expected_dtype"
+  }
+
   if [[ ! -f "$same_spec_runner" ]]; then
     echo "same-spec benchmark runner not found: $same_spec_runner" >&2
     return 2
@@ -859,6 +890,8 @@ PY
     effective_same_spec_file=$(prepare_same_spec_pr_preview_compat_file)
     echo "Using PR preview same-spec compatibility overlay: $effective_same_spec_file"
   fi
+
+  validate_same_spec_identity "$effective_same_spec_file"
 
   if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
     VLLM_HUST_WORKSPACE_ROOT="$WORKSPACE_ROOT" \
