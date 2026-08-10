@@ -457,7 +457,10 @@ def test_formal_runner_fails_fast_on_same_spec_identity_mismatch() -> None:
     assert "same-spec model identity mismatch" in runner_script
     assert "same-spec model precision mismatch" in runner_script
     assert "same-spec runtime dtype mismatch" in runner_script
-    assert 'validate_same_spec_identity "$effective_same_spec_file"' in runner_script
+    assert (
+        'validate_same_spec_identity "$effective_same_spec_file" || return 2'
+        in runner_script
+    )
     assert '"datasets"' in install_script
 
 

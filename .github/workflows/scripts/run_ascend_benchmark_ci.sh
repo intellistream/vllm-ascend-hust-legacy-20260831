@@ -891,7 +891,7 @@ PY
     echo "Using PR preview same-spec compatibility overlay: $effective_same_spec_file"
   fi
 
-  validate_same_spec_identity "$effective_same_spec_file"
+  validate_same_spec_identity "$effective_same_spec_file" || return 2
 
   if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
     VLLM_HUST_WORKSPACE_ROOT="$WORKSPACE_ROOT" \
