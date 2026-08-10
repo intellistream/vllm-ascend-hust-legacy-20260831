@@ -324,8 +324,14 @@ for attempt in $(seq 1 "$SNAPSHOT_MAX_PUSH_ATTEMPTS"); do
       write_github_env GITHUB_SNAPSHOT_SYNC_BRANCH "$SNAPSHOT_TARGET_BRANCH"
       write_github_env GITHUB_SNAPSHOT_SYNC_SUBMISSION_PATH "$relative_submission_dir"
       write_github_env GITHUB_SNAPSHOT_SYNC_SNAPSHOT_PATH "$relative_snapshot_dir"
-      verify_published_benchmark_repo_state "$(git -C "$BENCHMARK_REPO_DIR" rev-parse "$BENCHMARK_REPO_REMOTE/$SNAPSHOT_TARGET_BRANCH")"
-      exit 0
+      if verify_published_benchmark_repo_state "$(git -C "$BENCHMARK_REPO_DIR" rev-parse "$BENCHMARK_REPO_REMOTE/$SNAPSHOT_TARGET_BRANCH")"; then
+        exit 0
+      else
+        verification_status=$?
+        write_github_env GITHUB_SNAPSHOT_SYNC_VERIFICATION failed
+        echo "benchmark publication was already present, but verification failed" >&2
+        exit "$verification_status"
+      fi
     fi
     write_github_env GITHUB_SNAPSHOT_SYNC_STATUS rejected
     exit "$prepare_status"
