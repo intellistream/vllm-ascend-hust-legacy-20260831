@@ -2366,6 +2366,12 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
+            # KV-recovery: observe the exact scheduled roster immediately
+            # before model forward so admitted recovered requests close the
+            # seven-stage chain (preempt -> restore_start -> restore_done ->
+            # scheduler_wakeup -> admission -> first_prefill_or_decode).
+            # Mirrors vllm.v1.worker.gpu_model_runner.execute_model.
+            self.observe_kv_recovery_first_compute(scheduler_output)
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
             hidden_states = self._model_forward(
