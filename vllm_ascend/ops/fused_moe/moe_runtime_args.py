@@ -59,7 +59,10 @@ from __future__ import annotations
 
 import torch
 
-import vllm_ascend.ops.fused_moe.moe_stage_params as _stage_params
+try:
+    import vllm_ascend.ops.fused_moe.moe_stage_params as _stage_params
+except ImportError:
+    _stage_params = None
 from vllm_ascend.ops.fused_moe.moe_stage_contracts import (
     MoEAllGatherCombineMetadata,
     MoEAllToAllCombineMetadata,
