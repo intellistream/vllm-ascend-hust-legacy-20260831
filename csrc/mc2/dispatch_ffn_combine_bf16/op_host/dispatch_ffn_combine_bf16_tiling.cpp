@@ -257,7 +257,13 @@ static ge::graphStatus DispatchFFNCombineBF16TilingFuncImpl(gert::TilingContext 
     uint32_t n2 = info.K;
     uint32_t k2 = info.N / 2;
 
-    uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK *sizeof(int32_t) +
+    const uint64_t expandedRowIdxWorkspace =
+        (info.M + 256 - 1) / 256 * 256 * info.topK * sizeof(int32_t);
+    // The masked-route scratch aliases the later cumsum region. Only the
+    // init-routing internal workspace must be placed after both live slices.
+    const uint64_t expertIdxScratchWorkspace =
+        (info.M * info.topK * sizeof(int32_t) + 32 - 1) / 32 * 32;
+    uint64_t cocWorkspace = expandedRowIdxWorkspace +
                             info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 3 +
                             info.maxOutputSize * sizeof(float) * 2 +
                             info.maxOutputSize * info.N * sizeof(int16_t) +
@@ -269,7 +275,9 @@ static ge::graphStatus DispatchFFNCombineBF16TilingFuncImpl(gert::TilingContext 
                             // std::max(info.maxOutputSize * info.N * sizeof(int16_t), info.maxOutputSize * n2 * sizeof(int16_t)) +
                             // std::max(info.maxOutputSize * info.K * sizeof(int8_t), info.maxOutputSize * k2 * sizeof(int8_t));
 
-    workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, initRoutingWorkspace);
+    const uint64_t routingWorkspace =
+        expandedRowIdxWorkspace + expertIdxScratchWorkspace + initRoutingWorkspace;
+    workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, routingWorkspace);
 
 
     // 5. communication

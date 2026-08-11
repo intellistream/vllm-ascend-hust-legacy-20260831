@@ -372,10 +372,10 @@ private:
     }
 
     CATLASS_DEVICE
-    void ApplyXActiveMask(Params const &params)
+    GM_ADDR ApplyXActiveMask(Params const &params)
     {
         if (params.ptrXActiveMask == nullptr) {
-            return;
+            return params.expertIdx;
         }
 
         int32_t m = params.problemShape.m();
@@ -390,7 +390,11 @@ private:
 
         if (copySize > 0) {
             AscendC::GlobalTensor<int32_t> expertIdxGm;
+            AscendC::GlobalTensor<int32_t> maskedExpertIdxGm;
             expertIdxGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.expertIdx));
+            // Keep the custom-op input immutable: only the routing scratch
+            // receives sentinel IDs for graph-padding rows.
+            maskedExpertIdxGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrMaskedExpertIdx));
             AscendC::LocalTensor<int32_t> tmpExpertIdx = resource.ubBuf.template GetBufferByByte<int32_t>(0);
 
             AscendC::DataCopyPad(tmpExpertIdx[0], expertIdxGm[startIdx],
@@ -407,10 +411,11 @@ private:
 
             AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-            AscendC::DataCopyPad(expertIdxGm[startIdx], tmpExpertIdx[0],
+            AscendC::DataCopyPad(maskedExpertIdxGm[startIdx], tmpExpertIdx[0],
                 {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0, 0});
         }
         AscendC::SyncAll<true>();
+        return workspaceInfo.ptrMaskedExpertIdx;
     }
 
     CATLASS_DEVICE
@@ -814,13 +819,11 @@ private:
         icache_preload(8);
         int64_t localTokenPerExpertOffset = peermemInfo.offsetPeerTokenPerExpert + tokenPerExpertLayout(params.rank, 0, 0) * sizeof(int32_t);
         GM_ADDR localTokenPerExpert = shmem() + localTokenPerExpertOffset;
-        uint32_t expandedRowIdxOffset = AlignUp(params.problemShape.m(), 256) * params.topK * sizeof(int32_t);
+        GM_ADDR routingExpertIdx = ApplyXActiveMask(params);
 
-        ApplyXActiveMask(params);
-
-        moe_init_routing_v2<ElementA>(reinterpret_cast<GM_ADDR> (params.ptrA), params.expertIdx, shmem() + peermemInfo.offsetA,
+        moe_init_routing_v2<ElementA>(reinterpret_cast<GM_ADDR> (params.ptrA), routingExpertIdx, shmem() + peermemInfo.offsetA,
         workspaceInfo.expandedRowIdx, localTokenPerExpert, params.expertTokensBeforeCapacity,
-        params.ptrWorkspace + expandedRowIdxOffset,
+        workspaceInfo.ptrInitRoutingWorkspace,
         &params.moeInitRoutingQuantV2TilingData, params.initRoutingQuantTilingKey);
 
         AscendC::SyncAll<true>();
@@ -1061,6 +1064,8 @@ private:
 
 private:
   struct WorkspaceInfo {
+        GM_ADDR ptrMaskedExpertIdx;
+        GM_ADDR ptrInitRoutingWorkspace;
         GM_ADDR ptrA;
         GM_ADDR ptrPerTokenScale;
         GM_ADDR ptrcumsumMM;
@@ -1084,7 +1089,14 @@ private:
             expandedRowIdx = params.ptrWorkspace;
 
             workspaceOffset += AlignUp(params.problemShape.m(), 256) * params.topK * sizeof(int32_t);
+            // Masked route IDs are needed only by init-routing, so this slice
+            // may be reused as cumsum storage after init-routing completes.
+            ptrMaskedExpertIdx = params.ptrWorkspace + workspaceOffset;
             ptrcumsumMM = params.ptrWorkspace + workspaceOffset;
+
+            int64_t maskedExpertIdxSize =
+                AlignUp(params.problemShape.m() * params.topK * sizeof(int32_t), 32);
+            ptrInitRoutingWorkspace = ptrMaskedExpertIdx + maskedExpertIdxSize;
 
             workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
 

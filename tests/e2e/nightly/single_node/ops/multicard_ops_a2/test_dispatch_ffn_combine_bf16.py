@@ -166,6 +166,7 @@ def _run_rank(rank: int, world_size: int, port: int) -> None:
         expected_masked_counts = expected_masked_counts[rank * local_experts : (rank + 1) * local_experts]
 
         masked_expert_idx = expert_idx.clone()
+        masked_expert_idx_before = masked_expert_idx.clone()
         out.fill_(torch.nan)
         expert_token_nums.fill_(-1)
         torch.ops._C_ascend.dispatch_ffn_combine(
@@ -188,6 +189,7 @@ def _run_rank(rank: int, world_size: int, port: int) -> None:
 
         torch.testing.assert_close(out[:active_tokens].cpu(), expected[:active_tokens], rtol=0.02, atol=0.02)
         torch.testing.assert_close(expert_token_nums.cpu(), expected_masked_counts)
+        torch.testing.assert_close(masked_expert_idx.cpu(), masked_expert_idx_before.cpu())
     finally:
         dist.destroy_process_group()
 
