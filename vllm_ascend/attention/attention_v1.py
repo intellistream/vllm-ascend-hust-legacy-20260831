@@ -23,6 +23,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
@@ -1543,6 +1544,20 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
     so that C8 attention layers automatically use this forward path.
     """
 
+    @staticmethod
+    def _report_c8_dispatch(
+        dispatch_path: str,
+        actual_cache_dtype: torch.dtype,
+        fallback_reason: str | None = None,
+    ) -> None:
+        logger.info_once(
+            "[vllm-ascend/C8_KV] dispatch_receipt dispatch_path=%s actual_cache_dtype=%s fallback_reason=%s",
+            dispatch_path,
+            str(actual_cache_dtype),
+            fallback_reason or "none",
+            scope="process",
+        )
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -1752,6 +1767,10 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         """C8 decode via FIA V1 BNSD with native paged INT8 KV + perchannel antiquant."""
         num_block, block_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
         assert block_size % 32 == 0, f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
+        self._report_c8_dispatch(
+            "decode_fia_bnsd_paged_int8",
+            self.key_cache.dtype,  # type: ignore[attr-defined]
+        )
         batch_size = len(attn_metadata.seq_lens_list)
 
         key = self._nz_5d_view(self.key_cache, block_size)
@@ -1802,6 +1821,10 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             assert block_size % 32 == 0, (
                 f"C8 INT8 KV cache requires block_size to be a multiple of 32, got {block_size}"
             )
+            self._report_c8_dispatch(
+                "chunked_decode_fia_bnsd_paged_int8",
+                self.key_cache.dtype,  # type: ignore[attr-defined]
+            )
             kv_k = self._nz_5d_view(self.key_cache, block_size)
             kv_v = self._nz_5d_view(self.value_cache, block_size)
 
@@ -1842,10 +1865,19 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     break
 
             if all_new_prefill and float_key is not None and float_value is not None:
+                self._report_c8_dispatch(
+                    "chunked_prefill_fia_tnd_new_float_kv",
+                    self.key_cache.dtype,  # type: ignore[attr-defined]
+                )
                 prefill_k = float_key[num_decode_tokens:num_tokens]
                 prefill_v = float_value[num_decode_tokens:num_tokens]
                 prefill_seq_kvlen = prefill_seq_qlen
             else:
+                self._report_c8_dispatch(
+                    "chunked_prefill_fia_tnd_dequantized_cache",
+                    self.key_cache.dtype,  # type: ignore[attr-defined]
+                    "fia_tnd_requires_dense_kv",
+                )
                 num_block, blk_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
                 paged_k = self._nz_5d_view(self.key_cache, blk_size)
                 paged_v = self._nz_5d_view(self.value_cache, blk_size)
@@ -1894,6 +1926,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         PrefillCacheHit gathers + dequants paged INT8 KV).
         """
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
+        actual_cache_dtype = self.key_cache.dtype  # type: ignore[attr-defined]
 
         actual_seq_qlen = attn_metadata.actual_seq_lengths_q
         num_tokens = int(actual_seq_qlen[-1])  # type: ignore[index]
@@ -1908,6 +1941,11 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
         if key.dtype == torch.int8:
             if block_table is not None:
+                self._report_c8_dispatch(
+                    "prefill_cache_hit_fia_tnd_dequantized_cache",
+                    actual_cache_dtype,
+                    "fia_tnd_requires_dense_kv",
+                )
                 seq_lens = (
                     actual_seq_lengths_kv if isinstance(actual_seq_lengths_kv, list) else actual_seq_lengths_kv.tolist()
                 )
@@ -1918,8 +1956,18 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
                 actual_seq_lengths_kv = torch.tensor(seq_lens, dtype=torch.int32).cumsum(dim=0)
             else:
+                self._report_c8_dispatch(
+                    "prefill_fia_tnd_dequantized_input",
+                    actual_cache_dtype,
+                    "fia_tnd_requires_float_kv",
+                )
                 key = (key.to(query.dtype) - layer._c8_k_offset) * layer._c8_k_scale
                 value = (value.to(query.dtype) - layer._c8_v_offset) * layer._c8_v_scale
+        else:
+            self._report_c8_dispatch(
+                "prefill_fia_tnd_float_kv",
+                actual_cache_dtype,
+            )
 
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,

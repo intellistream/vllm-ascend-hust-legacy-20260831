@@ -587,6 +587,24 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
         layer.v_cache_offset = nn.Parameter(torch.zeros(shape, dtype=self.original_dtype), requires_grad=False)
         return layer
 
+    @patch("vllm_ascend.attention.attention_v1.logger.info_once")
+    def test_dispatch_receipt_reports_actual_dtype_and_fallback(self, mock_info_once):
+        impl = self._make_impl()
+
+        impl._report_c8_dispatch(
+            "prefill_cache_hit_fia_tnd_dequantized_cache",
+            torch.int8,
+            "fia_tnd_requires_dense_kv",
+        )
+
+        mock_info_once.assert_called_once_with(
+            "[vllm-ascend/C8_KV] dispatch_receipt dispatch_path=%s actual_cache_dtype=%s fallback_reason=%s",
+            "prefill_cache_hit_fia_tnd_dequantized_cache",
+            "torch.int8",
+            "fia_tnd_requires_dense_kv",
+            scope="process",
+        )
+
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_rank", return_value=0)
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_world_size", return_value=1)
     def test_prepare_c8_scales_runs_once(self, mock_tp_size, mock_tp_rank):
