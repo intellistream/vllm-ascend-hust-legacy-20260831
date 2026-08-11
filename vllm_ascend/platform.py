@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 from importlib import import_module, util
 from typing import TYPE_CHECKING, Any
@@ -1065,7 +1064,12 @@ class NPUPlatform(Platform):
             dict[str, Any]: _description_
         """
         # NOTE(Ronald1995): avoid circular import.
-        from vllm_ascend.ascend_forward_context import get_mc2_mask, get_mrv2_in_profile_run, select_moe_comm_method
+        from vllm_ascend.ascend_forward_context import (
+            get_mc2_mask,
+            get_mc2_padded_num_tokens,
+            get_mrv2_in_profile_run,
+            select_moe_comm_method,
+        )
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
         from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
 
@@ -1093,13 +1097,6 @@ class NPUPlatform(Platform):
         is_draft_model_prefill = False
         sinks = False
         in_profile_run = get_mrv2_in_profile_run()
-        moe_comm_type = select_moe_comm_method(
-            num_tokens,
-            vllm_config,
-            is_draft_model=is_draft_model,
-        )
-        moe_comm_method = get_moe_comm_method(moe_comm_type)
-
         tp_world_size = get_tensor_model_parallel_world_size()
 
         # NOTE: This cannot be set using set_forward_context
@@ -1138,11 +1135,24 @@ class NPUPlatform(Platform):
                 pad_size = padded_length - num_tokens
         else:
             max_tokens_across_dp = num_tokens
+        # Every participant must select the same communication family. In DP
+        # deployments the local token counts may differ, so route from the
+        # already-coordinated DP maximum rather than this rank's local count.
+        moe_comm_type = select_moe_comm_method(
+            max_tokens_across_dp,
+            vllm_config,
+            is_draft_model=is_draft_model,
+        )
+        moe_comm_method = get_moe_comm_method(moe_comm_type)
         mc2_mask = None
         if num_tokens is not None:
             num_actual_tokens = num_tokens
             # NOTE: token num which need to pad to when mc2
-            padded_num_tokens = math.ceil(max_tokens_across_dp / tp_world_size) * tp_world_size
+            padded_num_tokens = get_mc2_padded_num_tokens(
+                max_tokens_across_dp,
+                tp_world_size,
+                moe_comm_type,
+            )
             reserved_mc2_mask = get_mc2_mask()
             if reserved_mc2_mask is not None:
                 mc2_mask = reserved_mc2_mask[:padded_num_tokens]
