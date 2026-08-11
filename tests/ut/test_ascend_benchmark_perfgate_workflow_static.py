@@ -431,6 +431,7 @@ def test_schedule_runs_registered_multi_scenario_benchmark_publish() -> None:
 
 def test_schedule_multi_scenario_uses_official_model_specific_specs() -> None:
     scenario_script = (SCRIPT_DIR / "run_ascend_benchmark_scenario_list.sh").read_text(encoding="utf-8")
+
     assert 'GITHUB_EVENT_NAME:-}" != "pull_request"' in scenario_script
     assert 'MODEL_PARAMETERS:-}" == "14B"' in scenario_script
     for spec_name in (
@@ -445,22 +446,15 @@ def test_schedule_multi_scenario_uses_official_model_specific_specs() -> None:
 
 
 def test_formal_runner_fails_fast_on_same_spec_identity_mismatch() -> None:
-    runner_script = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(
-        encoding="utf-8"
-    )
-    install_script = (
-        SCRIPT_DIR / "install_ascend_benchmark_with_dev_hub.sh"
-    ).read_text(encoding="utf-8")
+    runner_script = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
+    install_script = (SCRIPT_DIR / "install_ascend_benchmark_with_dev_hub.sh").read_text(encoding="utf-8")
 
     assert "validate_same_spec_identity()" in runner_script
     assert "same-spec model parameter mismatch" in runner_script
     assert "same-spec model identity mismatch" in runner_script
     assert "same-spec model precision mismatch" in runner_script
     assert "same-spec runtime dtype mismatch" in runner_script
-    assert (
-        'validate_same_spec_identity "$effective_same_spec_file" || return 2'
-        in runner_script
-    )
+    assert 'validate_same_spec_identity "$effective_same_spec_file" || return 2' in runner_script
     assert '"datasets"' in install_script
 
 
