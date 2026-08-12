@@ -134,6 +134,17 @@ class TestDispatchFFNCombine:
         hcomm_info = hcomm_info_dist["default_pg_info"]
         self.hcomm_info = hcomm_info
 
+    def expected_local_counts(self, expert_idx, x_active_mask, local_experts):
+        active_routes = expert_idx[x_active_mask].reshape(-1)
+        routes_by_rank = [torch.empty_like(active_routes) for _ in range(self.world_size)]
+        dist.all_gather(routes_by_rank, active_routes)
+        global_counts = torch.bincount(
+            torch.cat(routes_by_rank).cpu(),
+            minlength=self.world_size * local_experts,
+        ).to(torch.int32)
+        start = self.rank * local_experts
+        return global_counts[start : start + local_experts]
+
     def run_tensor_list(self) -> bool:
         torch_npu.npu.set_device(DEVICE_OFFSET + self.rank)
         m = 64
@@ -173,10 +184,12 @@ class TestDispatchFFNCombine:
 
         x = x.npu()
         expert_idx = expert_idx.npu()
+        expert_idx_before = expert_idx.clone()
         scale1 = scale1.npu()
         scale2 = scale2.npu()
         probs = probs.npu()
         x_active_mask = x_active_mask.npu()
+        expected_counts = self.expected_local_counts(expert_idx, x_active_mask, e)
 
         weight1_nz_npu = []
         weight2_nz_npu = []
@@ -211,6 +224,9 @@ class TestDispatchFFNCombine:
             expert_token_nums=expert_token_nums,
             x_active_mask=x_active_mask,
         )
+        torch_npu.npu.synchronize()
+        torch.testing.assert_close(expert_token_nums.reshape(-1).cpu(), expected_counts)
+        torch.testing.assert_close(expert_idx.cpu(), expert_idx_before.cpu(), rtol=0, atol=0)
         return True
 
     def run_normal(self) -> bool:
@@ -252,10 +268,12 @@ class TestDispatchFFNCombine:
 
         x = x.npu()
         expert_idx = expert_idx.npu()
+        expert_idx_before = expert_idx.clone()
         scale1 = scale1.npu()
         scale2 = scale2.npu()
         probs = probs.npu()
         x_active_mask = x_active_mask.npu()
+        expected_counts = self.expected_local_counts(expert_idx, x_active_mask, e)
 
         weight1_nz_npu = []
         weight2_nz_npu = []
@@ -291,6 +309,9 @@ class TestDispatchFFNCombine:
             expert_token_nums=expert_token_nums,
             x_active_mask=x_active_mask,
         )
+        torch_npu.npu.synchronize()
+        torch.testing.assert_close(expert_token_nums.reshape(-1).cpu(), expected_counts)
+        torch.testing.assert_close(expert_idx.cpu(), expert_idx_before.cpu(), rtol=0, atol=0)
         return True
 
     def generate_random_tensor(self, size, dtype):
@@ -304,32 +325,19 @@ class TestDispatchFFNCombine:
             raise ValueError(f"Invalid dtype: {dtype}")
 
 
-def worker(rank: int, world_size: int, port: int, q: mp.SimpleQueue):
+def worker(rank: int, world_size: int, port: int):
     op = TestDispatchFFNCombine(rank, world_size, port)
-    op.generate_hcom()
-    out1 = op.run_tensor_list()
-    q.put(out1)
-    out2 = op.run_normal()
-    q.put(out2)
+    try:
+        op.generate_hcom()
+        op.run_tensor_list()
+        op.run_normal()
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 @torch.inference_mode()
 def test_dispatch_ffn_combine_kernel():
     world_size = 2
-    mp.set_start_method("fork", force=True)
-
-    q = mp.SimpleQueue()
-    p_list = []
     port = 29501 + random.randint(0, 10000)
-
-    for rank in range(world_size):
-        p = mp.Process(target=worker, args=(rank, world_size, port, q))
-        p.start()
-        p_list.append(p)
-
-    results = [q.get() for _ in range(world_size)]
-
-    for p in p_list:
-        p.join()
-
-    assert all(results)
+    mp.spawn(worker, args=(world_size, port), nprocs=world_size, join=True)

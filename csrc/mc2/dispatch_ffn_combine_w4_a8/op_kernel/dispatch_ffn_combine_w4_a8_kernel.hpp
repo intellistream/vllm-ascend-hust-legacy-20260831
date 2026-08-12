@@ -44,6 +44,11 @@ namespace Catlass::Gemm::Kernel {
 
 constexpr uint16_t SYNCFLAGC2V = 9;
 constexpr uint16_t SYNCFLAGV2C = 10;
+// DataCopyParams::blockLen is uint16_t bytes. Keep every int32_t route-ID
+// transfer below that ABI limit and small enough for the shared UB window.
+constexpr int64_t ACTIVE_MASK_COPY_CHUNK_ELEMENTS = 8 * 1024;
+static_assert(ACTIVE_MASK_COPY_CHUNK_ELEMENTS * sizeof(int32_t) <= 65535,
+              "active-mask route chunk exceeds DataCopyPad blockLen");
 
 template <class BlockMmad_, class BlockScheduler_, class ElementGroupList_, class BlockEpilogue1_,
           class BlockEpilogue2_>
@@ -331,47 +336,63 @@ private:
 
 
     CATLASS_DEVICE
-    void ApplyXActiveMask(Params const &params) {
+    GM_ADDR ApplyXActiveMask(Params const &params) {
         if (params.ptrXActiveMask == nullptr) {
-            return;
+            return params.expertIdx;
         }
         int32_t m = params.problemShape.m();
-        int32_t topK = params.topK;
+        int64_t topK = params.topK;
         int32_t expertNum = params.expertPerRank * params.EP;
-        AscendC::GlobalTensor<int32_t> expertIdxGm;
-        expertIdxGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.expertIdx));
+        int64_t totalElements = static_cast<int64_t>(m) * topK;
+        int64_t base = totalElements / coreNum;
+        int64_t rem = totalElements % coreNum;
+        int64_t coreIdx64 = coreIdx;
+        int64_t nextCoreIdx = coreIdx64 + 1;
+        int64_t startIdx = coreIdx64 * base + (coreIdx64 < rem ? coreIdx64 : rem);
+        int64_t endIdx = nextCoreIdx * base + (nextCoreIdx < rem ? nextCoreIdx : rem);
+        int64_t copySize = endIdx - startIdx;
 
-        int32_t totalElements = m * topK;
+        if (copySize > 0) {
+            AscendC::GlobalTensor<int32_t> expertIdxGm;
+            AscendC::GlobalTensor<int32_t> maskedExpertIdxGm;
+            expertIdxGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.expertIdx));
+            // The public Torch schema does not declare expert_idx mutable.
+            // Route padding through operator-owned scratch instead of writing
+            // sentinel expert IDs back into the caller's tensor.
+            maskedExpertIdxGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrMaskedExpertIdx));
+            AscendC::LocalTensor<int32_t> tmpExpertIdx = resource.ubBuf.template GetBufferByByte<int32_t>(0);
 
-        int32_t base = totalElements / coreNum;
-        int32_t rem = totalElements % coreNum;
+            for (int64_t chunkOffset = 0; chunkOffset < copySize;
+                 chunkOffset += ACTIVE_MASK_COPY_CHUNK_ELEMENTS) {
+                int64_t remaining = copySize - chunkOffset;
+                int32_t chunkSize = remaining > ACTIVE_MASK_COPY_CHUNK_ELEMENTS
+                    ? static_cast<int32_t>(ACTIVE_MASK_COPY_CHUNK_ELEMENTS)
+                    : static_cast<int32_t>(remaining);
+                uint16_t chunkBytes = static_cast<uint16_t>(chunkSize * sizeof(int32_t));
+                int64_t globalOffset = startIdx + chunkOffset;
 
-        int32_t startIdx = coreIdx * base + min(coreIdx, rem);
-        int32_t endIdx = (coreIdx + 1) * base + min(coreIdx + 1, rem);
+                AscendC::DataCopyPad(tmpExpertIdx[0], expertIdxGm[globalOffset], {1, chunkBytes, 0, 0}, {});
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
 
-        AscendC::LocalTensor<int32_t> tmpExpertIdx = resource.ubBuf.template GetBufferByByte<int32_t>(0);
-        int32_t copySize = endIdx - startIdx;
+                for (int32_t i = 0; i < chunkSize; ++i) {
+                    int64_t tokenIdx = (globalOffset + i) / topK;
+                    if (!gmXActiveMask(tokenIdx)) {
+                        tmpExpertIdx.SetValue(i, expertNum);
+                    }
+                }
 
-        AscendC::DataCopyPad(tmpExpertIdx[0], expertIdxGm[startIdx], 
-                      {1, static_cast<uint16_t>(copySize * sizeof(int32_t)) , 0, 0 }, {} 
-        );
-
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-
-        for (int32_t i = 0; i < copySize; ++i) {
-            int32_t tokenIdx = (startIdx + i) / topK;
-            bool isActive = gmXActiveMask(tokenIdx);
-            if (!isActive) {
-                tmpExpertIdx.SetValue(i, expertNum);
+                AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+                AscendC::DataCopyPad(maskedExpertIdxGm[globalOffset], tmpExpertIdx[0],
+                                     {1, chunkBytes, 0, 0, 0});
+                // Complete the GM write before the next chunk reuses the UB.
+                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             }
         }
-
-        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::DataCopyPad(expertIdxGm[startIdx], tmpExpertIdx[0], {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0, 0});
-
         AscendC::SyncAll<true>();
+        return workspaceInfo.ptrMaskedExpertIdx;
     }
 
     CATLASS_DEVICE void FetchAndPreprocessInt8ToInt4(uint64_t gmOffsetA, AscendC::GlobalTensor<float> dstScale,
@@ -929,16 +950,14 @@ private:
             peermemInfo.offsetPeerTokenPerExpert + tokenPerExpertLayout(params.rank, 0, 0) * sizeof(int32_t);
         GM_ADDR localTokenPerExpert =
             shmem() + localTokenPerExpertOffset;  // Place the entire communication matrix in peermem
-        uint32_t expandedRowIdxOffset = AlignUp(params.problemShape.m(), 256) * params.topK * sizeof(int32_t);
-
-        ApplyXActiveMask(params);
+        GM_ADDR routingExpertIdx = ApplyXActiveMask(params);
 
         //---initRouting------
         moe_init_routing_quant_v2<ElementD2>(
-            reinterpret_cast<GM_ADDR>(params.ptrA), params.expertIdx, params.moeInitRoutingQuantV2Scale,
+            reinterpret_cast<GM_ADDR>(params.ptrA), routingExpertIdx, params.moeInitRoutingQuantV2Scale,
             params.moeInitRoutingQuantV2Offset, shmem() + peermemInfo.offsetA, workspaceInfo.expandedRowIdx,
             localTokenPerExpert, params.expertTokensBeforeCapacity, shmem() + peermemInfo.offsetPeerPerTokenScale,
-            params.ptrWorkspace + expandedRowIdxOffset, &params.moeInitRoutingQuantV2TilingData,
+            workspaceInfo.ptrInitRoutingWorkspace, &params.moeInitRoutingQuantV2TilingData,
             params.initRoutingQuantTilingKey);
         
         AscendC::SyncAll<true>();
@@ -1189,6 +1208,8 @@ private:
 
 private:
     struct WorkspaceInfo {
+        GM_ADDR ptrMaskedExpertIdx;
+        GM_ADDR ptrInitRoutingWorkspace;
         // GM_ADDR ptrA;
         GM_ADDR ptrPerTokenScale;
         GM_ADDR ptrcumsumMM;
@@ -1220,7 +1241,14 @@ private:
             expandedRowIdx = params.ptrWorkspace;
 
             workspaceOffset += AlignUp(params.problemShape.m(), 256) * params.topK * sizeof(int32_t);
+            // Masked route IDs are consumed only by init-routing. The slice
+            // aliases cumsum storage after init-routing completes.
+            ptrMaskedExpertIdx = params.ptrWorkspace + workspaceOffset;
             ptrcumsumMM = params.ptrWorkspace + workspaceOffset;
+
+            int64_t maskedExpertIdxSize = AlignUp(
+                static_cast<int64_t>(params.problemShape.m()) * params.topK * sizeof(int32_t), 32);
+            ptrInitRoutingWorkspace = ptrMaskedExpertIdx + maskedExpertIdxSize;
 
             workspaceOffset += (params.EP * params.EP * params.expertPerRank) * sizeof(int32_t);
             ptrPerTokenScale = params.ptrWorkspace + workspaceOffset;
