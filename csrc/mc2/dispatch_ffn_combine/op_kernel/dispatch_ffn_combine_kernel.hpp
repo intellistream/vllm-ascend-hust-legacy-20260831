@@ -59,6 +59,11 @@ namespace Catlass::Gemm::Kernel {
 
 constexpr uint16_t SYNCFLAGC2V = 9;
 constexpr uint16_t SYNCFLAGV2C = 10;
+// DataCopyPad::blockLen is uint16_t bytes. Keep masked-route copies both
+// below that ABI limit and bounded by one 32 KiB UB window.
+constexpr int64_t ACTIVE_MASK_COPY_CHUNK_ELEMENTS = 8 * 1024;
+static_assert(ACTIVE_MASK_COPY_CHUNK_ELEMENTS * sizeof(int32_t) <= 65535,
+    "active-mask DataCopyPad chunk exceeds uint16_t blockLen");
 // A high-byte tag distinguishes a published count cache line from the plain
 // counts left behind after the consumer normalizes it. Unlike the old
 // nonzero marker, this makes the next wave safe without clearing the matrix.
@@ -372,39 +377,50 @@ private:
             return;
         }
         int32_t m = params.problemShape.m();
-        int32_t topK = params.topK;
+        int64_t topK = params.topK;
         int32_t expertNum = params.expertPerRank * params.EP;
         AscendC::GlobalTensor<int32_t> expertIdxGm;
         expertIdxGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.expertIdx));
 
-        int32_t totalElements = m * topK;
-        int32_t base = totalElements / coreNum;
-        int32_t rem = totalElements % coreNum;
-
-        int32_t startIdx = coreIdx * base + min(coreIdx, rem);
-        int32_t endIdx = (coreIdx + 1) * base + min(coreIdx + 1, rem);
+        int64_t totalElements = static_cast<int64_t>(m) * topK;
+        int64_t base = totalElements / coreNum;
+        int64_t rem = totalElements % coreNum;
+        int64_t coreIdx64 = coreIdx;
+        int64_t nextCoreIdx = coreIdx64 + 1;
+        int64_t startIdx = coreIdx64 * base + (coreIdx64 < rem ? coreIdx64 : rem);
+        int64_t endIdx = nextCoreIdx * base + (nextCoreIdx < rem ? nextCoreIdx : rem);
 
         AscendC::LocalTensor<int32_t> tmpExpertIdx = resource.ubBuf.template GetBufferByByte<int32_t>(0);
-        int32_t copySize = endIdx - startIdx;
+        int64_t copySize = endIdx - startIdx;
 
-        AscendC::DataCopyPad(tmpExpertIdx[0], expertIdxGm[startIdx], 
-                    {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0}, {}
-        );
+        for (int64_t chunkOffset = 0; chunkOffset < copySize;
+             chunkOffset += ACTIVE_MASK_COPY_CHUNK_ELEMENTS) {
+            int64_t remaining = copySize - chunkOffset;
+            int32_t chunkSize = remaining > ACTIVE_MASK_COPY_CHUNK_ELEMENTS
+                ? static_cast<int32_t>(ACTIVE_MASK_COPY_CHUNK_ELEMENTS)
+                : static_cast<int32_t>(remaining);
+            uint16_t chunkBytes = static_cast<uint16_t>(chunkSize * sizeof(int32_t));
+            int64_t globalOffset = startIdx + chunkOffset;
 
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+            AscendC::DataCopyPad(tmpExpertIdx[0], expertIdxGm[globalOffset], {1, chunkBytes, 0, 0}, {});
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
 
-        for (int32_t i = 0; i < copySize; ++i) {
-            int32_t tokenIdx = (startIdx + i) / topK;
-            bool isActive = gmXActiveMask(tokenIdx);
-            if (!isActive) {
-                tmpExpertIdx.SetValue(i, expertNum);
+            for (int32_t i = 0; i < chunkSize; ++i) {
+                int64_t tokenIdx = (globalOffset + i) / topK;
+                bool isActive = gmXActiveMask(tokenIdx);
+                if (!isActive) {
+                    tmpExpertIdx.SetValue(i, expertNum);
+                }
             }
-        }
 
-        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::DataCopyPad(expertIdxGm[startIdx], tmpExpertIdx[0], {1, static_cast<uint16_t>(copySize * sizeof(int32_t)), 0, 0, 0});
+            AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+            AscendC::DataCopyPad(expertIdxGm[globalOffset], tmpExpertIdx[0], {1, chunkBytes, 0, 0, 0});
+            // Complete the GM write before the next chunk reuses the UB.
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        }
         AscendC::SyncAll<true>();
     }
 

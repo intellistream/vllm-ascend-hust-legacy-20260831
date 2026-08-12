@@ -7,6 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 BF16_KERNEL = (
     REPO_ROOT / "csrc" / "mc2" / "dispatch_ffn_combine_bf16" / "op_kernel" / "dispatch_ffn_combine_bf16_kernel.hpp"
 )
+W8A8_KERNEL = REPO_ROOT / "csrc" / "mc2" / "dispatch_ffn_combine" / "op_kernel" / "dispatch_ffn_combine_kernel.hpp"
 
 
 def _read(path: Path) -> str:
@@ -41,3 +42,7 @@ def _assert_chunked_mask_copy(source: str) -> None:
 
 def test_bf16_active_mask_copy_is_chunked_below_datacopypad_limit() -> None:
     _assert_chunked_mask_copy(_read(BF16_KERNEL))
+
+
+def test_w8a8_active_mask_copy_is_chunked_below_datacopypad_limit() -> None:
+    _assert_chunked_mask_copy(_read(W8A8_KERNEL))
