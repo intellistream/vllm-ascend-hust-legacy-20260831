@@ -955,6 +955,9 @@ def test_plugin_producer_preserves_measurement_and_provenance_evidence() -> None
     assert 'TARGET_MAIN_URL="https://github.com:443/${TARGET_REPOSITORY}.git"' in store
     assert '"$TARGET_MAIN_URL" main:refs/remotes/origin/main' in store
     assert 'origin main:refs/remotes/origin/main' not in store
+    assert 'MAIN_REF_FOR_PUBLICATION=HEAD' in store
+    assert 'Target-main fetch unavailable; publishing immutable exact baseline without latest pointer.' in store
+    assert '--main-ref "$MAIN_REF_FOR_PUBLICATION"' in store
     assert "git worktree" not in store
     assert workflow.count("secrets.VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN") == 1
     producer = workflow[workflow.index("- name: Run Plugin perfgate baseline producer") :]
