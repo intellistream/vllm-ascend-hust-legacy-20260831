@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 import os
 from importlib import import_module, util
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 import torch
@@ -184,7 +184,18 @@ def prune_capture_sizes_for_950(vllm_config):
     )
 
 
-def _resolve_npu_alloc_conf(kv_transfer_config: object | None) -> str:
+class _KVTransferConfigProtocol(Protocol):
+    """Structural type for the KV-transfer config fields used in this module.
+
+    Keeps _resolve_npu_alloc_conf() decoupled from the concrete
+    KVTransferConfig (which lives in vllm.configs) while still giving
+    type checkers a real attribute contract instead of ``object``.
+    """
+
+    kv_connector: Any
+
+
+def _resolve_npu_alloc_conf(kv_transfer_config: _KVTransferConfigProtocol | None) -> str:
     """Resolve the PYTORCH_NPU_ALLOC_CONF value for the current process.
 
     expandable_segments allocates memory in 2MB expandable segments that
