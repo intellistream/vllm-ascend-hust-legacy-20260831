@@ -608,6 +608,7 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
             query=query,
             attn_metadata=attn_metadata,
             is_c8=True,
+            pooling=False,
             actual_cache_dtype=torch.int8,
             fallback_reason="none",
         )
@@ -627,8 +628,73 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
             query=query,
             attn_metadata=attn_metadata,
             is_c8=True,
+            pooling=False,
             actual_cache_dtype=torch.int8,
             fallback_reason="fia_tnd_requires_dense_kv",
+        )
+
+    def test_pooling_records_explicit_unsupported_receipt(self):
+        impl = self._make_impl()
+        impl._use_layer_aware_fia_graph_replay = False
+        impl.vllm_config = Mock(kv_transfer_config=None)
+        impl._prepare_c8_scales = MagicMock()
+        impl._forward_encoder_attention = MagicMock()
+        impl._record_c8_dispatch = MagicMock()
+        query = torch.zeros(2, 4, 8)
+        key = torch.zeros_like(query)
+        value = torch.zeros_like(query)
+        output = torch.zeros_like(query)
+        impl._forward_encoder_attention.return_value = output
+        impl._quantize_kv_to_int8 = MagicMock(return_value=(key.to(torch.int8), value.to(torch.int8)))
+        impl._reshape_and_cache = MagicMock(return_value=(query, key, value, output))
+        impl.key_cache = torch.zeros(1, dtype=torch.int8)
+        layer = Mock(layer_name="model.layers.0.self_attn")
+        attn_metadata = Mock(
+            model_runner_type="pooling",
+            num_actual_tokens=2,
+            attn_state=Mock(),
+        )
+
+        impl.forward(layer, query, key, value, (), attn_metadata, output)
+
+        impl._record_c8_dispatch.assert_called_once_with(
+            dispatch_path="pooling_encoder_attention",
+            layer=layer,
+            query=query,
+            attn_metadata=attn_metadata,
+            actual_cache_dtype=torch.int8,
+            fallback_reason="c8_pooling_uses_encoder_attention",
+            pooling=True,
+        )
+
+    def test_kv_transfer_producer_records_base_attention_fallback(self):
+        impl = self._make_impl()
+        impl._use_layer_aware_fia_graph_replay = False
+        impl.vllm_config = Mock(kv_transfer_config=Mock())
+        impl.is_kv_producer = True
+        impl.key_cache = torch.zeros(1, dtype=torch.float16)
+        impl._prepare_c8_scales = MagicMock()
+        impl._record_c8_dispatch = MagicMock()
+        impl.forward_impl = MagicMock()
+        query = torch.zeros(2, 4, 8)
+        output = torch.zeros_like(query)
+        impl.forward_impl.return_value = output
+        layer = Mock(layer_name="model.layers.0.self_attn")
+        attn_metadata = Mock(
+            model_runner_type="generate",
+            num_actual_tokens=2,
+            attn_state=Mock(),
+        )
+
+        impl.forward(layer, query, None, None, (), attn_metadata, output)
+
+        impl._record_c8_dispatch.assert_called_once_with(
+            dispatch_path="kv_transfer_producer_base_attention",
+            layer=layer,
+            query=query,
+            attn_metadata=attn_metadata,
+            actual_cache_dtype=torch.float16,
+            fallback_reason="kv_transfer_producer_uses_base_attention",
         )
 
     @patch("vllm_ascend.attention.attention_v1.torch_npu.npu_fused_infer_attention_score")

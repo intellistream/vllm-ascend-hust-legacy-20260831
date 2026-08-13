@@ -1598,6 +1598,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         attn_metadata: AscendMetadata,
         actual_cache_dtype: torch.dtype | None,
         fallback_reason: str | None = None,
+        pooling: bool = False,
     ) -> None:
         self._record_python_dispatch(
             layer_id=layer.layer_name,
@@ -1605,8 +1606,26 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             query=query,
             attn_metadata=attn_metadata,
             is_c8=True,
+            pooling=pooling,
             actual_cache_dtype=actual_cache_dtype,
             fallback_reason=fallback_reason or "none",
+        )
+
+    def _record_c8_pooling_dispatch(
+        self,
+        *,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        attn_metadata: AscendMetadata,
+    ) -> None:
+        self._record_c8_dispatch(
+            dispatch_path="pooling_encoder_attention",
+            layer=layer,
+            query=query,
+            attn_metadata=attn_metadata,
+            actual_cache_dtype=getattr(self.key_cache, "dtype", None),
+            fallback_reason="c8_pooling_uses_encoder_attention",
+            pooling=True,
         )
 
     def forward(
@@ -1642,6 +1661,11 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                 query, key, value, _ = self._reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
             # pooling model branch
             if attn_metadata.model_runner_type == "pooling":
+                self._record_c8_pooling_dispatch(
+                    layer=layer,
+                    query=query,
+                    attn_metadata=attn_metadata,
+                )
                 attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
                 return output
@@ -1679,9 +1703,22 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     )
                 # pooling model branch
                 if attn_metadata.model_runner_type == "pooling":
+                    self._record_c8_pooling_dispatch(
+                        layer=layer,
+                        query=query,
+                        attn_metadata=attn_metadata,
+                    )
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
+                self._record_c8_dispatch(
+                    dispatch_path="kv_transfer_producer_base_attention",
+                    layer=layer,
+                    query=query,
+                    attn_metadata=attn_metadata,
+                    actual_cache_dtype=getattr(self.key_cache, "dtype", None),
+                    fallback_reason="kv_transfer_producer_uses_base_attention",
+                )
                 if output_padded is not None:
                     attn_output = self.forward_impl(query, key, value, kv_cache, attn_metadata, output_padded)
                 else:
@@ -1694,6 +1731,11 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     query, key, value, _ = self._reshape_and_cache(query, key, value, kv_cache, attn_metadata, output)
                 # pooling model branch
                 if attn_metadata.model_runner_type == "pooling":
+                    self._record_c8_pooling_dispatch(
+                        layer=layer,
+                        query=query,
+                        attn_metadata=attn_metadata,
+                    )
                     attn_output = self._forward_encoder_attention(query, key, value, attn_metadata, output)
                     output[:num_tokens] = attn_output[:num_tokens]
                     return output
