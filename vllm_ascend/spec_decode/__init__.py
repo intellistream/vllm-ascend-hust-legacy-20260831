@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+
 def get_spec_decode_method(method, vllm_config, device, runner):
     if method == "ngram":
         from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
