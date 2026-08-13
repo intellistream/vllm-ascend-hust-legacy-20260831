@@ -24,9 +24,8 @@ set -euo pipefail
 scversion="stable"
 
 if [ -d "shellcheck-${scversion}" ]; then
-    shellcheck_path="$(pwd)/shellcheck-${scversion}"
-    PATH="$PATH:$shellcheck_path"
-    export PATH
+    shellcheck_dir="$(pwd)/shellcheck-${scversion}"
+    export PATH="$PATH:${shellcheck_dir}"
 fi
 
 if ! [ -x "$(command -v shellcheck)" ]; then
@@ -41,26 +40,20 @@ if ! [ -x "$(command -v shellcheck)" ]; then
     export PATH
 fi
 
-run_shellcheck() {
-    local file
-    local status=0
-    for file in "$@"; do
-        [[ -f "$file" ]] || continue
-        if git check-ignore -q "$file"; then
-            continue
-        fi
-        shellcheck -s bash "$file" || status=$?
-    done
-    return "$status"
-}
-
-# pre-commit passes the changed shell files. Keep the no-argument behavior for
-# developers who intentionally request a repository-wide scan.
 if (( $# > 0 )); then
-    run_shellcheck "$@"
-    exit
+    files=("$@")
+    shellcheck_args=(-s bash --severity=error)
+else
+    mapfile -d '' -t files < <(find . -path ./.git -prune -o -name "*.sh" -print0)
+    shellcheck_args=(-s bash)
 fi
 
-while IFS= read -r -d '' file; do
-    run_shellcheck "$file"
-done < <(find . -path ./.git -prune -o -name "*.sh" -print0)
+status=0
+for file in "${files[@]}"; do
+    if git check-ignore -q "$file"; then
+        continue
+    fi
+    shellcheck "${shellcheck_args[@]}" "$file" || status=1
+done
+
+exit "$status"
