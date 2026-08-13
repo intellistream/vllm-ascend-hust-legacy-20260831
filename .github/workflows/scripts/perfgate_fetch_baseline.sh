@@ -7,6 +7,9 @@ OUTPUT_DIR=${PERFGATE_BASELINE_OUTPUT_DIR:-${RUNNER_TEMP:-/tmp}/perfgate-baselin
 ALLOW_BASELINE_FALLBACK=${PERFGATE_ALLOW_BASELINE_FALLBACK:-0}
 MODE=${PERFGATE_MODE:-report}
 GITHUB_ENV=${GITHUB_ENV:-/dev/null}
+BENCHMARK_REPO_DIR=${VLLM_HUST_BENCHMARK_REPO:-${GITHUB_WORKSPACE:-$PWD}/vllm-hust-benchmark}
+TARGET_REPOSITORY=${PERFGATE_TARGET_REPOSITORY:-${GITHUB_REPOSITORY:-vLLM-HUST/vllm-ascend-hust}}
+SPEC_FILE=${SAME_SPEC_SPEC_FILE:-${PERFGATE_SPEC_FILE:-}}
 
 write_env() {
   local name=$1
@@ -40,27 +43,109 @@ if [[ -z "$COMMIT" ]]; then
 fi
 
 mkdir -p "$OUTPUT_DIR"
-rm -rf "$OUTPUT_DIR/branch"
-if ! git ls-remote --exit-code --heads origin "$BASELINE_BRANCH" >/dev/null 2>&1; then
-  baseline_unavailable "Perfgate baseline branch not found: $BASELINE_BRANCH"
+if [[ ! -d "$BENCHMARK_REPO_DIR/.git" ]]; then
+  baseline_unavailable "Benchmark repository checkout is unavailable: $BENCHMARK_REPO_DIR"
+fi
+if ! git -C "$BENCHMARK_REPO_DIR" fetch --quiet --depth=1 origin \
+  "+$BASELINE_BRANCH:refs/remotes/origin/$BASELINE_BRANCH"; then
+  baseline_unavailable "Perfgate baseline branch cannot be fetched from benchmark repository: $BASELINE_BRANCH"
+fi
+baseline_ref="refs/remotes/origin/$BASELINE_BRANCH"
+if ! git -C "$BENCHMARK_REPO_DIR" rev-parse --verify "$baseline_ref" >/dev/null 2>&1; then
+  baseline_unavailable "Perfgate baseline branch not found in benchmark repository: $BASELINE_BRANCH"
+fi
+if [[ -z "$SPEC_FILE" || ! -f "$SPEC_FILE" ]]; then
+  baseline_unavailable "Perfgate spec file is unavailable: ${SPEC_FILE:-unset}"
+fi
+spec_id=$(jq -er '.id // empty' "$SPEC_FILE") || baseline_unavailable "Perfgate spec id is missing: $SPEC_FILE"
+scenario=${BENCH_SCENARIO:-}
+if [[ -z "$scenario" ]]; then
+  scenario=$(jq -er '.scenario // empty' "$SPEC_FILE") || baseline_unavailable "Perfgate scenario is missing: $SPEC_FILE"
 fi
 
-git clone --depth 1 --branch "$BASELINE_BRANCH" "$(git remote get-url origin)" "$OUTPUT_DIR/branch"
+target_root="baselines/${TARGET_REPOSITORY}/${COMMIT}/${scenario}/${spec_id}"
+baseline_file=""
+baseline_metadata_file=""
+while IFS= read -r metadata_path; do
+  [[ "$metadata_path" == */baseline-metadata.json ]] || continue
+  metadata_json=$(git -C "$BENCHMARK_REPO_DIR" show "$baseline_ref:$metadata_path") || continue
+  if ! jq -e --arg repo "$TARGET_REPOSITORY" --arg sha "$COMMIT" \
+    --arg expected_scenario "$scenario" --arg expected_spec_id "$spec_id" \
+    '.identity.target_repository == $repo and .identity.target_sha == $sha and
+     .identity.scenario == $expected_scenario and .identity.spec_id == $expected_spec_id and
+     (.identity.spec_hash | type == "string" and test("^[0-9a-f]{64}$")) and
+     (.artifact.sha256 | type == "string" and test("^[0-9a-f]{64}$"))' \
+    <<<"$metadata_json" >/dev/null; then
+    continue
+  fi
+  candidate_dir=${metadata_path%/baseline-metadata.json}
+  candidate_artifact_path="$candidate_dir/run_leaderboard.json"
+  candidate_artifact="$OUTPUT_DIR/candidate-run-leaderboard.json"
+  if ! git -C "$BENCHMARK_REPO_DIR" show "$baseline_ref:$candidate_artifact_path" >"$candidate_artifact"; then
+    continue
+  fi
+  expected_sha=$(jq -er '.artifact.sha256' <<<"$metadata_json") || continue
+  actual_sha=$(sha256sum "$candidate_artifact" | awk '{print $1}')
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    baseline_unavailable "Perfgate baseline artifact checksum mismatch: $candidate_artifact_path"
+  fi
+  baseline_file="$candidate_artifact"
+  baseline_metadata_file="$metadata_path"
+  break
+done < <(git -C "$BENCHMARK_REPO_DIR" ls-tree -r --name-only "$baseline_ref" -- "$target_root")
 
-baseline_file="$OUTPUT_DIR/branch/baselines/$COMMIT/run_leaderboard.json"
 baseline_commit="$COMMIT"
 baseline_source="exact"
-if [[ ! -f "$baseline_file" ]]; then
+if [[ -z "$baseline_file" ]]; then
   if [[ "$ALLOW_BASELINE_FALLBACK" != "1" ]]; then
-    baseline_unavailable "No exact perfgate baseline found for $COMMIT"
+    baseline_unavailable "No exact perfgate baseline found for $TARGET_REPOSITORY@$COMMIT ($scenario/$spec_id)"
   fi
-  baseline_file="$OUTPUT_DIR/branch/latest-main.json"
+  pointer_path="pointers/${TARGET_REPOSITORY}/${scenario}/${spec_id}/latest-main.json"
+  pointer_file="$OUTPUT_DIR/latest-main-pointer.json"
+  if ! git -C "$BENCHMARK_REPO_DIR" show "$baseline_ref:$pointer_path" >"$pointer_file"; then
+    baseline_unavailable "No exact perfgate baseline found and latest-main pointer is missing: $pointer_path"
+  fi
+  pointer_repo=$(jq -er '.identity.target_repository // empty' "$pointer_file") || baseline_unavailable "latest-main pointer identity is invalid: $pointer_path"
+  pointer_sha=$(jq -er '.identity.target_sha // empty' "$pointer_file") || baseline_unavailable "latest-main pointer identity is invalid: $pointer_path"
+  pointer_scenario=$(jq -er '.identity.scenario // empty' "$pointer_file") || baseline_unavailable "latest-main pointer identity is invalid: $pointer_path"
+  pointer_spec_id=$(jq -er '.identity.spec_id // empty' "$pointer_file") || baseline_unavailable "latest-main pointer identity is invalid: $pointer_path"
+  pointer_spec_hash=$(jq -er '.identity.spec_hash // empty' "$pointer_file") || baseline_unavailable "latest-main pointer identity is invalid: $pointer_path"
+  pointer_artifact_sha=$(jq -er '.artifact_sha256 // empty' "$pointer_file") || baseline_unavailable "latest-main pointer checksum is invalid: $pointer_path"
+  pointer_artifact_path=$(jq -er '.path // empty' "$pointer_file") || baseline_unavailable "latest-main pointer path is invalid: $pointer_path"
+  if [[ "$pointer_repo" != "$TARGET_REPOSITORY" || "$pointer_scenario" != "$scenario" || "$pointer_spec_id" != "$spec_id" || ! "$pointer_sha" =~ ^[0-9a-f]{40}$ || ! "$pointer_spec_hash" =~ ^[0-9a-f]{64}$ || ! "$pointer_artifact_sha" =~ ^[0-9a-f]{64}$ ]]; then
+    baseline_unavailable "latest-main pointer identity does not match requested target: $pointer_path"
+  fi
+  expected_pointer_prefix="baselines/${TARGET_REPOSITORY}/"
+  expected_pointer_suffix="/${scenario}/${spec_id}/${pointer_spec_hash}/run_leaderboard.json"
+  if [[ "$pointer_artifact_path" != "$expected_pointer_prefix"*"$expected_pointer_suffix" || "$pointer_artifact_path" == /* || "$pointer_artifact_path" == ../* || "$pointer_artifact_path" == */../* || "$pointer_artifact_path" == */.. ]]; then
+    baseline_unavailable "latest-main pointer path is outside the expected target root: $pointer_artifact_path"
+  fi
+  baseline_file="$OUTPUT_DIR/latest-main.json"
+  if ! git -C "$BENCHMARK_REPO_DIR" show "$baseline_ref:$pointer_artifact_path" >"$baseline_file"; then
+    baseline_unavailable "latest-main pointer artifact is unavailable: $pointer_artifact_path"
+  fi
+  actual_pointer_sha=$(sha256sum "$baseline_file" | awk '{print $1}')
+  if [[ "$actual_pointer_sha" != "$pointer_artifact_sha" ]]; then
+    baseline_unavailable "latest-main pointer artifact checksum mismatch: $pointer_artifact_path"
+  fi
+  pointer_metadata_path="${pointer_artifact_path%/run_leaderboard.json}/baseline-metadata.json"
+  pointer_metadata=$(git -C "$BENCHMARK_REPO_DIR" show "$baseline_ref:$pointer_metadata_path") || baseline_unavailable "latest-main pointer metadata is unavailable: $pointer_metadata_path"
+  if ! jq -e --arg repo "$TARGET_REPOSITORY" --arg sha "$pointer_sha" \
+    --arg expected_scenario "$scenario" --arg expected_spec_id "$spec_id" \
+    --arg spec_hash "$pointer_spec_hash" --arg artifact_sha "$pointer_artifact_sha" \
+    '.identity.target_repository == $repo and .identity.target_sha == $sha and
+     .identity.scenario == $expected_scenario and .identity.spec_id == $expected_spec_id and
+     .identity.spec_hash == $spec_hash and .artifact.sha256 == $artifact_sha' \
+    <<<"$pointer_metadata" >/dev/null; then
+    baseline_unavailable "latest-main pointer metadata does not match the referenced artifact: $pointer_metadata_path"
+  fi
+  baseline_metadata_file="$pointer_metadata_path"
   baseline_commit="latest-main"
   baseline_source="latest-main-fallback"
 fi
 
 if [[ ! -f "$baseline_file" ]]; then
-  baseline_unavailable "No perfgate baseline found for $COMMIT and latest-main is missing"
+  baseline_unavailable "No perfgate baseline found for $TARGET_REPOSITORY@$COMMIT ($scenario/$spec_id)"
 fi
 
 resolved_file="$OUTPUT_DIR/baseline-${COMMIT:0:8}.json"
@@ -69,5 +154,8 @@ write_env PERFGATE_BASELINE_FILE "$resolved_file"
 write_env PERFGATE_BASELINE_AVAILABLE 1
 write_env PERFGATE_BASELINE_COMMIT "$baseline_commit"
 write_env PERFGATE_BASELINE_SOURCE "$baseline_source"
+if [[ -n "$baseline_metadata_file" ]]; then
+  write_env PERFGATE_BASELINE_METADATA_PATH "$baseline_metadata_file"
+fi
 
 echo "Fetched perfgate baseline: $baseline_commit ($baseline_source) -> $resolved_file"
