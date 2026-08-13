@@ -20,6 +20,12 @@ EXPECTED_AGGREGATION=${PERFGATE_EXPECTED_AGGREGATION:-primary-median-run}
 WRITER_TOKEN=${PERFGATE_BASELINE_WRITER_TOKEN:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 
+# Avoid runner-wide `https://github.com/` -> SSH rewrites while retaining
+# normal HTTPS authentication through GIT_ASKPASS.
+if [[ "$CENTRAL_REPO_URL" == https://github.com/* ]]; then
+  CENTRAL_REPO_URL="https://github.com:443/${CENTRAL_REPO_URL#https://github.com/}"
+fi
+
 for tool in git jq awk mktemp sha256sum tr "$PYTHON_BIN"; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "Required perfgate publication tool is unavailable: $tool" >&2
