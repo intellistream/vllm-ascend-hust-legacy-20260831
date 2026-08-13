@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -10,6 +12,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = REPO_ROOT / ".github/workflows/scripts"
 STAGE2_SCRIPT = SCRIPT_DIR / "perfgate_stage2_rebase_and_benchmark.sh"
 FETCH_BASELINE_SCRIPT = SCRIPT_DIR / "perfgate_fetch_baseline.sh"
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
 
 
 def _write_executable(path: Path, content: str) -> None:
@@ -217,7 +223,182 @@ def test_fetch_baseline_preserves_reason_in_enforce_mode(tmp_path: Path) -> None
     assert result.returncode == 2
     written_env = github_env.read_text(encoding="utf-8")
     assert "PERFGATE_BASELINE_AVAILABLE" in written_env
-    assert "Perfgate baseline branch not found" in written_env
+    assert "Benchmark repository checkout is unavailable" in written_env
+
+
+def _prepare_central_baseline_repo(tmp_path: Path, *, target_sha: str) -> tuple[Path, Path]:
+    remote = tmp_path / "central.git"
+    worktree = tmp_path / "central-worktree"
+    benchmark_repo = tmp_path / "benchmark"
+    spec_file = tmp_path / "spec.json"
+    _git(tmp_path, "init", "--bare", str(remote))
+    _git(tmp_path, "init", str(worktree))
+    _git(worktree, "config", "user.email", "test@example.com")
+    _git(worktree, "config", "user.name", "Test")
+    _git(worktree, "switch", "-c", "benchmark-baselines")
+
+    spec_id = "perfgate-ascend-qwen25-3b-910b2"
+    scenario = "random-online"
+    spec_hash = "a" * 64
+    target_repo = "vLLM-HUST/vllm-ascend-hust"
+    artifact = '{"same_spec":{"scenario":"random-online","spec_id":"%s","resolved_spec_hash":"%s"}}\n' % (spec_id, spec_hash)
+    artifact_path = (
+        worktree
+        / "baselines"
+        / target_repo
+        / target_sha
+        / scenario
+        / spec_id
+        / spec_hash
+        / "run_leaderboard.json"
+    )
+    metadata_path = artifact_path.with_name("baseline-metadata.json")
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text(artifact, encoding="utf-8")
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "identity": {
+                    "target_repository": target_repo,
+                    "target_sha": target_sha,
+                    "scenario": scenario,
+                    "spec_id": spec_id,
+                    "spec_hash": spec_hash,
+                },
+                "artifact": {"sha256": hashlib.sha256(artifact.encode()).hexdigest()},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(worktree, "add", ".")
+    _git(worktree, "commit", "-m", "test baseline")
+    _git(worktree, "remote", "add", "origin", str(remote))
+    _git(worktree, "push", "origin", "benchmark-baselines")
+    _git(tmp_path, "clone", str(remote), str(benchmark_repo))
+    spec_file.write_text(
+        json.dumps({"id": spec_id, "scenario": scenario}) + "\n", encoding="utf-8"
+    )
+    return benchmark_repo, spec_file
+
+
+def test_fetch_baseline_reads_central_nested_exact_artifact(tmp_path: Path) -> None:
+    target_sha = "b" * 40
+    benchmark_repo, spec_file = _prepare_central_baseline_repo(tmp_path, target_sha=target_sha)
+    github_env = tmp_path / "github-env"
+    output_dir = tmp_path / "output"
+    result = subprocess.run(
+        ["/bin/bash", str(FETCH_BASELINE_SCRIPT), target_sha],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "GITHUB_ENV": str(github_env),
+            "PERFGATE_MODE": "enforce",
+            "VLLM_HUST_BENCHMARK_REPO": str(benchmark_repo),
+            "SAME_SPEC_SPEC_FILE": str(spec_file),
+            "BENCH_SCENARIO": "random-online",
+            "PERFGATE_TARGET_REPOSITORY": "vLLM-HUST/vllm-ascend-hust",
+            "PERFGATE_BASELINE_OUTPUT_DIR": str(output_dir),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert (output_dir / f"baseline-{target_sha[:8]}.json").is_file()
+    assert "PERFGATE_BASELINE_AVAILABLE" in github_env.read_text(encoding="utf-8")
+    assert "PERFGATE_BASELINE_METADATA_PATH" in github_env.read_text(encoding="utf-8")
+
+
+def test_fetch_baseline_rejects_nested_metadata_identity_mismatch(tmp_path: Path) -> None:
+    target_sha = "c" * 40
+    benchmark_repo, spec_file = _prepare_central_baseline_repo(tmp_path, target_sha="d" * 40)
+    github_env = tmp_path / "github-env"
+    result = subprocess.run(
+        ["/bin/bash", str(FETCH_BASELINE_SCRIPT), target_sha],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "GITHUB_ENV": str(github_env),
+            "PERFGATE_MODE": "enforce",
+            "VLLM_HUST_BENCHMARK_REPO": str(benchmark_repo),
+            "SAME_SPEC_SPEC_FILE": str(spec_file),
+            "BENCH_SCENARIO": "random-online",
+            "PERFGATE_TARGET_REPOSITORY": "vLLM-HUST/vllm-ascend-hust",
+            "PERFGATE_BASELINE_OUTPUT_DIR": str(tmp_path / "output"),
+        },
+    )
+    assert result.returncode == 2
+    assert "No exact perfgate baseline found" in github_env.read_text(encoding="utf-8")
+
+
+def test_fetch_baseline_explicit_fallback_accepts_different_main_sha(tmp_path: Path) -> None:
+    main_sha = "e" * 40
+    fork_sha = "f" * 40
+    benchmark_repo, spec_file = _prepare_central_baseline_repo(tmp_path, target_sha=main_sha)
+    worktree = tmp_path / "pointer-worktree"
+    _git(tmp_path, "clone", str(tmp_path / "central.git"), str(worktree))
+    _git(worktree, "switch", "benchmark-baselines")
+    spec_id = "perfgate-ascend-qwen25-3b-910b2"
+    scenario = "random-online"
+    spec_hash = "a" * 64
+    target_repo = "vLLM-HUST/vllm-ascend-hust"
+    artifact_path = (
+        f"baselines/{target_repo}/{main_sha}/{scenario}/{spec_id}/{spec_hash}/run_leaderboard.json"
+    )
+    artifact = worktree / artifact_path
+    artifact_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    pointer = worktree / f"pointers/{target_repo}/{scenario}/{spec_id}/latest-main.json"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text(
+        json.dumps(
+            {
+                "schema_version": "perfgate-baseline/v1",
+                "identity": {
+                    "target_repository": target_repo,
+                    "target_sha": main_sha,
+                    "scenario": scenario,
+                    "spec_id": spec_id,
+                    "spec_hash": spec_hash,
+                },
+                "path": artifact_path,
+                "artifact_sha256": artifact_sha,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _git(worktree, "add", ".")
+    _git(worktree, "commit", "-m", "test latest-main pointer")
+    _git(worktree, "push", "origin", "benchmark-baselines")
+
+    github_env = tmp_path / "github-env"
+    output_dir = tmp_path / "output"
+    result = subprocess.run(
+        ["/bin/bash", str(FETCH_BASELINE_SCRIPT), fork_sha],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "GITHUB_ENV": str(github_env),
+            "PERFGATE_MODE": "enforce",
+            "PERFGATE_ALLOW_BASELINE_FALLBACK": "1",
+            "VLLM_HUST_BENCHMARK_REPO": str(benchmark_repo),
+            "SAME_SPEC_SPEC_FILE": str(spec_file),
+            "BENCH_SCENARIO": scenario,
+            "PERFGATE_TARGET_REPOSITORY": target_repo,
+            "PERFGATE_BASELINE_OUTPUT_DIR": str(output_dir),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    env_text = github_env.read_text(encoding="utf-8")
+    assert "PERFGATE_BASELINE_SOURCE" in env_text
+    assert "latest-main-fallback" in env_text
 
 
 def _run_compare_with_fake_python(
