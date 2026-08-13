@@ -3721,6 +3721,10 @@ class NPUModelRunner(GPUModelRunner):
     def profile_run(self) -> None:
         self.eplb_warmup()
         mc2_tokens_capacity = get_mc2_tokens_capacity()
+        # Eligible A2 fused MC2 reserves the complete scheduler domain, so the
+        # standard maximum-token profile below exercises its largest padded
+        # input and routed workspace. This extra run remains for ordinary MC2
+        # implementations whose memory-saving capacity is below runner max.
         if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
             mc2_tokens_capacity, self.vllm_config
         ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:

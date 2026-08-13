@@ -155,6 +155,9 @@ class NPUModelRunner(GPUModelRunner):
         """
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         with override_mrv2_in_profile_run(True):
+            # A2 fused MC2's standard max-token profile already covers its
+            # scheduler-sized capacity. The extra run is retained for capped
+            # ordinary MC2 implementations.
             if (
                 mc2_tokens_capacity is not None
                 and self.max_num_tokens > mc2_tokens_capacity

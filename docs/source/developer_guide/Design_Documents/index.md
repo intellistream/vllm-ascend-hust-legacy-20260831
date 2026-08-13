@@ -17,4 +17,5 @@ context_parallel
 dynamic_chunked_pipeline_parallel
 quantization
 npugraph_ex
+dispatch_ffn_combine
 :::

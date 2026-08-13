@@ -6,12 +6,23 @@ Verifies that get_mrv2_in_profile_run() and override_mrv2_in_profile_run()
 work correctly with and without torch.compile(fullgraph=True).
 """
 
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
 import torch
 
 from vllm_ascend.ascend_forward_context import (
+    MoECommType,
+    _compute_mc2_tokens_capacity,
+    get_mc2_padded_num_tokens,
     get_mrv2_in_profile_run,
     override_mrv2_in_profile_run,
+    select_moe_comm_method,
+    set_mc2_mask,
+    set_mc2_tokens_capacity,
 )
+from vllm_ascend.utils import AscendDeviceType
 
 
 class ModelWithProfileFlag(torch.nn.Module):
@@ -131,3 +142,173 @@ def test_override_isolated_between_calls():
     # Third call: flag=False (restored)
     out3 = compiled(x)
     assert torch.allclose(out3, x + 1)
+
+
+def _make_moe_config(ep_size: int, quant_type=None, num_experts: int = 16):
+    hf_text_config = SimpleNamespace()
+    if quant_type is not None:
+        hf_text_config.moe_quantize = quant_type
+    return SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=hf_text_config,
+            get_num_experts=lambda: num_experts,
+        ),
+        parallel_config=SimpleNamespace(
+            enable_expert_parallel=True,
+            world_size_across_dp=ep_size,
+            pipeline_parallel_size=1,
+            tensor_parallel_size=ep_size,
+        ),
+    )
+
+
+def _make_capacity_config(
+    max_num_batched_tokens=4096,
+    tp_size=2,
+    top_k=8,
+    capture_size=1024,
+    num_experts=None,
+):
+    if num_experts is None:
+        num_experts = tp_size * 8
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=max_num_batched_tokens),
+        compilation_config=SimpleNamespace(
+            cudagraph_capture_sizes=[capture_size],
+            max_cudagraph_capture_size=capture_size,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp_size,
+            enable_expert_parallel=True,
+            world_size_across_dp=tp_size,
+            pipeline_parallel_size=1,
+        ),
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(num_experts_per_tok=top_k),
+            get_num_experts=lambda: num_experts,
+        ),
+    )
+
+
+def test_a2_fused_capacity_covers_scheduler_legal_domain():
+    vllm_config = _make_capacity_config(max_num_batched_tokens=4097, tp_size=8, top_k=2)
+    ascend_config = SimpleNamespace(enable_fused_mc2=1, enable_prefill_mc2=False)
+
+    with (
+        patch("vllm_ascend.ascend_forward_context.get_ascend_config", return_value=ascend_config),
+        patch("vllm_ascend.ascend_forward_context.get_ascend_device_type", return_value=AscendDeviceType.A2),
+    ):
+        assert _compute_mc2_tokens_capacity(vllm_config, max_num_reqs=32, uniform_decode_query_len=1) == 4104
+
+
+def test_a2_fused_capacity_reserves_two_rows_per_tp_rank():
+    vllm_config = _make_capacity_config(max_num_batched_tokens=1, tp_size=2, top_k=8)
+    ascend_config = SimpleNamespace(enable_fused_mc2=1, enable_prefill_mc2=False)
+
+    with (
+        patch("vllm_ascend.ascend_forward_context.get_ascend_config", return_value=ascend_config),
+        patch("vllm_ascend.ascend_forward_context.get_ascend_device_type", return_value=AscendDeviceType.A2),
+    ):
+        assert _compute_mc2_tokens_capacity(vllm_config, max_num_reqs=1, uniform_decode_query_len=1) == 4
+
+
+def test_ordinary_mc2_capacity_retains_per_tp_ceiling():
+    vllm_config = _make_capacity_config(max_num_batched_tokens=4096, tp_size=2, capture_size=4096)
+    ascend_config = SimpleNamespace(enable_fused_mc2=0, enable_prefill_mc2=False)
+
+    with (
+        patch("vllm_ascend.ascend_forward_context.get_ascend_config", return_value=ascend_config),
+        patch("vllm_ascend.ascend_forward_context.get_ascend_device_type", return_value=AscendDeviceType.A2),
+    ):
+        assert _compute_mc2_tokens_capacity(vllm_config, max_num_reqs=32, uniform_decode_query_len=1) == 1024
+
+
+def test_mc2_capacity_rejects_incompatible_runner_reinitialization(monkeypatch):
+    import vllm_ascend.ascend_forward_context as forward_context
+
+    monkeypatch.setattr(forward_context, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(forward_context, "_mc2_tokens_limit", None)
+    vllm_config = _make_capacity_config(max_num_batched_tokens=1024, tp_size=2, top_k=8)
+    ascend_config = SimpleNamespace(enable_fused_mc2=1, enable_prefill_mc2=False)
+
+    with (
+        patch("vllm_ascend.ascend_forward_context.get_ascend_config", return_value=ascend_config),
+        patch("vllm_ascend.ascend_forward_context.get_ascend_device_type", return_value=AscendDeviceType.A2),
+    ):
+        set_mc2_tokens_capacity(vllm_config, max_num_reqs=32, uniform_decode_query_len=1)
+        vllm_config.scheduler_config.max_num_batched_tokens = 2048
+        with pytest.raises(RuntimeError, match="different execution domain"):
+            set_mc2_tokens_capacity(vllm_config, max_num_reqs=32, uniform_decode_query_len=1)
+
+
+def test_mc2_mask_covers_tp_rounded_scheduler_domain(monkeypatch):
+    import vllm_ascend.ascend_forward_context as forward_context
+
+    monkeypatch.setattr(forward_context, "_mc2_tokens_capacity", 512)
+    monkeypatch.setattr(forward_context, "_reserved_mc2_mask", None)
+    vllm_config = _make_capacity_config(max_num_batched_tokens=513, tp_size=8)
+
+    with patch("vllm_ascend.ascend_forward_context.is_moe_model", return_value=True):
+        set_mc2_mask(vllm_config, device="cpu")
+
+    assert forward_context.get_mc2_mask().shape == (520,)
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "tp_size", "expected"),
+    [(1, 1, 2), (1, 2, 4), (5, 2, 6)],
+)
+def test_a2_fused_padding_keeps_small_batches_in_kernel_domain(num_tokens, tp_size, expected):
+    with patch("vllm_ascend.ascend_forward_context.get_ascend_device_type", return_value=AscendDeviceType.A2):
+        assert get_mc2_padded_num_tokens(num_tokens, tp_size, MoECommType.FUSED_MC2) == expected
+
+
+@pytest.mark.parametrize(
+    ("fused_mode", "quant_type", "ep_size", "local_experts", "expected"),
+    [
+        (1, None, 2, 8, MoECommType.FUSED_MC2),
+        (1, None, 2, 2, MoECommType.ALLGATHER),
+        (0, None, 2, 8, MoECommType.ALLGATHER),
+        (1, "w8a8_dynamic", 2, 8, MoECommType.ALLGATHER),
+        (1, None, 16, 8, MoECommType.MC2),
+    ],
+)
+def test_select_moe_comm_method_a2_fused_float(fused_mode, quant_type, ep_size, local_experts, expected):
+    vllm_config = _make_moe_config(ep_size, quant_type, num_experts=ep_size * local_experts)
+    ep_group = SimpleNamespace(world_size=ep_size)
+    ascend_config = SimpleNamespace(enable_fused_mc2=fused_mode)
+
+    with (
+        patch("vllm_ascend.ascend_forward_context.is_moe_model", return_value=True),
+        patch("vllm_ascend.ascend_forward_context.get_mc2_tokens_capacity", return_value=64),
+        patch("vllm_ascend.ascend_forward_context.get_mc2_tokens_limit", return_value=64),
+        patch("vllm_ascend.ascend_forward_context.get_ascend_device_type", return_value=AscendDeviceType.A2),
+        patch("vllm_ascend.ascend_forward_context.get_ep_group", return_value=ep_group),
+        patch("vllm_ascend.ascend_forward_context.get_ascend_config", return_value=ascend_config),
+    ):
+        assert select_moe_comm_method(32, vllm_config) is expected
+
+
+def test_select_moe_comm_method_a2_fused_float_token_domain():
+    """Fused float MC2 owns the complete scheduler-profiled token domain."""
+    vllm_config = _make_moe_config(ep_size=2, num_experts=16)
+    ep_group = SimpleNamespace(world_size=2)
+    ascend_config = SimpleNamespace(enable_fused_mc2=1)
+
+    with (
+        patch("vllm_ascend.ascend_forward_context.is_moe_model", return_value=True),
+        patch("vllm_ascend.ascend_forward_context.get_mc2_tokens_capacity", return_value=64),
+        patch("vllm_ascend.ascend_forward_context.get_mc2_tokens_limit", return_value=64),
+        patch("vllm_ascend.ascend_forward_context.get_ascend_device_type", return_value=AscendDeviceType.A2),
+        patch("vllm_ascend.ascend_forward_context.get_ep_group", return_value=ep_group),
+        patch("vllm_ascend.ascend_forward_context.get_ascend_config", return_value=ascend_config),
+    ):
+        # One token remains fused; the wrapper supplies inactive padding rows.
+        assert select_moe_comm_method(1, vllm_config) is MoECommType.FUSED_MC2
+        assert select_moe_comm_method(2, vllm_config) is MoECommType.FUSED_MC2
+        assert select_moe_comm_method(32, vllm_config) is MoECommType.FUSED_MC2
+        assert select_moe_comm_method(64, vllm_config) is MoECommType.FUSED_MC2
+        # Crossing the profiled scheduler domain is a contract violation, not
+        # an unsafe per-forward communication-family switch.
+        with pytest.raises(RuntimeError, match="outside the scheduler domain"):
+            select_moe_comm_method(65, vllm_config)
