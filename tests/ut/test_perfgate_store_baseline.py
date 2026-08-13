@@ -145,10 +145,20 @@ esac
         fake_python,
         """#!/bin/sh
 set -eu
+count=0
+if [ -f "${PUBLISH_CAPTURE}.count" ]; then
+  count=$(cat "${PUBLISH_CAPTURE}.count")
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "${PUBLISH_CAPTURE}.count"
 printf '%s\n' "$@" > "${PUBLISH_CAPTURE}.args"
 printf '%s\n' "${GIT_ASKPASS:-}" > "${PUBLISH_CAPTURE}.askpass"
 if [ -n "${PERFGATE_BASELINE_WRITER_TOKEN:-}" ]; then
   printf 'present\n' > "${PUBLISH_CAPTURE}.token"
+fi
+if [ "$count" -le "${FAKE_TRANSIENT_FAILURES:-0}" ]; then
+  printf '%s\n' 'fatal: unable to access remote: Failed to connect to github.com port 443' >&2
+  exit 2
 fi
 exit "${FAKE_PUBLISH_EXIT_CODE:-0}"
 """,
@@ -266,3 +276,26 @@ def test_publisher_failure_propagates_and_removes_askpass(tmp_path: Path) -> Non
     assert result.returncode == 23
     askpass = Path(_capture_path(env, "askpass").read_text(encoding="utf-8").strip())
     assert not askpass.exists()
+
+
+def test_retries_transient_publication_network_failure(tmp_path: Path) -> None:
+    env = _write_publication_fixture(tmp_path)
+    env["FAKE_TRANSIENT_FAILURES"] = "2"
+    env["PERFGATE_PUBLISH_RETRY_SECONDS"] = "0"
+
+    result = _run(env)
+
+    assert result.returncode == 0, result.stderr
+    assert _capture_path(env, "count").read_text(encoding="utf-8") == "3\n"
+    assert "Transient central publication network failure" in result.stderr
+
+
+def test_does_not_retry_non_network_publication_failure(tmp_path: Path) -> None:
+    env = _write_publication_fixture(tmp_path)
+    env["FAKE_PUBLISH_EXIT_CODE"] = "23"
+    env["PERFGATE_PUBLISH_RETRY_SECONDS"] = "0"
+
+    result = _run(env)
+
+    assert result.returncode == 23
+    assert _capture_path(env, "count").read_text(encoding="utf-8") == "1\n"

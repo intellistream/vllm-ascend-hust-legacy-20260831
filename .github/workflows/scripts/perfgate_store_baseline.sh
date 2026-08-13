@@ -217,5 +217,43 @@ if [[ "$UPDATE_LATEST_POINTER" == "1" ]]; then
   PUBLISH_ARGS+=(--update-latest-pointer)
 fi
 
-PYTHONPATH="$BENCHMARK_REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
-  "$PYTHON_BIN" "${PUBLISH_ARGS[@]}"
+PUBLISH_MAX_ATTEMPTS=${PERFGATE_PUBLISH_MAX_ATTEMPTS:-4}
+PUBLISH_RETRY_SECONDS=${PERFGATE_PUBLISH_RETRY_SECONDS:-15}
+PUBLISH_LOG="$ASKPASS_DIR/publish.log"
+
+if ! [[ "$PUBLISH_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "PERFGATE_PUBLISH_MAX_ATTEMPTS must be a positive integer" >&2
+  exit 2
+fi
+if ! [[ "$PUBLISH_RETRY_SECONDS" =~ ^[0-9]+$ ]]; then
+  echo "PERFGATE_PUBLISH_RETRY_SECONDS must be a non-negative integer" >&2
+  exit 2
+fi
+
+is_transient_publication_failure() {
+  grep -Eqi \
+    'Failed to connect|Failure when receiving data from the peer|RPC failed|Connection (reset|timed out)|Could not resolve host|remote end hung up unexpectedly|unexpected disconnect|TLS connection was non-properly terminated|HTTP 5[0-9][0-9]' \
+    "$PUBLISH_LOG"
+}
+
+publish_attempt=1
+while [[ "$publish_attempt" -le "$PUBLISH_MAX_ATTEMPTS" ]]; do
+  echo "Publishing central Plugin baseline (attempt ${publish_attempt}/${PUBLISH_MAX_ATTEMPTS})"
+  set +e
+  PYTHONPATH="$BENCHMARK_REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON_BIN" "${PUBLISH_ARGS[@]}" >"$PUBLISH_LOG" 2>&1
+  publish_status=$?
+  set -e
+  cat "$PUBLISH_LOG"
+
+  if [[ "$publish_status" -eq 0 ]]; then
+    exit 0
+  fi
+  if ! is_transient_publication_failure || [[ "$publish_attempt" -eq "$PUBLISH_MAX_ATTEMPTS" ]]; then
+    exit "$publish_status"
+  fi
+
+  echo "Transient central publication network failure; retrying in ${PUBLISH_RETRY_SECONDS}s." >&2
+  sleep "$PUBLISH_RETRY_SECONDS"
+  publish_attempt=$((publish_attempt + 1))
+done
