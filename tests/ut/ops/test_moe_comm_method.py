@@ -7,6 +7,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.ops.fused_moe.moe_comm_method import (
     AllGatherCommImpl,
     AlltoAllCommImpl,
+    FusedMC2CommImpl,
     MC2CommImpl,
 )
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -17,8 +18,9 @@ from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoERoutingParams,
     MoEWeights,
 )
-from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatchOutput
+from vllm_ascend.ops.fused_moe.token_dispatcher import MoETokenDispatchOutput, TokenDispatcherWithMC2
 from vllm_ascend.quantization.methods.base import QuantType
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestMoECommMethod(TestBase):
@@ -135,6 +137,64 @@ class TestMoECommMethod(TestBase):
         # Test finalize method
         comm_impl.finalize(h_out, reduce_results=True, padded_hidden_states_shape=padded_hidden_states_shape)
         mock_pf_instance.finalize.assert_called_once_with(h_out, True, None)
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_mc2_tokens_capacity", return_value=8192)
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_ascend_device_type", return_value=AscendDeviceType.A2)
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_tensor_model_parallel_world_size", return_value=2)
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_ep_group", return_value=MagicMock(world_size=2))
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithMC2")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithMC2")
+    @patch("torch.zeros", return_value=MagicMock())
+    def test_a2_fused_mc2_reserves_scheduler_routed_domain(
+        self,
+        mock_zeros,
+        mock_token_dispatcher,
+        mock_prepare_finalize,
+        mock_ep_group,
+        mock_tp_size,
+        mock_device_type,
+        mock_capacity,
+    ):
+        self.mock_ascend_config.enable_fused_mc2 = 1
+        self.moe_config.tp_size = 2
+        self.moe_config.ep_size = 2
+        self.moe_config.experts_per_token = 8
+
+        comm_impl = FusedMC2CommImpl(self.moe_config)
+
+        self.assertEqual(comm_impl.max_output_size, 65536)
+
+    @patch("torch.ops._C_ascend.dispatch_ffn_combine", create=True)
+    def test_a2_fused_mc2_passes_reserved_routed_domain_to_op(self, mock_dispatch_ffn_combine):
+        self.mock_ascend_config.enable_fused_mc2 = 1
+        comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.max_output_size = 64
+        comm_impl.expert_token_nums = torch.zeros(2, dtype=torch.int32)
+        comm_impl.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
+        comm_impl.token_dispatcher.moe_all_to_all_group_name = "test-group"
+
+        fused_input = MagicMock()
+        fused_input.hidden_states = torch.randn(4, 8)
+        fused_input.topk_ids = torch.zeros((4, 2), dtype=torch.int32)
+        fused_input.topk_weights = torch.full((4, 2), 0.5)
+        fused_input.routing.log2phy = None
+        fused_input.routing.mc2_mask = torch.ones(4, dtype=torch.bool)
+        fused_input.weights.w1 = [torch.empty(0)]
+        fused_input.weights.w2 = [torch.empty(0)]
+        fused_input.weights.w1_scale = [torch.empty(0)]
+        fused_input.weights.w2_scale = [torch.empty(0)]
+        fused_input.weights.w1_scale_bias = [torch.empty(0)]
+        fused_input.weights.w2_scale_bias = [torch.empty(0)]
+        fused_input.swiglu_limit = 1_000_000.0
+
+        comm_impl.fused_experts(fused_input)
+
+        self.assertEqual(mock_dispatch_ffn_combine.call_args.kwargs["max_output_size"], 64)
+
+        fused_input.hidden_states = torch.randn(33, 8)
+        fused_input.topk_ids = torch.zeros((33, 2), dtype=torch.int32)
+        with self.assertRaisesRegex(RuntimeError, "workspace profiled at startup"):
+            comm_impl.fused_experts(fused_input)
 
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAll2All")

@@ -413,7 +413,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
 
         expected_weights = torch.tensor([[1.0, 0.0], [1.0, 0.0], [1.0, 1.0]])
         self.assertTrue(torch.equal(output.combine_metadata.topk_weights, expected_weights))
-        self.assertEqual(mock_init_routing.call_args.kwargs["active_num"], 0)
+        self.assertEqual(mock_init_routing.call_args.kwargs["active_num"], -1)
         self.assertEqual(mock_init_routing.call_args.kwargs["expert_num"], 4)
         self.assertEqual(mock_init_routing.call_args.kwargs["active_expert_range"], [0, 2])
 
@@ -437,24 +437,27 @@ class TestTokenDispatcherWithAllGather(TestBase):
                 ep_size=2,
             )
 
-    def test_dispatch_accepts_eplb_physical_ids(self):
+    def test_dispatch_accepts_eplb_physical_ids_above_logical_range(self):
         dispatcher = TokenDispatcherWithAllGather(
             top_k=2,
-            num_experts=4,
-            num_local_experts=2,
+            num_experts=6,
+            num_local_experts=3,
             ep_rank=1,
             ep_size=2,
         )
         hidden_states = torch.randn(2, 8)
         topk_weights = torch.ones(2, 2)
         logical_topk_ids = torch.tensor([[0, 1], [2, 3]])
-        log2phy = torch.tensor([2, 0, 3, 1])
+        log2phy = torch.tensor([4, 0, 5, 1])
         physical_topk_ids = log2phy[logical_topk_ids]
+        expert_map = torch.tensor([-1, 0, -1, 1])
+        self.assertGreater(physical_topk_ids.max(), len(expert_map) - 1)
         token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=physical_topk_ids,
-            expert_map=torch.tensor([-1, 0, -1, 1]),
+            expert_map=expert_map,
+            global_redundant_expert_num=2,
         )
 
         with patch(
@@ -471,7 +474,8 @@ class TestTokenDispatcherWithAllGather(TestBase):
         expected_weights = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
         self.assertTrue(torch.equal(output.combine_metadata.topk_weights, expected_weights))
         self.assertTrue(torch.equal(mock_init_routing.call_args.args[1], physical_topk_ids))
-        self.assertEqual(mock_init_routing.call_args.kwargs["active_expert_range"], [2, 4])
+        self.assertEqual(mock_init_routing.call_args.kwargs["expert_num"], 6)
+        self.assertEqual(mock_init_routing.call_args.kwargs["active_expert_range"], [3, 6])
 
     @pytest.mark.skip("Skip as register_kernels has NPU SocName checking in CANN 8.5.0.")
     def test_token_dispatch_without_expert_map(self):

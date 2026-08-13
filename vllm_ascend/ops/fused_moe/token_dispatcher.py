@@ -362,10 +362,10 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         if not 0 <= self.ep_rank_id < self.ep_world_size:
             raise ValueError("`ep_rank` must be within the expert parallel group")
 
-        # AllGather consumes physical expert IDs. Plain EP already lays them
-        # out contiguously, while EPLB maps logical IDs to the same physical
-        # layout through log2phy before dispatch.
-        self.global_num_experts = self.num_experts_local * self.ep_world_size
+        # AllGather receives physical expert IDs. Each EP rank owns one
+        # contiguous range in the global physical-expert space, including any
+        # redundant EPLB slots already represented in num_experts.
+        self.global_num_experts = self.num_experts
         self.first_expert_idx = self.ep_rank_id * self.num_experts_local
         self.last_expert_idx = self.first_expert_idx + self.num_experts_local
 
@@ -400,24 +400,21 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             assert topk == 1, "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
         if self.ep_world_size > 1:
-            first_expert_idx = self.first_expert_idx
-            last_expert_idx = self.last_expert_idx
-            mask = (topk_ids >= first_expert_idx) & (topk_ids < last_expert_idx)
+            mask = (topk_ids >= self.first_expert_idx) & (topk_ids < self.last_expert_idx)
             topk_weights = topk_weights * mask
-        else:
-            first_expert_idx = 0
-            last_expert_idx = self.num_experts_local
         sorted_hidden_states, expanded_row_idx, expert_tokens, dynamic_scale = DeviceOperator.npu_moe_init_routing(
             hidden_states,
             topk_ids,
             scale=dynamic_scale,
-            # Zero means all routed tokens. Keeping this scalar static avoids
-            # specializing the graph on a dynamic token count.
-            active_num=0,
+            # This path consumes every routed token.  Using an equivalent
+            # shape-derived active_num forces torch.compile to specialize the
+            # dynamic token dimension at profile time; dropless mode preserves
+            # the symbolic batch while producing the same full output.
+            active_num=-1,
             expert_num=self.global_num_experts,
             expert_tokens_num_type=1,
             expert_tokens_num_flag=True,
-            active_expert_range=[first_expert_idx, last_expert_idx],
+            active_expert_range=[self.first_expert_idx, self.last_expert_idx],
             quant_mode=quant_mode,
         )
         expert_tokens = expert_tokens.to(torch.int64)
