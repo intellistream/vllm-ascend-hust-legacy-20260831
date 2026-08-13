@@ -173,13 +173,22 @@ export GIT_CONFIG_GLOBAL="$GIT_CONFIG_FILE"
 export GIT_CONFIG_NOSYSTEM=1
 
 TARGET_MAIN_URL="https://github.com:443/${TARGET_REPOSITORY}.git"
-git -C "$TARGET_GIT_REPOSITORY" fetch --quiet \
-  "$TARGET_MAIN_URL" main:refs/remotes/origin/main
+MAIN_REF_FOR_PUBLICATION=HEAD
 UPDATE_LATEST_POINTER=0
-if [[ "$(git -C "$TARGET_GIT_REPOSITORY" rev-parse origin/main)" == "$TARGET_SHA" ]]; then
-  UPDATE_LATEST_POINTER=1
+if git -C "$TARGET_GIT_REPOSITORY" fetch --quiet \
+  "$TARGET_MAIN_URL" main:refs/remotes/origin/main; then
+  MAIN_REF_FOR_PUBLICATION=origin/main
+  if [[ "$(git -C "$TARGET_GIT_REPOSITORY" rev-parse origin/main)" == "$TARGET_SHA" ]]; then
+    UPDATE_LATEST_POINTER=1
+  else
+    echo "Target main advanced; publishing exact baseline without updating latest pointer."
+  fi
 else
-  echo "Target main advanced; publishing exact baseline without updating latest pointer."
+  if [[ "$(git -C "$TARGET_GIT_REPOSITORY" rev-parse HEAD)" != "$TARGET_SHA" ]]; then
+    echo "Target-main fetch failed and checked out target does not match requested SHA." >&2
+    exit 2
+  fi
+  echo "Target-main fetch unavailable; publishing immutable exact baseline without latest pointer."
 fi
 
 PUBLISH_ARGS=(
@@ -189,7 +198,7 @@ PUBLISH_ARGS=(
   --source "$BASELINE_FILE"
   --measurement-file "$MEASUREMENT_FILE"
   --target-git-repository "$TARGET_GIT_REPOSITORY"
-  --main-ref origin/main
+  --main-ref "$MAIN_REF_FOR_PUBLICATION"
   --target-repository "$TARGET_REPOSITORY"
   --target-sha "$TARGET_SHA"
   --scenario "$SCENARIO"
