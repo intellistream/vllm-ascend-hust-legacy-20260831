@@ -265,6 +265,8 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "Validate required PR perfgate scenario" in workflow
     assert "Validate required performance gate completion" in workflow
     assert 'PERFGATE_REQUIRED: "1"' in workflow
+    assert "VLLM_ASCEND_HUST_PERFGATE_REQUIRE_PASS || '0'" in workflow
+    assert "env.PERFGATE_REQUIRE_PASS != '1'" in workflow
     assert "PERFGATE_BASELINE_UNAVAILABLE_REASON" in workflow
     assert "PERFGATE_STAGE2_NOT_RUN_REASON" in workflow
     assert "always() && (github.event_name == 'pull_request' || github.event_name == 'issue_comment')" in workflow
@@ -283,7 +285,9 @@ def test_required_perfgate_scripts_fail_fast() -> None:
     assert stage2_script.count('if [[ "$MODE" == "enforce" ]]') >= 2
 
 
-def test_stage1_comparison_fails_only_in_enforce_mode(tmp_path: Path) -> None:
+def test_stage1_metric_failure_is_observed_in_pa1_and_enforced_in_pa2(
+    tmp_path: Path,
+) -> None:
     fake_python = tmp_path / "fake-python"
     fake_python.write_text(
         """#!/bin/bash
@@ -297,7 +301,7 @@ while (( $# > 0 )); do
   shift
 done
 printf '**Overall: FAIL**\n' > "$report_file"
-exit 2
+exit "${FAKE_COMPARE_RC:-1}"
 """,
         encoding="utf-8",
     )
@@ -316,12 +320,39 @@ exit 2
         "PERFGATE_REPORT_FILE": str(tmp_path / "report.md"),
         "GITHUB_ENV": str(tmp_path / "github-env"),
     }
-    enforce_result = subprocess.run(
+    pa1_result = subprocess.run(
         ["bash", str(SCRIPT_DIR / "perfgate_stage1_compare.sh")],
         check=False,
         capture_output=True,
         text=True,
-        env={**common_env, "PERFGATE_MODE": "enforce"},
+        env={
+            **common_env,
+            "PERFGATE_MODE": "enforce",
+            "PERFGATE_REQUIRE_PASS": "0",
+        },
+    )
+    pa2_result = subprocess.run(
+        ["bash", str(SCRIPT_DIR / "perfgate_stage1_compare.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **common_env,
+            "PERFGATE_MODE": "enforce",
+            "PERFGATE_REQUIRE_PASS": "1",
+        },
+    )
+    structural_failure = subprocess.run(
+        ["bash", str(SCRIPT_DIR / "perfgate_stage1_compare.sh")],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **common_env,
+            "PERFGATE_MODE": "enforce",
+            "PERFGATE_REQUIRE_PASS": "0",
+            "FAKE_COMPARE_RC": "2",
+        },
     )
     report_result = subprocess.run(
         ["bash", str(SCRIPT_DIR / "perfgate_stage1_compare.sh")],
@@ -331,7 +362,9 @@ exit 2
         env={**common_env, "PERFGATE_MODE": "report"},
     )
 
-    assert enforce_result.returncode == 2
+    assert pa1_result.returncode == 0
+    assert pa2_result.returncode == 1
+    assert structural_failure.returncode == 2
     assert report_result.returncode == 0
 
 
@@ -379,6 +412,7 @@ def test_required_perfgate_validator_accepts_complete_gate(tmp_path: Path) -> No
         **os.environ,
         "PERFGATE_REQUIRED": "1",
         "PERFGATE_MODE": "enforce",
+        "PERFGATE_REQUIRE_PASS": "1",
         "BENCH_SCENARIO_COUNT": "1",
         "BENCH_SCENARIO": "random-online",
         "PERFGATE_BASELINE_AVAILABLE": "1",
@@ -405,6 +439,49 @@ def test_required_perfgate_validator_accepts_complete_gate(tmp_path: Path) -> No
     )
 
     assert result.returncode == 0
+    assert "completed successfully" in result.stdout
+
+
+def test_required_perfgate_validator_accepts_complete_pa1_with_metric_failures(
+    tmp_path: Path,
+) -> None:
+    stage1_baseline = tmp_path / "stage1-baseline.json"
+    stage2_current = tmp_path / "stage2-current.json"
+    stage2_baseline = tmp_path / "stage2-baseline.json"
+    report = tmp_path / "perfgate-report.md"
+    for path in (stage1_baseline, stage2_current, stage2_baseline, report):
+        path.write_text("{}\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(PERFGATE_VALIDATE_REQUIRED_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PERFGATE_REQUIRED": "1",
+            "PERFGATE_MODE": "enforce",
+            "PERFGATE_REQUIRE_PASS": "0",
+            "BENCH_SCENARIO_COUNT": "1",
+            "BENCH_SCENARIO": "random-online",
+            "PERFGATE_BASELINE_AVAILABLE": "1",
+            "PERFGATE_STAGE1_COMPLETED": "1",
+            "PERFGATE_STAGE1_RESULT": "fail",
+            "PERFGATE_STAGE2_EXECUTED": "1",
+            "PERFGATE_STAGE2_BASELINE_AVAILABLE": "1",
+            "PERFGATE_STAGE2_COMPLETED": "1",
+            "PERFGATE_STAGE2_RESULT": "fail",
+            "PERFGATE_STAGE2_SKIPPED": "0",
+            "PERFGATE_STAGE2_REBASE_CONFLICT": "0",
+            "PERFGATE_RESULT": "fail",
+            "PERFGATE_BASELINE_FILE": str(stage1_baseline),
+            "PERFGATE_STAGE2_B1PRIME_FILE": str(stage2_current),
+            "PERFGATE_STAGE2_M2_BASELINE_FILE": str(stage2_baseline),
+            "PERFGATE_REPORT_FILE": str(report),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
     assert "completed successfully" in result.stdout
 
 

@@ -390,6 +390,9 @@ jobs:
       ALLOW_RANDOM_HF_PUBLISH: ${{ vars.VLLM_ASCEND_HUST_ALLOW_RANDOM_HF_PUBLISH || '0' }}
       SAME_SPEC_BENCHMARK_ENABLED: ${{ (github.event_name == 'workflow_dispatch' && inputs.cleanup_validation_mode != 'normal') && '0' || (vars.VLLM_ASCEND_HUST_SAME_SPEC_BENCHMARK_ENABLED || '1') }}
       PERFGATE_MODE: ${{ github.event_name == 'pull_request' && 'enforce' || (vars.VLLM_ASCEND_HUST_PERFGATE_MODE || 'report') }}
+      # PA1 requires complete two-stage evidence but does not require metric
+      # PASS until Plugin noise tolerance has been reviewed for PA2.
+      PERFGATE_REQUIRE_PASS: ${{ vars.VLLM_ASCEND_HUST_PERFGATE_REQUIRE_PASS || '0' }}
       PERFGATE_SPEC_FILE: ${{ vars.VLLM_ASCEND_HUST_PERFGATE_SPEC_FILE || '' }}
       PERFGATE_BASELINE_BRANCH: ${{ vars.VLLM_ASCEND_HUST_PERFGATE_BASELINE_BRANCH || 'benchmark-baselines' }}
       MAIN_SAME_SPEC_SPEC_FILE: ${{ vars.VLLM_ASCEND_HUST_MAIN_SAME_SPEC_SPEC_FILE || 'docs/official-baselines/official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json' }}
@@ -1177,7 +1180,7 @@ jobs:
         run: bash .github/workflows/scripts/perfgate_stage1_compare.sh
 
       - name: Performance gate - Stage 2 trial rebase and benchmark
-        if: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && steps.resolve-scenario.outputs.BENCH_SCENARIO_COUNT == '1' && env.PERFGATE_BASELINE_AVAILABLE != '0' && (env.PERFGATE_MODE != 'enforce' || env.PERFGATE_STAGE1_RESULT == 'pass') }}
+        if: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && steps.resolve-scenario.outputs.BENCH_SCENARIO_COUNT == '1' && env.PERFGATE_BASELINE_AVAILABLE != '0' && (env.PERFGATE_STAGE1_RESULT == 'pass' || (env.PERFGATE_REQUIRE_PASS != '1' && env.PERFGATE_STAGE1_RESULT == 'fail')) }}
         shell: bash
         env:
           WORKSPACE_ROOT: ${{ github.workspace }}
@@ -1203,6 +1206,7 @@ jobs:
         shell: bash
         env:
           PERFGATE_REQUIRED: "1"
+          PERFGATE_REQUIRE_PASS: ${{ env.PERFGATE_REQUIRE_PASS }}
         run: bash .github/workflows/scripts/perfgate_validate_required.sh
 
       - name: Sanitize runner before formal benchmark publication

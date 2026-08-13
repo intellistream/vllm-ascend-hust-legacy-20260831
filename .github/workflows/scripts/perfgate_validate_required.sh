@@ -26,22 +26,40 @@ require_file() {
 }
 
 require_value PERFGATE_MODE enforce
+if [[ "${PERFGATE_REQUIRE_PASS:-}" != "0" && "${PERFGATE_REQUIRE_PASS:-}" != "1" ]]; then
+  failures+=("PERFGATE_REQUIRE_PASS expected '0' or '1', got '${PERFGATE_REQUIRE_PASS:-unset}'")
+fi
 require_value BENCH_SCENARIO_COUNT 1
 require_value BENCH_SCENARIO random-online
 require_value PERFGATE_BASELINE_AVAILABLE 1
 require_value PERFGATE_STAGE1_COMPLETED 1
-require_value PERFGATE_STAGE1_RESULT pass
 require_value PERFGATE_STAGE2_EXECUTED 1
 require_value PERFGATE_STAGE2_BASELINE_AVAILABLE 1
 require_value PERFGATE_STAGE2_COMPLETED 1
-require_value PERFGATE_STAGE2_RESULT pass
 require_value PERFGATE_STAGE2_SKIPPED 0
 require_value PERFGATE_STAGE2_REBASE_CONFLICT 0
-require_value PERFGATE_RESULT pass
 require_file PERFGATE_BASELINE_FILE
 require_file PERFGATE_STAGE2_B1PRIME_FILE
 require_file PERFGATE_STAGE2_M2_BASELINE_FILE
 require_file PERFGATE_REPORT_FILE
+
+require_comparison_result() {
+  local name=$1
+  local actual=${!name:-}
+  if [[ "$actual" != "pass" && "$actual" != "fail" ]]; then
+    failures+=("$name expected 'pass' or 'fail', got '${actual:-unset}'")
+  fi
+}
+
+require_comparison_result PERFGATE_STAGE1_RESULT
+require_comparison_result PERFGATE_STAGE2_RESULT
+require_comparison_result PERFGATE_RESULT
+
+if [[ "${PERFGATE_REQUIRE_PASS:-0}" == "1" ]]; then
+  require_value PERFGATE_STAGE1_RESULT pass
+  require_value PERFGATE_STAGE2_RESULT pass
+  require_value PERFGATE_RESULT pass
+fi
 
 if (( ${#failures[@]} > 0 )); then
   echo "Required two-stage performance gate is incomplete or failed:" >&2

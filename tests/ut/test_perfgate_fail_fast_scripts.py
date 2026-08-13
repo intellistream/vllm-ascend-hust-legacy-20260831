@@ -590,3 +590,28 @@ def test_final_compare_reports_stage2_not_run_and_fails(tmp_path: Path) -> None:
     github_env = Path(tmp_path / "github-env").read_text(encoding="utf-8")
     assert "PERFGATE_STAGE2_COMPLETED" in github_env
     assert "PERFGATE_STAGE2_RESULT" in github_env
+
+
+def test_final_compare_accepts_complete_pa1_metric_failure(tmp_path: Path) -> None:
+    stage2_current = tmp_path / "stage2-current.json"
+    stage2_baseline = tmp_path / "stage2-baseline.json"
+    stage2_current.write_text("{}\n", encoding="utf-8")
+    stage2_baseline.write_text("{}\n", encoding="utf-8")
+
+    result = _run_compare_with_fake_python(
+        tmp_path,
+        "**Overall: FAIL**\n**Stage 2: FAIL**",
+        "1",
+        {
+            "PERFGATE_REQUIRE_PASS": "0",
+            "PERFGATE_STAGE2_EXECUTED": "1",
+            "PERFGATE_STAGE2_BASELINE_AVAILABLE": "1",
+            "PERFGATE_STAGE2_REBASE_CONFLICT": "0",
+            "PERFGATE_STAGE2_SKIPPED": "0",
+            "PERFGATE_STAGE2_B1PRIME_FILE": str(stage2_current),
+            "PERFGATE_STAGE2_M2_BASELINE_FILE": str(stage2_baseline),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "retaining FAIL report for PA1 evidence" in result.stdout
