@@ -143,10 +143,11 @@ fi
 
 ASKPASS_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/perfgate-writer-askpass.XXXXXX")
 ASKPASS_FILE="$ASKPASS_DIR/askpass.sh"
+GIT_CONFIG_FILE="$ASKPASS_DIR/gitconfig"
 cleanup() {
   local status=${1:-1}
   trap - EXIT
-  unset PERFGATE_BASELINE_WRITER_TOKEN WRITER_TOKEN GIT_ASKPASS GIT_TERMINAL_PROMPT
+  unset PERFGATE_BASELINE_WRITER_TOKEN WRITER_TOKEN GIT_ASKPASS GIT_TERMINAL_PROMPT GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
   rm -rf "$ASKPASS_DIR"
   exit "$status"
 }
@@ -161,9 +162,14 @@ case "$1" in
 esac
 EOF
 chmod 700 "$ASKPASS_FILE"
+touch "$GIT_CONFIG_FILE"
 export PERFGATE_BASELINE_WRITER_TOKEN="$WRITER_TOKEN"
 export GIT_ASKPASS="$ASKPASS_FILE"
 export GIT_TERMINAL_PROMPT=0
+# Ignore runner-wide URL rewrites and SSH settings: the scoped writer token
+# must authenticate the central HTTPS remote directly.
+export GIT_CONFIG_GLOBAL="$GIT_CONFIG_FILE"
+export GIT_CONFIG_NOSYSTEM=1
 
 PUBLISH_ARGS=(
   -m vllm_hust_benchmark.perfgate_baselines publish
