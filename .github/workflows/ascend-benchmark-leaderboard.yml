@@ -508,8 +508,25 @@ jobs:
             fi
           } >> "$GITHUB_ENV"
 
+      - name: Validate Plugin perfgate bootstrap target
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${ASCEND_HUST_LOCAL_CHECKOUT:-0}" != "1" || "${ASCEND_HUST_REPOSITORY:-}" != "$GITHUB_REPOSITORY" ]]; then
+            echo "perfgate-bootstrap requires an in-repository Plugin target" >&2
+            exit 2
+          fi
+          if [[ ! "${ASCEND_HUST_REF:-}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "perfgate-bootstrap requires ASCEND_HUST_TARGET to pin a full 40-character Plugin SHA" >&2
+            exit 2
+          fi
+
       - name: Resolve trusted main dependency SHAs
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: >-
+          ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap' &&
+          env.ASCEND_HUST_LOCAL_CHECKOUT == '1') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -708,7 +725,10 @@ jobs:
           persist-credentials: false
 
       - name: Verify trusted main dependency SHAs
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: >-
+          ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap' &&
+          env.ASCEND_HUST_LOCAL_CHECKOUT == '1') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -946,7 +966,10 @@ jobs:
       # formal leaderboard path. Evidence is uploaded before writer access.
       - name: Run Plugin perfgate baseline producer
         id: perfgate_producer
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        if: >-
+          ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap' &&
+          env.ASCEND_HUST_LOCAL_CHECKOUT == '1') }}
         continue-on-error: true
         shell: bash
         env:
@@ -1054,7 +1077,10 @@ jobs:
             --github-server-url "$GITHUB_SERVER_URL"
 
       - name: Upload Plugin perfgate producer artifact
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.perfgate_producer.outcome == 'success' }}
+        if: >-
+          ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap' &&
+          env.ASCEND_HUST_LOCAL_CHECKOUT == '1')) && steps.perfgate_producer.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: ascend-plugin-perfgate-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1063,7 +1089,10 @@ jobs:
           retention-days: 14
 
       - name: Sanitize runner before Plugin baseline publication
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.perfgate_producer.outcome == 'success' }}
+        if: >-
+          ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap' &&
+          env.ASCEND_HUST_LOCAL_CHECKOUT == '1')) && steps.perfgate_producer.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1072,7 +1101,10 @@ jobs:
           test -z "${PERFGATE_BASELINE_WRITER_TOKEN:-}"
 
       - name: Publish central Plugin perfgate baseline
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.perfgate_producer.outcome == 'success' }}
+        if: >-
+          ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap' &&
+          env.ASCEND_HUST_LOCAL_CHECKOUT == '1')) && steps.perfgate_producer.outcome == 'success' }}
         shell: bash
         env:
           # The independent scoped writer exists only in this trusted step.
@@ -1527,7 +1559,10 @@ jobs:
           retention-days: 14
 
       - name: Enforce Plugin perfgate producer result
-        if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.perfgate_producer.outcome != 'success' }}
+        if: >-
+          ${{ always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap' &&
+          env.ASCEND_HUST_LOCAL_CHECKOUT == '1')) && steps.perfgate_producer.outcome != 'success' }}
         run: |
           echo "Dedicated Plugin perfgate producer did not complete successfully" >&2
           exit 1

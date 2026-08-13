@@ -819,6 +819,22 @@ def test_shellcheck_wrapper_checks_only_passed_files(tmp_path: Path) -> None:
     assert failed_result.returncode == 7
 
 
+def test_perfgate_bootstrap_requires_pinned_in_repo_plugin_sha() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    validation_start = workflow.index("- name: Validate Plugin perfgate bootstrap target")
+    validation_end = workflow.index("\n      - name:", validation_start + 1)
+    validation = workflow[validation_start:validation_end]
+    assert "inputs.benchmark_scenarios == 'perfgate-bootstrap'" in validation
+    assert 'ASCEND_HUST_LOCAL_CHECKOUT:-0' in validation
+    assert 'ASCEND_HUST_REPOSITORY:-' in validation
+    assert 'ASCEND_HUST_REF:-' in validation
+    assert "=~ ^[0-9a-f]{40}$" in validation
+    producer = workflow[workflow.index("- name: Run Plugin perfgate baseline producer") :]
+    producer = producer[: producer.index("- name: Upload Plugin perfgate producer artifact")]
+    assert "inputs.benchmark_scenarios == 'perfgate-bootstrap'" in producer
+
+
 def test_pull_request_trigger_preserves_ready_labels_on_updates() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
