@@ -57,7 +57,10 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.utils import enable_sp, lmhead_tp_enable, shared_expert_dp_enabled, vllm_version_is
 
 if not vllm_version_is("0.23.0"):
-    from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
+    # This plugin backport is paired with the vllm-hust DSpark backport.  The
+    # verified upstream vLLM snapshot used by this repository's type-check job
+    # predates that model module, while the runtime pair provides it.
+    from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM  # type: ignore[import-not-found]
 else:
     Qwen3DSparkForCausalLM = None
 
