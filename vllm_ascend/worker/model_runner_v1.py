@@ -18,8 +18,10 @@
 #
 
 import gc
+import json
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -2332,6 +2334,15 @@ class NPUModelRunner(GPUModelRunner):
         has_encoder_input = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
 
         # Run forward pass
+        # 诊断模式下记录真实 NPU forward 区间及其调度请求，便于与 LMCache 传输事件对齐。
+        timeline_path = os.getenv("LMCACHE_GPU_TIMELINE_PATH")
+        timeline_start = None
+        timeline_requests = None
+        if timeline_path:
+            timeline_requests = {
+                request_id: scheduler_output.num_scheduled_tokens[request_id]
+                for request_id in scheduler_output.num_scheduled_tokens
+            }
         clear_kv_metadata = self.speculative_config is None
         with (
             record_function_or_nullcontext("forward"),
@@ -2359,9 +2370,23 @@ class NPUModelRunner(GPUModelRunner):
         ):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            if timeline_path:
+                torch.npu.synchronize()
+                timeline_start = time.time()
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+            if timeline_path and timeline_start is not None:
+                torch.npu.synchronize()
+                event = {
+                    "kind": "gpu_forward",
+                    "start_epoch_s": timeline_start,
+                    "end_epoch_s": time.time(),
+                    "requests": timeline_requests,
+                    "scheduled_tokens": scheduler_output.total_num_scheduled_tokens,
+                }
+                with open(timeline_path, "a", encoding="utf-8") as timeline_file:
+                    timeline_file.write(json.dumps(event) + "\n")
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
