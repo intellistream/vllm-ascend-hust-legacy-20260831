@@ -10,6 +10,8 @@ GITHUB_ENV=${GITHUB_ENV:-/dev/null}
 BENCHMARK_REPO_DIR=${VLLM_HUST_BENCHMARK_REPO:-${GITHUB_WORKSPACE:-$PWD}/vllm-hust-benchmark}
 TARGET_REPOSITORY=${PERFGATE_TARGET_REPOSITORY:-${GITHUB_REPOSITORY:-vLLM-HUST/vllm-ascend-hust}}
 SPEC_FILE=${SAME_SPEC_SPEC_FILE:-${PERFGATE_SPEC_FILE:-}}
+FETCH_MAX_ATTEMPTS=${PERFGATE_BASELINE_FETCH_MAX_ATTEMPTS:-4}
+FETCH_RETRY_SECONDS=${PERFGATE_BASELINE_FETCH_RETRY_SECONDS:-15}
 
 write_env() {
   local name=$1
@@ -37,6 +39,26 @@ baseline_unavailable() {
   exit 2
 }
 
+fetch_baseline_branch_with_retry() {
+  local attempt=1
+  local delay_seconds=$FETCH_RETRY_SECONDS
+
+  while (( attempt <= FETCH_MAX_ATTEMPTS )); do
+    echo "Fetching perfgate baseline branch (attempt ${attempt}/${FETCH_MAX_ATTEMPTS}): $BASELINE_BRANCH"
+    if git -C "$BENCHMARK_REPO_DIR" fetch --quiet --depth=1 origin \
+      "+$BASELINE_BRANCH:refs/remotes/origin/$BASELINE_BRANCH"; then
+      return 0
+    fi
+    if (( attempt < FETCH_MAX_ATTEMPTS )); then
+      echo "Perfgate baseline fetch failed; retrying in ${delay_seconds}s." >&2
+      sleep "$delay_seconds"
+      delay_seconds=$((delay_seconds * 2))
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 if [[ -z "$COMMIT" ]]; then
   echo "Usage: $0 <commit-sha> or set FORK_POINT/GITHUB_SHA" >&2
   exit 2
@@ -46,8 +68,13 @@ mkdir -p "$OUTPUT_DIR"
 if [[ ! -d "$BENCHMARK_REPO_DIR/.git" ]]; then
   baseline_unavailable "Benchmark repository checkout is unavailable: $BENCHMARK_REPO_DIR"
 fi
-if ! git -C "$BENCHMARK_REPO_DIR" fetch --quiet --depth=1 origin \
-  "+$BASELINE_BRANCH:refs/remotes/origin/$BASELINE_BRANCH"; then
+if [[ ! "$FETCH_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+  baseline_unavailable "PERFGATE_BASELINE_FETCH_MAX_ATTEMPTS must be a positive integer: $FETCH_MAX_ATTEMPTS"
+fi
+if [[ ! "$FETCH_RETRY_SECONDS" =~ ^[0-9]+$ ]]; then
+  baseline_unavailable "PERFGATE_BASELINE_FETCH_RETRY_SECONDS must be a non-negative integer: $FETCH_RETRY_SECONDS"
+fi
+if ! fetch_baseline_branch_with_retry; then
   baseline_unavailable "Perfgate baseline branch cannot be fetched from benchmark repository: $BASELINE_BRANCH"
 fi
 baseline_ref="refs/remotes/origin/$BASELINE_BRANCH"

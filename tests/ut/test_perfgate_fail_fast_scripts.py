@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -241,7 +242,10 @@ def _prepare_central_baseline_repo(tmp_path: Path, *, target_sha: str) -> tuple[
     scenario = "random-online"
     spec_hash = "a" * 64
     target_repo = "vLLM-HUST/vllm-ascend-hust"
-    artifact = '{"same_spec":{"scenario":"random-online","spec_id":"%s","resolved_spec_hash":"%s"}}\n' % (spec_id, spec_hash)
+    artifact = (
+        f'{{"same_spec":{{"scenario":"random-online","spec_id":"{spec_id}",'
+        f'"resolved_spec_hash":"{spec_hash}"}}}}\n'
+    )
     artifact_path = (
         worktree
         / "baselines"
@@ -282,6 +286,41 @@ def _prepare_central_baseline_repo(tmp_path: Path, *, target_sha: str) -> tuple[
     return benchmark_repo, spec_file
 
 
+def _install_transient_fetch_wrapper(tmp_path: Path) -> tuple[Path, Path]:
+    fake_bin = tmp_path / "transient-fetch-bin"
+    fake_bin.mkdir()
+    counter = tmp_path / "fetch-attempts"
+    real_git = shutil.which("git")
+    assert real_git is not None
+    _write_executable(
+        fake_bin / "git",
+        """#!/bin/bash
+set -euo pipefail
+is_fetch=0
+for arg in "$@"; do
+  if [[ "$arg" == "fetch" ]]; then
+    is_fetch=1
+    break
+  fi
+done
+if [[ "$is_fetch" == "1" ]]; then
+  attempt=0
+  if [[ -f "$FETCH_ATTEMPT_COUNTER" ]]; then
+    attempt=$(<"$FETCH_ATTEMPT_COUNTER")
+  fi
+  attempt=$((attempt + 1))
+  printf '%s\n' "$attempt" > "$FETCH_ATTEMPT_COUNTER"
+  if (( attempt < FETCH_SUCCEED_ON_ATTEMPT )); then
+    echo "fatal: unable to access remote: simulated transient timeout" >&2
+    exit 128
+  fi
+fi
+exec "$REAL_GIT" "$@"
+""",
+    )
+    return fake_bin, counter
+
+
 def test_fetch_baseline_reads_central_nested_exact_artifact(tmp_path: Path) -> None:
     target_sha = "b" * 40
     benchmark_repo, spec_file = _prepare_central_baseline_repo(tmp_path, target_sha=target_sha)
@@ -308,6 +347,76 @@ def test_fetch_baseline_reads_central_nested_exact_artifact(tmp_path: Path) -> N
     assert (output_dir / f"baseline-{target_sha[:8]}.json").is_file()
     assert "PERFGATE_BASELINE_AVAILABLE" in github_env.read_text(encoding="utf-8")
     assert "PERFGATE_BASELINE_METADATA_PATH" in github_env.read_text(encoding="utf-8")
+
+
+def test_fetch_baseline_retries_transient_fetch_failure(tmp_path: Path) -> None:
+    target_sha = "1" * 40
+    benchmark_repo, spec_file = _prepare_central_baseline_repo(tmp_path, target_sha=target_sha)
+    fake_bin, counter = _install_transient_fetch_wrapper(tmp_path)
+    github_env = tmp_path / "github-env"
+    result = subprocess.run(
+        ["/bin/bash", str(FETCH_BASELINE_SCRIPT), target_sha],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "REAL_GIT": shutil.which("git") or "git",
+            "FETCH_ATTEMPT_COUNTER": str(counter),
+            "FETCH_SUCCEED_ON_ATTEMPT": "3",
+            "GITHUB_ENV": str(github_env),
+            "PERFGATE_MODE": "enforce",
+            "PERFGATE_BASELINE_FETCH_MAX_ATTEMPTS": "4",
+            "PERFGATE_BASELINE_FETCH_RETRY_SECONDS": "0",
+            "VLLM_HUST_BENCHMARK_REPO": str(benchmark_repo),
+            "SAME_SPEC_SPEC_FILE": str(spec_file),
+            "BENCH_SCENARIO": "random-online",
+            "PERFGATE_TARGET_REPOSITORY": "vLLM-HUST/vllm-ascend-hust",
+            "PERFGATE_BASELINE_OUTPUT_DIR": str(tmp_path / "output"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert counter.read_text(encoding="utf-8").strip() == "3"
+    assert "PERFGATE_BASELINE_AVAILABLE" in github_env.read_text(encoding="utf-8")
+
+
+def test_fetch_baseline_fails_closed_after_fetch_retries(tmp_path: Path) -> None:
+    target_sha = "2" * 40
+    benchmark_repo, spec_file = _prepare_central_baseline_repo(tmp_path, target_sha=target_sha)
+    fake_bin, counter = _install_transient_fetch_wrapper(tmp_path)
+    github_env = tmp_path / "github-env"
+    result = subprocess.run(
+        ["/bin/bash", str(FETCH_BASELINE_SCRIPT), target_sha],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "REAL_GIT": shutil.which("git") or "git",
+            "FETCH_ATTEMPT_COUNTER": str(counter),
+            "FETCH_SUCCEED_ON_ATTEMPT": "99",
+            "GITHUB_ENV": str(github_env),
+            "PERFGATE_MODE": "enforce",
+            "PERFGATE_BASELINE_FETCH_MAX_ATTEMPTS": "3",
+            "PERFGATE_BASELINE_FETCH_RETRY_SECONDS": "0",
+            "VLLM_HUST_BENCHMARK_REPO": str(benchmark_repo),
+            "SAME_SPEC_SPEC_FILE": str(spec_file),
+            "BENCH_SCENARIO": "random-online",
+            "PERFGATE_TARGET_REPOSITORY": "vLLM-HUST/vllm-ascend-hust",
+            "PERFGATE_BASELINE_OUTPUT_DIR": str(tmp_path / "output"),
+        },
+    )
+
+    assert result.returncode == 2
+    assert counter.read_text(encoding="utf-8").strip() == "3"
+    env_text = github_env.read_text(encoding="utf-8")
+    assert "PERFGATE_BASELINE_AVAILABLE" in env_text
+    assert "cannot be fetched" in env_text
 
 
 def test_fetch_baseline_rejects_nested_metadata_identity_mismatch(tmp_path: Path) -> None:
