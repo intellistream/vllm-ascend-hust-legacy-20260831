@@ -24,7 +24,8 @@ set -euo pipefail
 scversion="stable"
 
 if [ -d "shellcheck-${scversion}" ]; then
-    export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
+    shellcheck_dir="$(pwd)/shellcheck-${scversion}"
+    export PATH="$PATH:${shellcheck_dir}"
 fi
 
 if ! [ -x "$(command -v shellcheck)" ]; then
@@ -34,8 +35,24 @@ if ! [ -x "$(command -v shellcheck)" ]; then
     fi
 
     wget -qO- "https://github.com/koalaman/shellcheck/releases/download/${scversion?}/shellcheck-${scversion?}.linux.x86_64.tar.xz" | tar -xJv
-    export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
+    shellcheck_dir="$(pwd)/shellcheck-${scversion}"
+    export PATH="$PATH:${shellcheck_dir}"
 fi
 
-find . -path ./.git -prune -o -name "*.sh" -print0 | \
-  xargs -0 sh -c "for f in \"\$@\"; do git check-ignore -q \"\$f\" || shellcheck -s bash \"\$f\"; done" --
+if (( $# > 0 )); then
+    files=("$@")
+    shellcheck_args=(-s bash --severity=error)
+else
+    mapfile -d '' -t files < <(find . -path ./.git -prune -o -name "*.sh" -print0)
+    shellcheck_args=(-s bash)
+fi
+
+status=0
+for file in "${files[@]}"; do
+    if git check-ignore -q "$file"; then
+        continue
+    fi
+    shellcheck "${shellcheck_args[@]}" "$file" || status=1
+done
+
+exit "$status"
