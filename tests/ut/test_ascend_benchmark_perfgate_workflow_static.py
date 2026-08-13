@@ -948,6 +948,9 @@ def test_plugin_producer_preserves_measurement_and_provenance_evidence() -> None
     assert 'GIT_CONFIG_GLOBAL="$GIT_CONFIG_FILE"' in store
     assert 'GIT_CONFIG_NOSYSTEM=1' in store
     assert "GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM" in store
+    assert store.index('export GIT_CONFIG_GLOBAL="$GIT_CONFIG_FILE"') < store.index(
+        'git -C "$TARGET_GIT_REPOSITORY" fetch'
+    )
     assert "git worktree" not in store
     assert workflow.count("secrets.VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN") == 1
     producer = workflow[workflow.index("- name: Run Plugin perfgate baseline producer") :]

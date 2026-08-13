@@ -132,15 +132,6 @@ if [[ "$ARTIFACT_SHA_NORMALIZED" != "$TARGET_SHA" ]]; then
   exit 2
 fi
 
-git -C "$TARGET_GIT_REPOSITORY" fetch --quiet \
-  origin main:refs/remotes/origin/main
-UPDATE_LATEST_POINTER=0
-if [[ "$(git -C "$TARGET_GIT_REPOSITORY" rev-parse origin/main)" == "$TARGET_SHA" ]]; then
-  UPDATE_LATEST_POINTER=1
-else
-  echo "Target main advanced; publishing exact baseline without updating latest pointer."
-fi
-
 ASKPASS_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/perfgate-writer-askpass.XXXXXX")
 ASKPASS_FILE="$ASKPASS_DIR/askpass.sh"
 GIT_CONFIG_FILE="$ASKPASS_DIR/gitconfig"
@@ -170,6 +161,15 @@ export GIT_TERMINAL_PROMPT=0
 # must authenticate the central HTTPS remote directly.
 export GIT_CONFIG_GLOBAL="$GIT_CONFIG_FILE"
 export GIT_CONFIG_NOSYSTEM=1
+
+git -C "$TARGET_GIT_REPOSITORY" fetch --quiet \
+  origin main:refs/remotes/origin/main
+UPDATE_LATEST_POINTER=0
+if [[ "$(git -C "$TARGET_GIT_REPOSITORY" rev-parse origin/main)" == "$TARGET_SHA" ]]; then
+  UPDATE_LATEST_POINTER=1
+else
+  echo "Target main advanced; publishing exact baseline without updating latest pointer."
+fi
 
 PUBLISH_ARGS=(
   -m vllm_hust_benchmark.perfgate_baselines publish
