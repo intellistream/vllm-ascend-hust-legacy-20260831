@@ -535,6 +535,11 @@ def test_formal_main_and_perfgate_producer_keep_separate_workload_sizes() -> Non
     assert 'BENCH_RANDOM_INPUT_LEN: "64"' in producer
     assert 'BENCH_RANDOM_OUTPUT_LEN: "16"' in producer
 
+    # Stage 1/2 compare resolved_spec_hash, so the consumer and producer must
+    # both run the immutable shared spec without the PR preview overlay.
+    assert 'SAME_SPEC_PR_PREVIEW_COMPAT: "0"' in workflow
+    assert "SAME_SPEC_PR_PREVIEW_COMPAT: ${{" not in workflow
+
 
 def test_main_perfgate_producer_is_reachable_and_pins_dependencies() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
