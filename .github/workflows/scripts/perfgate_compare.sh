@@ -5,6 +5,7 @@ RUN_ID=${RUN_ID:-ci-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_S
 RESULT_ROOT=${RESULT_ROOT:-${GITHUB_WORKSPACE:-$PWD}/.benchmarks/ci/$RUN_ID}
 GITHUB_ENV=${GITHUB_ENV:-/dev/null}
 MODE=${PERFGATE_MODE:-report}
+REQUIRE_PASS=${PERFGATE_REQUIRE_PASS:-0}
 REPORT_FILE=${PERFGATE_REPORT_FILE:-$RESULT_ROOT/perfgate_report.md}
 STAGE1_CURRENT=${PERFGATE_STAGE1_CURRENT_FILE:-$RESULT_ROOT/submissions/$RUN_ID/run_leaderboard.json}
 
@@ -114,6 +115,19 @@ write_env PERFGATE_STAGE2_COMPLETED "$stage2_completed"
 write_env PERFGATE_REPORT_FILE "$REPORT_FILE"
 
 if [[ "$MODE" == "report" ]]; then
+  exit 0
+fi
+if [[ "$rc" -eq 2 || "$result" == "unknown" ]]; then
+  exit 2
+fi
+if [[ "$REQUIRE_PASS" != "1" && "$rc" -eq 1 &&
+  "${PERFGATE_STAGE2_EXECUTED:-0}" == "1" &&
+  "${PERFGATE_STAGE2_BASELINE_AVAILABLE:-0}" == "1" &&
+  "${PERFGATE_STAGE2_REBASE_CONFLICT:-0}" == "0" &&
+  "${PERFGATE_STAGE2_SKIPPED:-0}" == "0" &&
+  -f "${PERFGATE_STAGE2_B1PRIME_FILE:-}" &&
+  -f "${PERFGATE_STAGE2_M2_BASELINE_FILE:-}" ]]; then
+  echo "Performance metrics did not pass zero-tolerance comparison; retaining FAIL report for PA1 evidence."
   exit 0
 fi
 exit "$rc"

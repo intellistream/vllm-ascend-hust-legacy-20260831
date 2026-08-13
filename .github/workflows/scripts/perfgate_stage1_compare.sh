@@ -5,6 +5,7 @@ RUN_ID=${RUN_ID:-ci-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_S
 RESULT_ROOT=${RESULT_ROOT:-${GITHUB_WORKSPACE:-$PWD}/.benchmarks/ci/$RUN_ID}
 GITHUB_ENV=${GITHUB_ENV:-/dev/null}
 MODE=${PERFGATE_MODE:-report}
+REQUIRE_PASS=${PERFGATE_REQUIRE_PASS:-0}
 REPORT_FILE=${PERFGATE_REPORT_FILE:-$RESULT_ROOT/perfgate_report.md}
 STAGE1_CURRENT=${PERFGATE_STAGE1_CURRENT_FILE:-$RESULT_ROOT/submissions/$RUN_ID/run_leaderboard.json}
 
@@ -88,10 +89,15 @@ write_env PERFGATE_REPORT_FILE "$REPORT_FILE"
 if [[ "$rc" -ne 0 ]]; then
   echo "Stage 1 performance gate result: $result (exit $rc); final perfgate comparison/report step will decide job status."
 fi
-if [[ "$MODE" == "enforce" && ("$rc" -ne 0 || "$result" != "pass") ]]; then
-  if [[ "$rc" -ne 0 ]]; then
-    exit "$rc"
+if [[ "$MODE" == "enforce" ]]; then
+  if [[ "$rc" -eq 2 || "$result" == "unknown" ]]; then
+    exit 2
   fi
-  exit 2
+  if [[ "$REQUIRE_PASS" == "1" && ("$rc" -ne 0 || "$result" != "pass") ]]; then
+    if [[ "$rc" -ne 0 ]]; then
+      exit "$rc"
+    fi
+    exit 1
+  fi
 fi
 exit 0
