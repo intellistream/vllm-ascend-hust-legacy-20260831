@@ -126,6 +126,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
         "grouped_matmul_swiglu_quant_v2"
+        "dispatch_ffn_combine_bf16"
         "hamming_dist_top_k"
         "reshape_and_cache_bnsd"
         "recurrent_gated_delta_rule"
@@ -134,6 +135,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
         "store_kv_block"
+        "kv_cache_block_gather"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -186,6 +188,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
         "store_kv_block"
+        "kv_cache_block_gather"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
