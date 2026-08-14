@@ -63,8 +63,65 @@ cleanup() {
 }
 trap cleanup EXIT
 
+record_stage2_not_run() {
+  local reason=$1
+  write_env PERFGATE_STAGE2_EXECUTED 0
+  write_env PERFGATE_STAGE2_BASELINE_AVAILABLE 0
+  write_env PERFGATE_STAGE2_COMPLETED 0
+  write_env PERFGATE_STAGE2_RESULT unknown
+  write_env PERFGATE_STAGE2_SKIPPED 0
+  write_env PERFGATE_STAGE2_REBASE_CONFLICT 0
+  write_env PERFGATE_STAGE2_NOT_RUN_REASON "$reason"
+}
+
+fetch_latest_main() {
+  local max_attempts=${PERFGATE_STAGE2_FETCH_MAX_ATTEMPTS:-3}
+  local retry_delay=${PERFGATE_STAGE2_FETCH_RETRY_SECONDS:-10}
+  local attempt=1
+  local repository_url=""
+
+  if ! [[ "$max_attempts" =~ ^[1-9][0-9]*$ && "$retry_delay" =~ ^[0-9]+$ ]]; then
+    echo "Invalid Stage 2 fetch retry configuration: attempts=$max_attempts delay=$retry_delay" >&2
+    return 1
+  fi
+
+  repository_url="$(git remote get-url origin 2>/dev/null || true)"
+  while (( attempt <= max_attempts )); do
+    echo "Fetching latest Plugin main for Stage 2 (attempt ${attempt}/${max_attempts})"
+    if git fetch origin main; then
+      return 0
+    fi
+
+    # A checkout may have an SSH origin while the runner only has credentials
+    # for actions/checkout's temporary key. Use the public HTTPS endpoint as a
+    # credential-independent fallback for this read-only fetch.
+    if [[ -n "${GITHUB_REPOSITORY:-}" ]]; then
+      echo "SSH-origin fetch failed; retrying via HTTPS read-only endpoint" >&2
+      if git fetch "https://github.com/${GITHUB_REPOSITORY}.git" \
+        "main:refs/remotes/origin/main"; then
+        return 0
+      fi
+    fi
+
+    if (( attempt < max_attempts )); then
+      sleep "$retry_delay"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  if [[ -n "$repository_url" ]]; then
+    echo "Stage 2 could not fetch origin/main (origin=$repository_url)" >&2
+  else
+    echo "Stage 2 could not fetch origin/main (origin URL unavailable)" >&2
+  fi
+  return 1
+}
+
 mkdir -p "$STAGE2_RESULT_ROOT"
-git fetch origin main
+if ! fetch_latest_main; then
+  record_stage2_not_run "Stage 2 latest-main fetch failed before rebase"
+  exit 1
+fi
 M2_COMMIT=$(git rev-parse origin/main)
 write_env PERFGATE_M2_COMMIT "$M2_COMMIT"
 

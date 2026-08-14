@@ -45,6 +45,14 @@ case "${1:-}" in
   ls-remote)
     exit "${FAKE_LS_REMOTE_RC:-0}"
     ;;
+  fetch)
+    exit "${FAKE_GIT_FETCH_RC:-0}"
+    ;;
+  remote)
+    if [[ "${2:-}" == "get-url" ]]; then
+      echo "${FAKE_REMOTE_URL:-https://github.com/example/example.git}"
+    fi
+    ;;
   rebase)
     exit "${FAKE_REBASE_RC:-0}"
     ;;
@@ -195,6 +203,27 @@ def test_stage2_missing_m2_baseline_preserves_reason_and_fails(
     github_env = Path(env["GITHUB_ENV"]).read_text(encoding="utf-8")
     assert "PERFGATE_STAGE2_BASELINE_AVAILABLE" in github_env
     assert "No exact M2 baseline" in github_env
+
+
+def test_stage2_main_fetch_failure_records_not_run_state(tmp_path: Path) -> None:
+    env = _stage2_env(tmp_path)
+    env.update(
+        {
+            "FAKE_GIT_FETCH_RC": "1",
+            "GITHUB_REPOSITORY": "",
+            "PERFGATE_STAGE2_FETCH_MAX_ATTEMPTS": "1",
+            "PERFGATE_STAGE2_FETCH_RETRY_SECONDS": "0",
+        }
+    )
+
+    result = _run_stage2(env)
+
+    assert result.returncode == 1
+    github_env = Path(env["GITHUB_ENV"]).read_text(encoding="utf-8")
+    assert "PERFGATE_STAGE2_EXECUTED" in github_env
+    assert "PERFGATE_STAGE2_COMPLETED" in github_env
+    assert "PERFGATE_STAGE2_RESULT" in github_env
+    assert "Stage 2 latest-main fetch failed before rebase" in github_env
 
 
 def test_fetch_baseline_preserves_reason_in_enforce_mode(tmp_path: Path) -> None:
