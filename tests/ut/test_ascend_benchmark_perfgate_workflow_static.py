@@ -25,6 +25,7 @@ INSTALL_PLUGIN_SCRIPT = REPO_ROOT / "scripts/install_local_ascend_plugin.sh"
 INSTALL_DEV_HUB_SCRIPT = SCRIPT_DIR / "install_ascend_benchmark_with_dev_hub.sh"
 USE_SINGLE_ASCEND_ENV_SCRIPT = REPO_ROOT / "scripts/use_single_ascend_env.sh"
 PERFGATE_VALIDATE_REQUIRED_SCRIPT = SCRIPT_DIR / "perfgate_validate_required.sh"
+PROCESS_CLEANUP_SCRIPT = SCRIPT_DIR / "cleanup_ascend_benchmark_processes.sh"
 
 
 def test_perfgate_scripts_are_present() -> None:
@@ -39,8 +40,119 @@ def test_perfgate_scripts_are_present() -> None:
         "parse_ascend_comment_command.py",
         "resolve_ascend_benchmark_scenario.py",
         "resolve_perfgate_spec_file.py",
+        "cleanup_ascend_benchmark_processes.py",
+        "cleanup_ascend_benchmark_processes.sh",
+        "capture_ascend_benchmark_diagnostics.sh",
+        "prepare_plugin_perfgate_artifact.py",
     ):
         assert (SCRIPT_DIR / script_name).is_file()
+
+
+def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    runner_script = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
+    root_helper = (SCRIPT_DIR / "run_ascend_benchmark_root_helper.sh").read_text(encoding="utf-8")
+    cleanup_wrapper = PROCESS_CLEANUP_SCRIPT.read_text(encoding="utf-8")
+
+    acquire_index = workflow.index("- name: Acquire Ascend hardware lock")
+    stale_index = workflow.index("- name: Cleanup stale Ascend benchmark processes")
+    current_index = workflow.index("- name: Cleanup current Ascend benchmark processes")
+    release_index = workflow.index("- name: Release Ascend hardware lock")
+    assert acquire_index < stale_index < current_index < release_index
+
+    current_step = workflow[current_index:release_index]
+    assert "if: always()" in current_step
+    assert "cleanup_ascend_benchmark_processes.sh current" in current_step
+    assert "ASCEND_BENCHMARK_CLEANUP_MARKER_FILE:" in current_step
+    assert "runtime/process-markers/ascend-benchmark-server.pid" in current_step
+    assert "cleanup_ascend_benchmark_processes.sh stale" in workflow[stale_index:current_index]
+
+    preserve_block = runner_script[runner_script.index("SUDO_PRESERVE_ENV_VARS=(") :]
+    for variable in (
+        "GITHUB_REPOSITORY",
+        "GITHUB_WORKFLOW",
+        "GITHUB_JOB",
+        "GITHUB_RUN_ID",
+        "GITHUB_RUN_ATTEMPT",
+        "RUNNER_NAME",
+        "RUNNER_WORKSPACE",
+    ):
+        assert variable in preserve_block
+        assert variable in cleanup_wrapper
+
+    assert "cleanup-processes)" in root_helper
+    assert "cleanup_ascend_benchmark_processes.py" in root_helper
+    assert 'elif [[ "$mode" == "stale" ]]' in cleanup_wrapper
+    assert "ascend-benchmark-server.pid" in cleanup_wrapper
+    assert "pkill" not in cleanup_wrapper
+    assert "grep -E 'vllm|python|pytest'" not in runner_script
+    assert 'ASCEND_BENCHMARK_CLEANUP_MARKER_FILE="$SERVER_PID_MARKER"' in runner_script
+    assert "record_server_marker_members()" in runner_script
+    assert '--refresh-marker-members "$SERVER_PID_MARKER"' in runner_script
+    assert "record_server_marker\n  # Start the verified-member journal immediately" in runner_script
+    assert (
+        'for attempt in $(seq 1 "$server_ready_max_attempts"); do\n'
+        "      # Keep an append-only snapshot while the launcher identity and ancestry\n"
+        "      # are still available. Cleanup revalidates every PID by start time.\n"
+        "      record_server_marker_members"
+    ) in runner_script
+    assert '  record_server_marker_members\n\n  case "$ASCEND_BENCHMARK_CLEANUP_VALIDATION_MODE"' in runner_script
+    assert 'kill -TERM -- "-$server_group_pid"' not in runner_script
+    assert "if ! command -v setsid >/dev/null 2>&1; then" in runner_script
+    assert "setsid is required to launch the benchmark with an isolated process group" in runner_script
+    assert "VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL" in workflow
+    assert "linux-aarch64-a2b3-npu0" in workflow
+    assert "vllm-ascend-0-21-0rc1" in workflow
+    assert "      - ascend\n      - 910b\n      - docker" in workflow
+    assert 'ASCEND_RT_VISIBLE_DEVICES: "0"' in workflow
+    assert "cleanup-ascend-benchmark:" in workflow
+    assert "needs: ascend-benchmark" in workflow
+    assert "runner_name: ${{ steps.runner-identity.outputs.runner_name }}" in workflow
+    assert "Capture benchmark runner identity" in workflow
+    assert "Verify cleanup runner identity" in workflow
+    assert "Cleanup runner mismatch: expected" in workflow
+    assert "ASCEND_BENCHMARK_CLEANUP_EXPECTED_RUNNER_NAME:" in workflow
+    assert "cleanup_validation_mode:" in workflow
+    assert "failure-after-server-ready" in workflow
+    assert "wait-for-manual-cancel" in workflow
+    assert "wait-for-timeout" in workflow
+    assert "cleanup_validation_timeout_minutes:" in workflow
+    assert "inputs.cleanup_validation_mode != 'normal'" in workflow
+    assert "format('{0}@{1}', github.repository, github.ref_name)" in workflow
+    assert "always() && !cancelled() &&" in workflow
+    assert "Capture idle Ascend NPU diagnostics" in workflow
+    assert workflow.count("Capture post-cleanup Ascend NPU diagnostics") == 2
+    assert "if: ${{ always() && needs.ascend-benchmark.result != 'skipped' }}" in workflow
+    assert "ASCEND_BENCHMARK_CLEANUP_TARGET_JOB: ascend-benchmark" in workflow
+    assert "ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ID: ${{ github.run_id }}" in workflow
+    assert "ASCEND_BENCHMARK_CLEANUP_TARGET_RUN_ATTEMPT: ${{ github.run_attempt }}" in workflow
+    assert "ASCEND_BENCHMARK_CLEANUP_MARKER_FILE:" in workflow
+    cleanup_job = workflow[workflow.index("  cleanup-ascend-benchmark:") :]
+    assert "BENCHMARK_CHECKOUT_USE_SSH_443:" in cleanup_job
+    assert "Configure GitHub SSH over 443" in cleanup_job
+    assert "ssh-key: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY }}" in cleanup_job
+    assert "ssh-strict: ${{ env.BENCHMARK_CHECKOUT_USE_SSH_443 != '1' }}" in cleanup_job
+    assert "timeout-minutes: 10" in workflow
+
+    diagnostics = (SCRIPT_DIR / "capture_ascend_benchmark_diagnostics.sh").read_text(encoding="utf-8")
+    assert '"$npu_smi_bin" info' in diagnostics
+    assert "HBM diagnostics could not be captured" in diagnostics
+
+    assert "validate_cleanup_validation_mode()" in runner_script
+    assert "Ascend cleanup validation modes are restricted to workflow_dispatch" in runner_script
+    assert "Ascend cleanup validation modes cannot publish benchmark results" in runner_script
+    assert "CLEANUP_VALIDATION_READY mode=" in runner_script
+    assert "failure-after-server-ready" in runner_script
+    assert "wait-for-manual-cancel|wait-for-timeout" in runner_script
+    assert 'capture_ascend_benchmark_diagnostics.sh" job-exit' in runner_script
+
+
+def test_cleanup_wrapper_fails_closed_on_runner_mismatch() -> None:
+    cleanup_wrapper = (SCRIPT_DIR / "cleanup_ascend_benchmark_processes.sh").read_text(encoding="utf-8")
+
+    assert "ASCEND_BENCHMARK_CLEANUP_EXPECTED_RUNNER_NAME" in cleanup_wrapper
+    assert '"$RUNNER_NAME" != "$expected_runner_name"' in cleanup_wrapper
+    assert "Cleanup runner mismatch: expected" in cleanup_wrapper
 
 
 def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
@@ -59,16 +171,19 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
         "      - docker\n"
         "      - vllm-ascend-0-21-0rc1\n"
         "      - linux-aarch64-a2b3-pool\n"
-        "      - ascend-benchmark"
+        "      - ascend-benchmark\n"
+        "      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-npu0' }}"
     ) in workflow
-    assert 'ASCEND_RT_VISIBLE_DEVICES: "0"' in workflow
-    assert "VLLM_ASCEND_HUST_BENCHMARK_VISIBLE_DEVICES" not in workflow
     assert (
         "HARDWARE_CHIP_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_chip_model || '910B2' }}"
         in workflow
     )
     assert "Resolve perfgate same-spec file" in workflow
     assert "Resolve main same-spec file" in workflow
+    main_spec_start = workflow.index("- name: Resolve main same-spec file")
+    main_spec_end = workflow.index("- name: Checkout ascend-runtime-manager repo")
+    main_spec_block = workflow[main_spec_start:main_spec_end]
+    assert "github.event_name != 'push'" not in main_spec_block
     assert "resolve_perfgate_spec_file.py" in workflow
     assert "MAIN_SAME_SPEC_SPEC_FILE:" in workflow
     assert "github.event_name != 'pull_request' && github.event_name != 'issue_comment'" in workflow
@@ -78,11 +193,13 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert 'spec_file="${SAME_SPEC_SPEC_FILE:-$MAIN_SAME_SPEC_SPEC_FILE}"' in workflow
     assert "MAIN_BENCH_SCENARIO" in workflow
     assert '--scenario "${MAIN_BENCH_SCENARIO}"' in workflow
-    assert '--repo-root "${GITHUB_WORKSPACE}/vllm-hust-benchmark"' in workflow
+    assert '--repo-root "${VLLM_HUST_BENCHMARK_REPO}"' in workflow
     assert "docs/official-baselines/perfgate-ascend-qwen25-3b-910b2.json" not in workflow
     assert "docs/official-baselines/perfgate-ascend-qwen25-3b-910b3.json" not in workflow
     assert "perfgate-ascend-qwen25-3b-910b3.json" not in workflow
     assert "VLLM_HUST_BENCHMARK_REF" in workflow
+    assert "model_parameters:" in workflow
+    assert "inputs.model_parameters" in workflow
     assert "ref: ${{ env.VLLM_HUST_BENCHMARK_REF }}" in workflow
     assert 'hust_run_pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]"' not in workflow
     assert "Detect PR fork point" in workflow
@@ -90,8 +207,8 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
     assert "Performance gate - Stage 1 comparison" in workflow
     assert "Performance gate - Stage 2 trial rebase and benchmark" in workflow
     assert "Performance gate - two-stage comparison" in workflow
-    assert "store-main-perfgate-baseline:" in workflow
-    assert "Store main perfgate baseline" in workflow
+    assert "store-main-perfgate-baseline:" not in workflow
+    assert "Publish central Plugin perfgate baseline" in workflow
     assert "perfgate_report.md" in workflow
     assert "issue_comment:" in workflow
     assert "Parse Ascend comment command" in workflow
@@ -116,11 +233,15 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
         "inputs.benchmark_scenarios == 'perfgate-bootstrap') "
         "&& steps.resolve-scenario.outputs.BENCH_SCENARIO_COUNT == '1'"
     ) in workflow
-    assert "vars.VLLM_ASCEND_HUST_MAIN_BENCHMARK_SCENARIOS == ''" in workflow
     assert "multi_scenario_results.tsv" in workflow
     assert "Perfgate comparison: `skipped for multi-scenario run" in workflow
     assert "os.environ.get('BENCH_SCENARIO_COUNT', '1') == '1'" in workflow
-    assert "timeout-minutes: 60" in workflow
+    assert (
+        "timeout-minutes: ${{ fromJSON(github.event_name == 'push' && "
+        "github.ref == 'refs/heads/main' && '150' || "
+        "(github.event_name == 'workflow_dispatch' && "
+        "inputs.cleanup_validation_timeout_minutes || '60')) }}"
+    ) in workflow
     assert "VLLM_ASCEND_HUST_PUBLISH_BENCHMARK_ON_PR" not in workflow
     assert "github.event_name == 'pull_request' || github.event_name == 'issue_comment'" in workflow
     assert "Checkout dev-hub repo" not in workflow
@@ -345,12 +466,11 @@ def test_benchmark_runner_resolves_same_spec_without_random_online_default() -> 
     assert "print_same_spec_server_log_tail" in validation_failure_block
 
 
-def test_perfgate_baseline_events_match_pull_request_spec_size() -> None:
+def test_formal_main_and_perfgate_producer_keep_separate_workload_sizes() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
-    fixed_spec_events = (
+    preview_spec_events = (
         "github.event_name == 'pull_request' || github.event_name == 'issue_comment' || "
-        "github.event_name == 'push' || "
         "(github.event_name == 'workflow_dispatch' && "
         "inputs.benchmark_scenarios == 'perfgate-bootstrap')"
     )
@@ -363,56 +483,141 @@ def test_perfgate_baseline_events_match_pull_request_spec_size() -> None:
         "BENCH_RANDOM_OUTPUT_LEN:",
     ):
         line = next(line for line in workflow.splitlines() if line.strip().startswith(setting))
-        assert fixed_spec_events in line
+        assert preview_spec_events in line
+        assert "github.event_name == 'push'" not in line
 
     assert "'Qwen/Qwen2.5-3B-Instruct'" in workflow
-    assert "&& '3B' || '14B'" in workflow
+    assert "&& '3B' || (github.event_name == 'workflow_dispatch' && inputs.model_parameters || '14B')" in workflow
     assert "&& 'BF16' ||" in workflow
     assert "&& 'bfloat16' ||" in workflow
     assert "&& '64' || '1024'" in workflow
     assert "&& '16' || '256'" in workflow
 
+    producer_start = workflow.index("- name: Run Plugin perfgate baseline producer")
+    producer_end = workflow.index("- name: Upload Plugin perfgate producer artifact")
+    producer = workflow[producer_start:producer_end]
+    assert "MODEL_NAME: Qwen/Qwen2.5-3B-Instruct" in producer
+    assert "MODEL_PARAMETERS: 3B" in producer
+    assert "MODEL_PRECISION: BF16" in producer
+    assert "DTYPE: bfloat16" in producer
+    assert 'BENCH_RANDOM_INPUT_LEN: "64"' in producer
+    assert 'BENCH_RANDOM_OUTPUT_LEN: "16"' in producer
 
-def test_main_perfgate_baseline_bootstrap_is_reachable_and_pins_target() -> None:
+
+def test_main_perfgate_producer_is_reachable_and_pins_dependencies() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
     assert "push:" in workflow
     assert "branches:\n      - main" in workflow
     assert "(github.event_name == 'push' && github.ref == 'refs/heads/main')" in workflow
-    assert "inputs.benchmark_scenarios == 'perfgate-bootstrap'" in workflow
-    assert "inputs.benchmark_scenarios != 'perfgate-bootstrap'" in workflow
-    assert "SAME_SPEC_PR_PREVIEW_COMPAT:" in workflow
-    assert (
-        "github.event_name == 'workflow_dispatch' && inputs.benchmark_scenarios == 'perfgate-bootstrap'"
-    ) in workflow
-    assert "inputs.ascend_hust_target == format('{0}@main', github.repository)" in workflow
-    assert "target_sha: ${{ steps.target-metadata.outputs.target_sha }}" in workflow
-    assert 'echo "target_sha=$target_sha" >> "$GITHUB_OUTPUT"' in workflow
-    assert "ref: ${{ needs.ascend-benchmark.outputs.target_sha }}" in workflow
-    assert "BASELINE_TARGET_SHA: ${{ needs.ascend-benchmark.outputs.target_sha }}" in workflow
-    assert 'GITHUB_SHA="$BASELINE_TARGET_SHA"' in workflow
-    preserve = workflow.index("- name: Preserve bootstrap workflow scripts")
-    activate = workflow.index("- name: Activate local manual benchmark target")
-    restore = workflow.index("- name: Restore bootstrap workflow scripts")
-    assert preserve < activate < restore
-    assert 'cp -a .github/workflows/scripts/. "$bootstrap_scripts/"' in workflow
-    assert 'cp -a "$bootstrap_scripts/." .github/workflows/scripts/' in workflow
-    store_job = workflow[workflow.index("  store-main-perfgate-baseline:") :]
-    assert "always() &&" in store_job
-    assert "needs.ascend-benchmark.result == 'success' &&" in store_job
-    push_guard = (
-        "github.event_name == 'push' &&\n"
-        "            github.ref == 'refs/heads/main' &&\n"
-        "            vars.VLLM_ASCEND_HUST_MAIN_BENCHMARK_SCENARIOS == ''"
+    assert "Resolve trusted main dependency SHAs" in workflow
+    for variable in (
+        "VLLM_ASCEND_HUST_PERFGATE_BENCHMARK_RUNNER_SHA",
+        "VLLM_ASCEND_HUST_PERFGATE_VLLM_HUST_SHA",
+        "VLLM_ASCEND_HUST_PERFGATE_RUNTIME_MANAGER_SHA",
+    ):
+        assert variable in workflow
+    assert '[[ ! "$value" =~ ^[0-9a-f]{40}$ ]]' in workflow
+    assert "Verify trusted main dependency SHAs" in workflow
+    assert "Run Plugin perfgate baseline producer" in workflow
+    producer_start = workflow.index("- name: Run Plugin perfgate baseline producer")
+    formal_start = workflow.index("- name: Run benchmark CI and optional formal publish")
+    producer = workflow[producer_start:formal_start]
+    assert 'PERFGATE_WARMUP_RUNS: "1"' in producer
+    assert 'PERFGATE_MEASURED_RUNS: "3"' in producer
+    assert 'PERFGATE_AGGREGATION: "primary-median-run"' in producer
+    assert 'SAME_SPEC_PR_PREVIEW_COMPAT: "0"' in producer
+    assert "fetch_with_retry()" in producer
+    assert "fetch_with_retry --unshallow origin main" in producer
+    assert "fetch_with_retry origin main" in producer
+    assert "prepare_plugin_perfgate_artifact.py" in producer
+    assert producer.index("Upload Plugin perfgate producer artifact") < producer.index(
+        "Publish central Plugin perfgate baseline"
     )
-    bootstrap_guard = (
-        "github.event_name == 'workflow_dispatch' &&\n"
-        "            inputs.benchmark_scenarios == 'perfgate-bootstrap' &&\n"
-        "            inputs.ascend_hust_target == format('{0}@main', github.repository)"
-    )
-    assert push_guard in store_job
-    assert bootstrap_guard in store_job
-    assert store_job.index(") ||") < store_job.index(bootstrap_guard)
+    assert producer_start < workflow.index("Upload Plugin perfgate producer artifact")
+    assert workflow.index("Publish central Plugin perfgate baseline") < formal_start
+    publication = producer[producer.index("Publish central Plugin perfgate baseline") :]
+    assert "VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN" in publication
+    assert "plugin-run_leaderboard.json" in publication
+    assert "--runtime-manager-sha" in workflow
+    assert "store-main-perfgate-baseline:" not in workflow
+    formal = workflow[formal_start : workflow.index("- name: Performance gate - Stage 1 comparison")]
+    assert "!(github.event_name == 'push' && github.ref == 'refs/heads/main')" not in formal
+    snapshot_step = workflow[workflow.index("- name: Sync GitHub leaderboard snapshots") :]
+    snapshot_step = snapshot_step[: snapshot_step.index("- name: Release Ascend hardware lock")]
+    assert "!(github.event_name == 'push' && github.ref == 'refs/heads/main')" not in snapshot_step
+
+
+def test_pull_request_trigger_preserves_ready_labels_on_updates() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "types: [labeled, synchronize, reopened]" in workflow
+    assert "contains(github.event.pull_request.labels.*.name, 'ready')" in workflow
+    assert "contains(github.event.pull_request.labels.*.name, 'verified')" in workflow
+    assert "github.event.label.name" not in workflow
+
+
+def test_plugin_producer_preserves_measurement_and_provenance_evidence() -> None:
+    runner = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
+    store = (SCRIPT_DIR / "perfgate_store_baseline.sh").read_text(encoding="utf-8")
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    for variable in (
+        "PERFGATE_WARMUP_RUNS",
+        "PERFGATE_MEASURED_RUNS",
+        "PERFGATE_AGGREGATION",
+    ):
+        assert variable in runner[runner.index("SUDO_PRESERVE_ENV_VARS=(") :]
+    assert runner.count('PERFGATE_WARMUP_RUNS="$PERFGATE_WARMUP_RUNS"') == 2
+    assert runner.count('PERFGATE_MEASURED_RUNS="$PERFGATE_MEASURED_RUNS"') == 2
+    assert 'cp "$same_spec_submission_dir/measurement.json"' in runner
+    assert '"schema_version": "perfgate-runtime-provenance/v1"' in runner
+    assert '"benchmark_runner_sha"' in runner
+    assert '"runtime_manager_sha"' in runner
+    assert '"cann_version"' in runner
+    assert '"torch_npu_version"' in runner
+    assert "NPU_MEMORY_EXIT_CODE=${NPU_MEMORY_EXIT_CODE:-87}" in runner
+    assert "same_spec_server_log_indicates_npu_memory_pressure" in runner
+    assert "ACL_ERROR_RT_MEMORY_ALLOCATION" in runner
+
+    assert "plugin-run_leaderboard.json" in store
+    assert "verify_raw_result_evidence warmup" in store
+    assert "verify_raw_result_evidence per_run" in store
+    assert "vllm_hust_benchmark.perfgate_baselines publish" in store
+    assert '--measurement-file "$MEASUREMENT_FILE"' in store
+    assert '--runtime-manager-sha "$RUNTIME_MANAGER_SHA"' in store
+    assert "GIT_ASKPASS" in store
+    assert "git worktree" not in store
+    assert workflow.count("secrets.VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN") == 1
+    producer = workflow[workflow.index("- name: Run Plugin perfgate baseline producer") :]
+    producer = producer[: producer.index("- name: Run benchmark CI and optional formal publish")]
+    assert "cleanup_ascend_benchmark_processes.sh current" in producer
+    assert "cleanup_ascend_ci_processes.sh" not in workflow
+
+
+def test_plugin_scheme_c_is_producer_only() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    runner = (SCRIPT_DIR / "run_ascend_benchmark_ci.sh").read_text(encoding="utf-8")
+    store = (SCRIPT_DIR / "perfgate_store_baseline.sh").read_text(encoding="utf-8")
+
+    formal_step = workflow.index("- name: Run benchmark CI and optional formal publish")
+    stage1_step = workflow.index("- name: Performance gate - Stage 1 comparison")
+    stage2_step = workflow.index("- name: Performance gate - Stage 2 trial rebase and benchmark")
+    final_compare_step = workflow.index("- name: Performance gate - two-stage comparison", stage2_step)
+    for block in (
+        workflow[formal_step:stage1_step],
+        workflow[stage2_step:final_compare_step],
+    ):
+        assert "PERFGATE_WARMUP_RUNS:" not in block
+        assert "PERFGATE_MEASURED_RUNS:" not in block
+        assert "PERFGATE_AGGREGATION:" not in block
+
+    assert "PERFGATE_WARMUP_RUNS=${PERFGATE_WARMUP_RUNS:-0}" in runner
+    assert "PERFGATE_MEASURED_RUNS=${PERFGATE_MEASURED_RUNS:-1}" in runner
+    assert "PERFGATE_AGGREGATION=${PERFGATE_AGGREGATION:-primary-median-run}" in runner
+    assert "perfgate-measurement/v2" in store
+    assert "warmup+primary-median-run" in store
+    assert 'secondary_sort_key == "run_index"' in store
 
 
 def test_benchmark_disables_huggingface_xet_download_path() -> None:
@@ -498,6 +703,16 @@ def test_benchmark_prepare_preserves_torch_npu_stack() -> None:
     assert "VLLM_HUST_PYTHON_BIN" in prepare_step
 
 
+def test_benchmark_bootstrap_supports_container_native_python() -> None:
+    install_script = INSTALL_DEV_HUB_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'CONDA_BIN="$(resolve_conda_bin 2>/dev/null || true)"' in install_script
+    assert "VLLM_HUST_PYTHON_BIN:-$(command -v python3" in install_script
+    assert "Conda is unavailable; reusing container Python" in install_script
+    assert "Skipping conda runtime library installation in container-native Python mode" in install_script
+    assert 'marker_root="${CI_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}}/ascend-benchmark"' in install_script
+
+
 def test_benchmark_verify_uses_resolved_python_not_conda_lookup() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     verify_step = workflow[workflow.index("Verify installation") :]
@@ -535,7 +750,7 @@ def test_benchmark_server_uses_inferred_max_model_len_by_default() -> None:
     assert "MAX_MODEL_LEN=${MAX_MODEL_LEN:-}" in runner_script
     assert "max_model_len_args=()" in runner_script
     assert '"${max_model_len_args[@]}"' in runner_script
-    assert runner_script.count('"${max_model_len_args[@]}"') == 2
+    assert runner_script.count('"${max_model_len_args[@]}"') == 1
     assert "max_model_len_args=()" in root_helper
     assert '"${max_model_len_args[@]}"' in root_helper
     assert "MAX_MODEL_LEN must be set" not in root_helper
