@@ -16,6 +16,8 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
+    get_linear_quant_type,
+    get_packed_modules_mapping,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, vllm_version_is
 
@@ -318,6 +320,20 @@ class TestApplyVllmMapper(TestBase):
 
 
 class TestQuantPrefixMapper(TestBase):
+    def test_deepseek_v4_fused_attention_uses_source_shard_quant_types(self):
+        quant_description = {
+            "model.layers.0.self_attn.wq_a.weight": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.wkv.weight": "W8A8_DYNAMIC",
+        }
+
+        quant_type = get_linear_quant_type(
+            quant_description,
+            "model.layers.0.self_attn.fused_wqa_wkv",
+            get_packed_modules_mapping("deepseek_v4"),
+        )
+
+        self.assertEqual(quant_type, "W8A8_DYNAMIC")
+
     def test_lm_head_maps_to_language_model_lm_head_when_quant_key_exists(self):
         config = AscendModelSlimConfig({"language_model.lm_head.weight": "FLOAT"})
 

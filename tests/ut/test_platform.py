@@ -314,6 +314,8 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.decode_context_parallel_size = 1
         vllm_config.parallel_config.prefill_context_parallel_size = 1
         vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.model_config.hf_text_config.index_topk = 2048
+        vllm_config.cache_config.cache_dtype = "fp8"
         mock_init_recompute.return_value = MagicMock()
         vllm_config.scheduler_config = MagicMock()
 
@@ -327,6 +329,7 @@ class TestNPUPlatform(TestBase):
         self.platform.check_and_update_config(vllm_config)
 
         mock_init_ascend.assert_called_once_with(vllm_config)
+        self.assertEqual(vllm_config.cache_config.cache_dtype, "fp8")
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)

@@ -71,6 +71,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache as VllmDeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
@@ -88,6 +89,30 @@ from vllm_ascend.utils import (
 
 if not vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
+
+
+def _store_mtp_hidden_states_impl(buffer: torch.Tensor, hidden_states: torch.Tensor) -> None:
+    """Store only the live token rows in the persistent MTP target buffer.
+
+    Keep this mutation behind an opaque custom op.  npugraph_ex otherwise
+    lowers ``buffer[:hidden_states.shape[0]].copy_(hidden_states)`` to a copy
+    of the *entire* max-token buffer when the compiled graph is replayed at a
+    smaller decode capture size (for example 8 rows versus 1024 rows).
+    """
+    buffer[: hidden_states.shape[0]].copy_(hidden_states)
+
+
+def _store_mtp_hidden_states_fake(buffer: torch.Tensor, hidden_states: torch.Tensor) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="store_deepseek_v4_mtp_hidden_states",
+    op_func=_store_mtp_hidden_states_impl,
+    fake_impl=_store_mtp_hidden_states_fake,
+    mutates_args=["buffer"],
+    dispatch_key="PrivateUse1",
+)
 
 
 def _get_ascend_dsa_backend():
@@ -1079,11 +1104,15 @@ class DeepseekV4Model(nn.Module):
         # Pre-hc_head residual stream buffer for the MTP draft. Stable
         # address (outside the cudagraph pool) so the copy_ in forward()
         # refreshes it correctly across captured shapes.
-        self._mtp_hidden_buffer = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            hc_dim,
-            dtype=vllm_config.model_config.dtype,
-            device=self.device,
+        self._mtp_hidden_buffer = (
+            torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                hc_dim,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
+            if vllm_config.speculative_config is not None
+            else None
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -1143,16 +1172,17 @@ class DeepseekV4Model(nn.Module):
         from vllm_ascend.ascend_forward_context import get_forward_context
 
         forward_ctx = get_forward_context()
-        if forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
+        if self._mtp_hidden_buffer is not None and forward_ctx is not None and forward_ctx.flash_comm_v1_enabled:
             h_states_flat = tensor_model_parallel_all_gather(hidden_states.flatten(1), dim=0)
             pad_size = forward_ctx.pad_size
             if pad_size > 0:
                 h_states_flat = h_states_flat[:-pad_size]
-            num_tokens = h_states_flat.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(h_states_flat)
-        else:
-            num_tokens = hidden_states.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+            torch.ops.vllm.store_deepseek_v4_mtp_hidden_states(self._mtp_hidden_buffer, h_states_flat)
+        elif self._mtp_hidden_buffer is not None:
+            torch.ops.vllm.store_deepseek_v4_mtp_hidden_states(
+                self._mtp_hidden_buffer,
+                hidden_states.flatten(1),
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(

@@ -138,18 +138,31 @@ def _get_kv_cache_groups_uniform_groups(
     # Possibly padding layer tuples for this.
     # Additionally, we also pad KV blocks in each SWA layer, to align the page size
     # with the corresponding layer in the full-MLA group.
-    all_page_sizes = full_mla_spec.get_page_sizes()
+    # Full-MLA pages are the preferred sharing buckets.  Compressor state
+    # pages normally fit in one of these buckets and can be padded to share
+    # the same allocation.  Some valid DeepSeek-V4 layouts (notably the C128
+    # state on A3) are larger than every full-MLA page, however.  Such pages
+    # need their own bucket instead of being rejected.
+    full_mla_page_sizes = sorted(
+        {
+            page_size
+            for spec in (full_mla_spec, full_mla_c128_spec)
+            for page_size in spec.get_page_sizes()
+        }
+    )
     swa_mla_groups = []
     for sm_spec in swa_mla_specs:
         sm_page_sizes = sm_spec.get_page_sizes()
         layers_per_size: dict[int, list[str]] = defaultdict(list)
-        assert max(sm_page_sizes) <= max(all_page_sizes)
-
-        # Unify page size by padding layers' page_size to the nearest larger page_size.
-        # Compute candidate (nearest larger page_size) for each unique page size.
+        # Unify page size by padding to the nearest larger full-MLA page when
+        # possible.  A state page larger than every full-MLA page remains an
+        # independent bucket and is accounted for by the layout planner.
         size_to_candidate: dict[int, int] = {}
         for ps in sm_page_sizes:
-            size_to_candidate[ps] = min(x for x in all_page_sizes if x >= ps)
+            size_to_candidate[ps] = next(
+                (x for x in full_mla_page_sizes if x >= ps),
+                ps,
+            )
         # Pad and collect layer names per page size.
         for layer_name, layer_spec in sm_spec.kv_cache_specs.items():
             current_size = layer_spec.page_size_bytes
@@ -191,19 +204,23 @@ def _get_kv_cache_config_deepseek_v4(
 ) -> tuple[int, list[KVCacheTensor]]:
     """DeepseekV4 KV cache tensor layout planning.
 
-    Precondition: kv_cache_groups[0] is the full-MLA group; its page sizes
-    define the canonical bucket set. Non-full-MLA groups must have been
-    page_size-padded upstream (see _get_kv_cache_groups_uniform_groups) so
-    every layer's page_size matches one of the full-MLA bucket sizes.
+    Page sizes are collected from every group after optional sharing padding.
+    This includes independent compressor-state buckets that are larger than
+    all full-MLA pages.
 
     For each group, bucket its layers by page_size_bytes and place each
     layer at tuple_idx = position-within-bucket. Emit one KVCacheTensor
     per (tuple_idx, bucket) whose shared_by is the union of per-group
     layers at that slot.
     """
-    full_mla_spec = kv_cache_groups[0].kv_cache_spec
-    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    page_sizes = sorted(full_mla_spec.get_page_sizes())
+    assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
+    page_sizes = sorted(
+        {
+            page_size
+            for group in kv_cache_groups
+            for page_size in group.kv_cache_spec.get_page_sizes()
+        }
+    )
     layer_tuple_page_bytes = sum(page_sizes)
 
     # Pre-bucket each group's layers by page_size (registration order within
@@ -250,6 +267,13 @@ def _get_kv_cache_config_deepseek_v4(
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_deepseek_v4
+# vLLM 0.23 routes DeepSeek-V4 through the generalized packed-layout
+# helper directly. Ascend's model runner expects one independently sized
+# tensor per page-size bucket and does not consume KVCacheTensor
+# offset/block_stride metadata, so leaving the upstream helper installed
+# allocates the full budget once per bucket. Point both entry points at the
+# Ascend planner to preserve the per-device total-memory budget.
+vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 
 # Also patch the reference used by engine/core.py which imports the function directly.

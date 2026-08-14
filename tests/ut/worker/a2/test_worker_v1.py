@@ -654,6 +654,88 @@ class TestNPUWorker(TestBase):
             self.assertEqual(result, expected_result)
 
     @patch("vllm_ascend.worker.worker.memory_profiling")
+    @patch("torch.empty")
+    @patch("torch.accelerator.memory_reserved")
+    @patch("torch.accelerator.get_memory_info")
+    @patch("torch.npu.synchronize")
+    @patch("torch_npu.npu.memory_stats")
+    @patch(
+        "vllm_ascend.worker.worker.envs_ascend."
+        "VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION",
+        0.6,
+        create=True,
+    )
+    def test_deepseek_v4_caps_kv_budget_when_graph_profile_is_skipped(
+        self,
+        mock_torch_memory_stats,
+        mock_npu_synchronize,
+        mock_get_memory_info,
+        mock_memory_reserved,
+        mock_torch_empty,
+        mock_memory_profiling,
+    ):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        mock_profile_result = MagicMock()
+        mock_profile_result.non_torch_increase = 1000
+        mock_profile_result.weights_memory = 500
+        mock_profile_result.before_profile.torch_peak = 0
+        mock_profile_result.after_profile.free_memory = 2000
+        mock_context = MagicMock()
+        mock_context.__enter__.return_value = mock_profile_result
+        mock_context.__exit__.return_value = False
+        mock_memory_profiling.return_value = mock_context
+        mock_torch_memory_stats.return_value = {
+            "allocated_bytes.all.peak": 2000,
+        }
+        # Pending graph allocations become visible only after synchronization.
+        mock_get_memory_info.return_value = (5000, 10000)
+        mock_memory_reserved.return_value = 8500
+        mock_torch_empty.return_value = MagicMock()
+
+        with patch.object(NPUWorker, "__init__", lambda self, **kwargs: None):
+            worker = NPUWorker()
+            worker.init_snapshot = MagicMock(
+                free_memory=8000,
+                total_memory=10000,
+            )
+            worker.requested_memory = 8000
+            worker.model_runner = MagicMock(
+                model_memory_usage=500,
+                # The production DeepSeek-V4 runner does not expose the legacy
+                # compressor flag even though it uses compressor-state KV.
+                use_compress=False,
+            )
+            worker.model_config = MagicMock()
+            worker.model_config.hf_config.model_type = "deepseek_v4"
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.compilation_config.cudagraph_mode = (
+                CUDAGraphMode.FULL_DECODE_ONLY
+            )
+            worker.cache_config = MagicMock(
+                gpu_memory_utilization=0.8,
+                kv_cache_memory_bytes=None,
+            )
+            worker.device = torch.device("npu:0")
+
+            result = worker.determine_available_memory()
+
+        # Config-derived budget is 4500 bytes. The profiling context reports a
+        # stale 2000-byte free-memory snapshot and mem_get_info still reports
+        # 5000 bytes after sync, while allocator reservation leaves only 1500
+        # bytes unreserved. Keep 40% headroom for capture.
+        self.assertEqual(result, 900)
+        mock_torch_empty.assert_called_once_with(
+            1,
+            dtype=torch.uint8,
+            device=worker.device,
+        )
+        mock_npu_synchronize.assert_called_once_with()
+        mock_get_memory_info.assert_called_once_with(worker.device)
+        mock_memory_reserved.assert_called_once_with(worker.device)
+        worker.model_runner.profile_cudagraph_memory.assert_not_called()
+
+    @patch("vllm_ascend.worker.worker.memory_profiling")
     @patch("torch.npu.mem_get_info")
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.empty_cache")

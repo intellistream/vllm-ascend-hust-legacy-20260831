@@ -4,7 +4,32 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
+from vllm_ascend.quantization.methods.w8a8_dynamic import (
+    AscendW8A8DynamicFusedMoEMethod,
+    _balanced_profile_expert_ids_impl,
+)
+
+
+@patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
+def test_balanced_profile_expert_ids_follow_live_token_shape(mock_extra_ctx):
+    mock_extra_ctx.in_profile_run = True
+    topk_ids = torch.zeros((8, 6), dtype=torch.int32)
+
+    balanced_ids = _balanced_profile_expert_ids_impl(topk_ids, 256)
+
+    assert balanced_ids.shape == topk_ids.shape
+    assert balanced_ids.dtype == topk_ids.dtype
+    assert torch.all((balanced_ids >= 0) & (balanced_ids < 256))
+
+
+@patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
+def test_balanced_profile_expert_ids_preserve_serving_route(mock_extra_ctx):
+    mock_extra_ctx.in_profile_run = False
+    topk_ids = torch.arange(48, dtype=torch.int32).reshape(8, 6)
+
+    serving_ids = _balanced_profile_expert_ids_impl(topk_ids, 256)
+
+    assert serving_ids is topk_ids
 
 
 class TestAscendW8A8FusedMoEMethod(TestBase):

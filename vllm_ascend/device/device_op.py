@@ -533,7 +533,13 @@ class BaseDeviceAdaptor:
     @staticmethod
     def dsa_kv_compress_scatter(cache, x, slot_mapping):
         """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
+        # DeepSeek-V4's FP8 cache spec is byte-packed as uint8 on A2/A3, but
+        # aclnnScatterNdUpdateV2 does not accept uint8 varRef tensors.  Recast
+        # both operands as signed bytes without changing storage or bits.
+        # The cache retains its public uint8 dtype after this view mutation.
+        scatter_cache = cache.view(torch.int8) if cache.dtype == torch.uint8 else cache
+        scatter_x = x.view(torch.int8) if x.dtype == torch.uint8 else x
+        torch.ops._C_ascend.npu_scatter_nd_update_v2(scatter_cache, slot_mapping, scatter_x)
 
     # ===== Indexer Quant + Scatter =====
 

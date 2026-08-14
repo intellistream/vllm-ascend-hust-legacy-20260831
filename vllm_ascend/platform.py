@@ -579,7 +579,16 @@ class NPUPlatform(Platform):
 
         ascend_config.update_compile_ranges_split_points()
 
-        if model_config and hasattr(model_config.hf_text_config, "index_topk"):
+        # Sparse-attention models historically inherited the model dtype for
+        # an unspecified KV cache. Preserve an explicit cache layout: newer
+        # DeepSeek-V4 backends require fp8_ds_mla and reject bf16, so replacing
+        # a user-provided ``--kv-cache-dtype fp8`` here is both surprising and
+        # invalid.
+        if (
+            model_config
+            and hasattr(model_config.hf_text_config, "index_topk")
+            and cache_config.cache_dtype == "auto"
+        ):
             vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
 
         ascend_fusion_config = ascend_config.ascend_fusion_config

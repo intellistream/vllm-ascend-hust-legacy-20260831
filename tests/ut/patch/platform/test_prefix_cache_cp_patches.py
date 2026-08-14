@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
+import vllm.v1.core.kv_cache_utils as upstream_kv_utils
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -24,7 +25,10 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
+    _get_kv_cache_config_deepseek_v4,
+    _get_kv_cache_groups_uniform_groups,
 )
+from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
 
@@ -89,6 +93,110 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
             KVCacheGroupSpec(layer_names=["c128_attn"], kv_cache_spec=c128_group_spec),
         ],
     )
+
+
+def test_deepseek_v4_large_compressor_state_uses_independent_bucket():
+    c4 = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        compress_ratio=4,
+        cache_dtype_str="fp8_ds_mla",
+        alignment=576,
+        model_version="deepseek_v4",
+    )
+    c128 = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        compress_ratio=128,
+        cache_dtype_str="fp8_ds_mla",
+        alignment=576,
+        model_version="deepseek_v4",
+    )
+    large_state = AscendSlidingWindowMLASpec(
+        block_size=32,
+        num_kv_heads=1,
+        head_size=1024,
+        dtype=torch.float32,
+        sliding_window=256,
+        compress_ratio=128,
+        model_version="deepseek_v4",
+    )
+    grouped = [
+        UniformTypeKVCacheSpecs.from_specs({"c4": c4}),
+        UniformTypeKVCacheSpecs.from_specs({"c128": c128}),
+        UniformTypeKVCacheSpecs.from_specs({"c128_state": large_state}),
+    ]
+    assert all(spec is not None for spec in grouped)
+
+    groups = _get_kv_cache_groups_uniform_groups(grouped)  # type: ignore[arg-type]
+
+    state_spec = groups[-1].kv_cache_spec.kv_cache_specs["c128_state"]
+    assert state_spec.page_size_bytes == 131072
+    assert state_spec.page_size_padded is None
+
+    num_blocks, tensors = _get_kv_cache_config_deepseek_v4(
+        SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=None)),
+        groups,
+        available_memory=1024 * 1024 * 1024,
+    )
+    assert num_blocks > 0
+    assert any(
+        tensor.size == 131072 * num_blocks
+        and tensor.shared_by == ["c128_state"]
+        for tensor in tensors
+    )
+
+
+def test_deepseek_v4_public_planner_honors_total_memory_budget():
+    """The vLLM 0.23 public path must use the Ascend unpacked planner."""
+    c4 = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        compress_ratio=4,
+        cache_dtype_str="fp8_ds_mla",
+        alignment=576,
+        model_version="deepseek_v4",
+    )
+    c128 = MLAAttentionSpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        compress_ratio=128,
+        cache_dtype_str="fp8_ds_mla",
+        alignment=576,
+        model_version="deepseek_v4",
+    )
+    groups = [
+        KVCacheGroupSpec(
+            layer_names=["c4"],
+            kv_cache_spec=UniformTypeKVCacheSpecs.from_specs({"c4": c4}),
+        ),
+        KVCacheGroupSpec(
+            layer_names=["c128"],
+            kv_cache_spec=UniformTypeKVCacheSpecs.from_specs({"c128": c128}),
+        ),
+    ]
+    available_memory = 768 * 1024 * 1024
+    config = upstream_kv_utils.get_kv_cache_config_from_groups(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(num_gpu_blocks_override=None),
+            kv_transfer_config=None,
+        ),
+        groups,
+        available_memory,
+    )
+
+    assert upstream_kv_utils._get_kv_cache_config_packed is _get_kv_cache_config_deepseek_v4
+    assert len(config.kv_cache_tensors) > 1
+    assert sum(tensor.size for tensor in config.kv_cache_tensors) <= available_memory
+    assert all(tensor.block_stride == 0 for tensor in config.kv_cache_tensors)
 
 
 def _make_vllm_config(

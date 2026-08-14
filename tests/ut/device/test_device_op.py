@@ -6,6 +6,25 @@ import torch
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
 
 
+def test_dsa_kv_compress_scatter_views_uint8_as_supported_int8():
+    cache = torch.zeros((4, 8), dtype=torch.uint8)
+    values = torch.arange(16, dtype=torch.uint8).reshape(2, 8)
+    slot_mapping = torch.tensor([0, 1], dtype=torch.int32)
+
+    with mock.patch(
+        "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_scatter_nd_update_v2",
+        create=True,
+    ) as scatter:
+        BaseDeviceAdaptor.dsa_kv_compress_scatter(cache, values, slot_mapping)
+
+    scatter_cache, scatter_slots, scatter_values = scatter.call_args.args
+    assert scatter_cache.dtype == torch.int8
+    assert scatter_values.dtype == torch.int8
+    assert scatter_cache.untyped_storage().data_ptr() == cache.untyped_storage().data_ptr()
+    assert scatter_values.untyped_storage().data_ptr() == values.untyped_storage().data_ptr()
+    assert scatter_slots is slot_mapping
+
+
 def test_npu_flash_attention_uses_fusion_attention_for_fp32():
     query = torch.randn(5, 4, 64, dtype=torch.float32)
     key = torch.randn_like(query)

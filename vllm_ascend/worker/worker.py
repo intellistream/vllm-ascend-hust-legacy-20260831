@@ -755,17 +755,23 @@ class NPUWorker(WorkerBase):
             profile_torch_peak = torch.npu.memory_stats(self.device).get("allocated_bytes.all.peak", 0)
 
             npugraph_memory_estimate = 0
+            skipped_npugraph_memory_profile = False
             should_profile_npugraph_memory = self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            if should_profile_npugraph_memory and getattr(self.model_runner, "use_compress", False):
-                hf_config = self.model_config.hf_config
-                if getattr(hf_config, "model_type", None) == "deepseek_v4":
-                    logger.warning_once(
-                        "Skipping ACL graph memory profiling for DeepSeek-V4 "
-                        "DSA compressed attention. Graph mode remains enabled; "
-                        "the normal ACL graph capture still runs after KV cache "
-                        "allocation."
-                    )
-                    should_profile_npugraph_memory = False
+            hf_config = getattr(getattr(self, "model_config", None), "hf_config", None)
+            if should_profile_npugraph_memory and getattr(hf_config, "model_type", None) == "deepseek_v4":
+                # DeepSeek-V4 always uses its compressor-state KV layout even
+                # when the model runner's legacy ``use_compress`` flag is false.
+                # Keying this workaround on that flag left the production V4
+                # path uncapped and attempted a multi-GiB KV allocation after
+                # graph profiling had already consumed the remaining HBM.
+                logger.warning_once(
+                    "Skipping ACL graph memory profiling for DeepSeek-V4 "
+                    "DSA compressed attention. Graph mode remains enabled; "
+                    "the normal ACL graph capture still runs after KV cache "
+                    "allocation."
+                )
+                skipped_npugraph_memory_profile = True
+                should_profile_npugraph_memory = False
             if should_profile_npugraph_memory:
                 npugraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
@@ -798,6 +804,48 @@ class NPUWorker(WorkerBase):
         self.available_kv_cache_memory_bytes = (
             self.requested_memory - profile_result.non_kv_cache_memory - npugraph_memory_estimate_applied
         )
+
+        if skipped_npugraph_memory_profile:
+            free_memory_fraction = envs_ascend.VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION
+            if not 0 < free_memory_fraction <= 1:
+                raise ValueError(
+                    "VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION must be in "
+                    f"(0, 1], got {free_memory_fraction}"
+                )
+            # profile_run() may enqueue graph-compilation allocations that are
+            # not materialized by synchronize() alone. Force one tiny allocator
+            # operation first, then synchronize before the safety-critical
+            # memory reading; otherwise the following KV tensor can become the
+            # first real allocation and expose a multi-GiB stale snapshot.
+            settle_probe = torch.empty(1, dtype=torch.uint8, device=self.device)
+            torch.npu.synchronize()
+            del settle_probe
+            synchronized_free_memory, total_memory = torch.accelerator.get_memory_info(self.device)
+            allocator_reserved_memory = torch.accelerator.memory_reserved(self.device)
+            allocator_unreserved_memory = max(0, total_memory - allocator_reserved_memory)
+            # Ascend mem_get_info can remain stale after synchronization while
+            # the allocator already accounts for lazy graph allocations. Use
+            # the more conservative observation for the safety cap.
+            effective_free_memory = min(
+                synchronized_free_memory,
+                allocator_unreserved_memory,
+            )
+            physical_kv_limit = int(effective_free_memory * free_memory_fraction)
+            if self.available_kv_cache_memory_bytes > physical_kv_limit:
+                logger.warning_once(
+                    "Capping KV cache memory from %.2f GiB to %.2f GiB "
+                    "because ACL graph memory profiling was skipped and only "
+                    "%.2f GiB is safely available after synchronized "
+                    "profile_run (device free: %.2f GiB, allocator unreserved: "
+                    "%.2f GiB, unsynchronized snapshot: %.2f GiB).",
+                    GiB(self.available_kv_cache_memory_bytes),
+                    GiB(physical_kv_limit),
+                    GiB(effective_free_memory),
+                    GiB(synchronized_free_memory),
+                    GiB(allocator_unreserved_memory),
+                    GiB(free_gpu_memory),
+                )
+                self.available_kv_cache_memory_bytes = physical_kv_limit
 
         logger.debug(profile_result)
         logger.info_once(

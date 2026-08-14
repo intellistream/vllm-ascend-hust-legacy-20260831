@@ -107,6 +107,10 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
     "deepseek_v4": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        # DeepSeek-V4 packs the checkpoint's wq_a and wkv projections into a
+        # single runtime linear.  Keep quant-scheme selection aligned with the
+        # same two source shards used by the model weight loader.
+        "fused_wqa_wkv": ["wq_a", "wkv"],
     },
     "pangu_ultra_moe": {
         "gate_up_proj": ["gate_proj", "up_proj"],

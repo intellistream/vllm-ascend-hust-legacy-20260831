@@ -22,6 +22,7 @@ import torch
 import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.logger import logger
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -33,6 +34,43 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, enable_dsa_cp, maybe_trans_
 
 from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
 from .registry import register_scheme
+
+
+def _balanced_profile_expert_ids_impl(topk_ids: torch.Tensor, num_experts: int) -> torch.Tensor:
+    """Generate profile-only expert ids with the live token shape.
+
+    This is intentionally opaque to torch.compile.  When ``topk_ids.size(0)``
+    is symbolic, npugraph_ex otherwise specializes ``torch.rand`` to the
+    compile-time maximum (for example 1024) and later combines it with an
+    8-token decode graph.
+    """
+    # ``enable_force_load_balance`` is a Python boolean captured while
+    # torch.compile traces the profile run.  The resulting compiled graph is
+    # also reused for graph capture and serving, where expert routing must be
+    # model-selected.  Re-check the live forward context inside this opaque op
+    # so the profile branch cannot leak into real inference.
+    if not _EXTRA_CTX.in_profile_run:
+        return topk_ids
+
+    random_matrix = torch.rand(
+        topk_ids.shape[0],
+        num_experts,
+        device=topk_ids.device,
+    )
+    return torch.argsort(random_matrix, dim=1)[:, : topk_ids.shape[1]].to(topk_ids.dtype)
+
+
+def _balanced_profile_expert_ids_fake(topk_ids: torch.Tensor, num_experts: int) -> torch.Tensor:
+    return torch.empty_like(topk_ids)
+
+
+direct_register_custom_op(
+    op_name="balanced_profile_expert_ids",
+    op_func=_balanced_profile_expert_ids_impl,
+    fake_impl=_balanced_profile_expert_ids_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
 
 
 def scale_from_float_to_int64(scale):
@@ -299,8 +337,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
-            topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
+            topk_ids = torch.ops.vllm.balanced_profile_expert_ids(topk_ids, num_logical_experts)
 
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)

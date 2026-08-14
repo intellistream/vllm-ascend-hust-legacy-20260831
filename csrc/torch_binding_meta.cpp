@@ -807,9 +807,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> moe_gating_top_k_hash_meta(
         const auto& input_ids = *input_ids_opt;
         TORCH_CHECK(input_ids.scalar_type() == at::kInt || input_ids.scalar_type() == at::kLong,
                     "input_ids dtype must be int32 or int64, but got ", input_ids.scalar_type());
-        TORCH_CHECK(input_ids.numel() == rows,
-                    "input_ids.numel() must equal x.size(0). input_ids.numel()=",
-                    input_ids.numel(), ", rows=", rows);
+        // FakeTensor uses a symbolic token dimension while Dynamo traces the
+        // DeepSeek-V4 hash router. Calling numel() here forces that SymInt to a
+        // concrete int and aborts graph capture. The real PrivateUse1 kernel
+        // performs the same cardinality validation before execution, so the
+        // Meta implementation only needs to describe output shapes.
     }
 
     if (tid2eid_opt.has_value() && tid2eid_opt->defined()) {
