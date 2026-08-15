@@ -2312,6 +2312,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
             if self.method == "dspark":
+                extra_attn_metadata_args["block_size"] = attn_group.kv_cache_spec.block_size
                 gid = attn_group.kv_cache_group_id
                 common_attn_metadata = copy.copy(common_attn_metadata)
                 block_table = getattr(self, "_per_group_block_table_buffers", {}).get(gid)

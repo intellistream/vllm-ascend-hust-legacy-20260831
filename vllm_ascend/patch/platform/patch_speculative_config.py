@@ -140,13 +140,28 @@ def _dspark_post_init(self):
     _orig_post_init(self)
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
+        if draft_model_config is None:
+            raise ValueError("DSpark speculative decoding requires draft_model_config with an hf_config.")
+
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
-        # deepseek v4 dspark
-        if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
-            draft_hf_config.ptd_token_id = getattr(draft_hf_config, "dspark_noise_token_id", None)  # type: ignore
-        # gqa backend dspark
-        if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
-            draft_hf_config.ptd_token_id = getattr(draft_hf_config, "mask_token_id", None)  # type: ignore
+        if draft_hf_config is None:
+            raise ValueError("DSpark speculative decoding requires draft_model_config.hf_config.")
+
+        # DeepSeek V4 DSpark and the GQA backend use different source names for
+        # the same placeholder token. Normalize both to the name consumed by
+        # the DSpark implementation.
+        ptd_token_id = getattr(draft_hf_config, "ptd_token_id", None)
+        if ptd_token_id is None:
+            ptd_token_id = getattr(draft_hf_config, "dspark_noise_token_id", None)
+        if ptd_token_id is None:
+            ptd_token_id = getattr(draft_hf_config, "mask_token_id", None)
+        if ptd_token_id is None:
+            raise ValueError(
+                "DSpark speculative decoding requires one of "
+                "draft_model_config.hf_config.ptd_token_id, "
+                "dspark_noise_token_id, or mask_token_id."
+            )
+        draft_hf_config.ptd_token_id = ptd_token_id
 
 
 SpeculativeConfig.hf_config_override = hf_config_override
