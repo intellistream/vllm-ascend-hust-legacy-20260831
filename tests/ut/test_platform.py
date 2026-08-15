@@ -83,6 +83,15 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(NPUPlatform.supported_quantization, [ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD])
 
+    def test_speculative_proposer_capabilities(self):
+        capabilities = NPUPlatform.get_speculative_proposer_capabilities()
+
+        self.assertEqual(capabilities["mtp"], "builtin:mtp")
+        self.assertEqual(
+            capabilities["dspark"],
+            "vllm_ascend.spec_decode.dspark_proposer.AscendDSparkProposer",
+        )
+
     @pytest.mark.parametrize(
         "additional_config",
         [None, {}, {"ascend_compilation_config": None}],

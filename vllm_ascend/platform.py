@@ -196,6 +196,13 @@ class NPUPlatform(Platform):
     ]
     dispatch_key: str = "PrivateUse1"
 
+    @classmethod
+    def get_speculative_proposer_capabilities(cls) -> dict[str, str]:
+        """Return portable proposers plus Ascend's native DSpark proposer."""
+        capabilities = super().get_speculative_proposer_capabilities()
+        capabilities["dspark"] = "vllm_ascend.spec_decode.dspark_proposer.AscendDSparkProposer"
+        return capabilities
+
     supported_quantization: list[str] = [
         ASCEND_QUANTIZATION_METHOD,
         COMPRESSED_TENSORS_METHOD,

@@ -57,7 +57,6 @@ def test_deepseek_v4_dspark_acceptance_tp4(model_name):
         speculative_config={
             "method": "dspark",
             "num_speculative_tokens": 5,
-            "enforce_eager": True,
         },
         compilation_config=CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY", cudagraph_capture_sizes=[6, 18]),
     ) as spec_vllm_model:
