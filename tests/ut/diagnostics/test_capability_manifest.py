@@ -153,6 +153,74 @@ def test_finalize_folds_in_records_from_other_processes(tmp_path):
     assert caps == {cm.CAP_GRAPH_MODE, cm.CAP_RUNNER_V2_MODEL_RUNNER}
 
 
+# --------------------------------------------------- multi-process aggregation
+
+
+def test_summary_worst_status_wins_across_ranks(tmp_path):
+    """Regression (issue #198 review): if rank 0 falls back and rank 1 later
+    succeeds, the merged summary must still report the fallback instead of
+    letting the later ``enabled`` line hide it."""
+    jsonl = tmp_path / "multi.jsonl"
+    rank0 = cm.CapabilityManifest(jsonl, rank=0, world_size=2, pid=1000)
+    rank1 = cm.CapabilityManifest(jsonl, rank=1, world_size=2, pid=1001)
+    rank0.record(cm.CAP_SAMPLER_PENALTY_TRITON, cm.STATUS_FALLBACK, reason="no triton")
+    rank1.record(cm.CAP_SAMPLER_PENALTY_TRITON, cm.STATUS_ENABLED, reason="triton ok")
+    with patch.object(cm, "_runtime_versions", return_value={"torch": "0.0.0"}):
+        rank1.finalize()
+    summary = json.loads(jsonl.with_name(jsonl.name + ".json").read_text(encoding="utf-8"))
+    caps = {entry["capability"]: entry for entry in summary["capabilities"]}
+    entry = caps[cm.CAP_SAMPLER_PENALTY_TRITON]
+    assert entry["status"] == cm.STATUS_FALLBACK  # worst status wins
+    assert entry["rank"] == 0  # producer identity retained
+    assert entry["pid"] == 1000
+
+
+def test_summary_worst_status_wins_regardless_of_order(tmp_path):
+    """The failing rank may record after the healthy one; enabled must not win."""
+    jsonl = tmp_path / "order.jsonl"
+    healthy = cm.CapabilityManifest(jsonl, rank=1, world_size=2, pid=1001)
+    failing = cm.CapabilityManifest(jsonl, rank=0, world_size=2, pid=1000)
+    healthy.record(cm.CAP_SAMPLER_PENALTY_TRITON, cm.STATUS_ENABLED, reason="triton ok")
+    failing.record(cm.CAP_SAMPLER_PENALTY_TRITON, cm.STATUS_FALLBACK, reason="no triton")
+    with patch.object(cm, "_runtime_versions", return_value={"torch": "0.0.0"}):
+        failing.finalize()
+    summary = json.loads(jsonl.with_name(jsonl.name + ".json").read_text(encoding="utf-8"))
+    caps = {entry["capability"]: entry for entry in summary["capabilities"]}
+    entry = caps[cm.CAP_SAMPLER_PENALTY_TRITON]
+    assert entry["status"] == cm.STATUS_FALLBACK
+    assert entry["rank"] == 0
+
+
+def test_jsonl_records_carry_rank_and_pid(tmp_path):
+    """Each JSONL line must retain producer identity for audit/reconstruction."""
+    manifest = cm.CapabilityManifest(tmp_path / "who.jsonl", rank=3, world_size=8, pid=4242)
+    with patch.object(cm, "_runtime_versions", return_value={"torch": "0.0.0"}):
+        manifest.record(cm.CAP_GRAPH_MODE, cm.STATUS_ENABLED, reason="graph")
+    line = json.loads(manifest._jsonl_path.read_text(encoding="utf-8").splitlines()[0])
+    assert line["rank"] == 3
+    assert line["pid"] == 4242
+
+
+def test_summary_worst_status_ordering(tmp_path):
+    """Severity order: unavailable > fallback > disabled_by_policy > enabled."""
+    jsonl = tmp_path / "severity.jsonl"
+    manifests = [cm.CapabilityManifest(jsonl, rank=rank, world_size=4, pid=1000 + rank) for rank in range(4)]
+    statuses = [
+        cm.STATUS_DISABLED_BY_POLICY,
+        cm.STATUS_ENABLED,
+        cm.STATUS_UNAVAILABLE,
+        cm.STATUS_FALLBACK,
+    ]
+    for manifest, status in zip(manifests, statuses):
+        manifest.record(cm.CAP_RUNNER_V2_MODEL_RUNNER, status)
+    with patch.object(cm, "_runtime_versions", return_value={"torch": "0.0.0"}):
+        manifests[-1].finalize()
+    summary = json.loads(jsonl.with_name(jsonl.name + ".json").read_text(encoding="utf-8"))
+    caps = {entry["capability"]: entry for entry in summary["capabilities"]}
+    entry = caps[cm.CAP_RUNNER_V2_MODEL_RUNNER]
+    assert entry["status"] == cm.STATUS_UNAVAILABLE  # worst of the four
+
+
 # --------------------------------------------------------------------- from_env
 
 

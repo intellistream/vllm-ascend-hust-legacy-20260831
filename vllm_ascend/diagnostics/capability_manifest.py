@@ -63,6 +63,23 @@ ALL_STATUSES = (
     STATUS_DISABLED_BY_POLICY,
 )
 
+# Severity used when folding cross-process/rank observations of the same
+# capability into the merged summary: a fallback/unavailable seen by any rank
+# must never be hidden by a later ``enabled`` from another rank, so the most
+# severe status wins (issue #198 review).
+_STATUS_SEVERITY = {
+    STATUS_ENABLED: 0,
+    STATUS_DISABLED_BY_POLICY: 1,
+    STATUS_FALLBACK: 2,
+    STATUS_UNAVAILABLE: 3,
+}
+
+
+def _status_severity(status: str) -> int:
+    """Map a status to its summary-merge severity (higher = worse)."""
+    return _STATUS_SEVERITY.get(status, -1)
+
+
 # Capability keys (component.<capability>) for the six tracked Dense hot paths.
 CAP_RUNNER_V2_MODEL_RUNNER = "runner.v2_model_runner"
 CAP_SAMPLER_TOP_K_TOP_P = "sampler.npu_apply_top_k_top_p"
@@ -97,6 +114,10 @@ class CapabilityRecord:
     state: str | None = None
     detail: dict[str, Any] = field(default_factory=dict)
     ts: str = field(default_factory=_now_iso)
+    # Producing process identity, so cross-process/rank aggregation (and any
+    # lost-state reconstruction) can attribute a record to its writer.
+    rank: int = 0
+    pid: int = 0
 
 
 class CapabilityManifest:
@@ -153,6 +174,8 @@ class CapabilityManifest:
             reason=reason,
             state=state,
             detail=dict(detail or {}),
+            rank=self.rank,
+            pid=self.pid,
         )
         with self._lock:
             # Hot-path fallback points re-report the same state on every step;
@@ -221,10 +244,16 @@ class CapabilityManifest:
 
         vLLM workers run in a separate EngineCore process that appends to the
         same JSONL path, so the final summary must reflect the whole process
-        group, keeping the last observation per capability.
+        group. Each record carries its producing ``rank``/``pid`` (see
+        :class:`CapabilityRecord`); when several processes observed the same
+        capability, the most severe status wins (worst-status-wins), so a
+        fallback on any rank is never hidden by a later ``enabled`` from
+        another rank. The raw JSONL keeps every observation for audit.
         """
         with self._lock:
-            merged = {r.capability: asdict(r) for r in self._records.values()}
+            merged: dict[str, dict[str, Any]] = {}
+            for rec in (asdict(r) for r in self._records.values()):
+                self._merge_record(merged, rec)
         if self._jsonl_path is not None:
             try:
                 with open(self._jsonl_path, encoding="utf-8") as f:
@@ -236,10 +265,32 @@ class CapabilityManifest:
                             rec = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        merged[rec["capability"]] = rec
+                        # Older JSONL lines may predate rank/pid attribution.
+                        rec.setdefault("rank", -1)
+                        rec.setdefault("pid", -1)
+                        self._merge_record(merged, rec)
             except OSError:
                 pass
         return list(merged.values())
+
+    @staticmethod
+    def _merge_record(merged: dict[str, dict[str, Any]], rec: dict[str, Any]) -> None:
+        """Fold one record into the per-capability summary (worst status wins).
+
+        A record is kept only when it is strictly worse than the current one,
+        or ties its severity with a later timestamp (a re-report after a state
+        change wins; when timestamps tie, the later JSONL line wins).
+        """
+        key = rec["capability"]
+        current = merged.get(key)
+        if current is None:
+            merged[key] = rec
+            return
+        keep_current = _status_severity(rec["status"]) < _status_severity(current["status"]) or (
+            rec["status"] == current["status"] and rec.get("ts", "") < current.get("ts", "")
+        )
+        if not keep_current:
+            merged[key] = rec
 
     def finalize(self) -> None:
         """Flush the full manifest to ``<jsonl>.json`` (best effort)."""
