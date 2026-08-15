@@ -146,6 +146,26 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         torch.testing.assert_close(tensor, expected)
         self.assertEqual(tensor.stride(), (8, 1))
 
+    def test_adjust_packed_kv_layout_preserves_nonzero_storage_offset(self):
+        runner = self._build_runner()
+        backing = torch.arange(70, dtype=torch.int8)
+        raw_tensor = backing[2:66]
+
+        (tensor,) = runner._adjust_kv_layout(
+            raw_tensor,
+            [(4, 2)],
+            [torch.float16],
+            page_size_bytes=4,
+            packing=(4, 16),
+        )
+
+        expected = raw_tensor.view(4, 16)[:, 4:8].clone().view(torch.float16)
+        torch.testing.assert_close(tensor, expected)
+        self.assertEqual(tensor.stride(), (8, 1))
+        typed_raw = raw_tensor.view(torch.float16)
+        self.assertEqual(tensor.storage_offset(), typed_raw.storage_offset() + 2)
+        self.assertEqual(tensor.data_ptr(), raw_tensor.data_ptr() + 4)
+
     def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
         kv_cache_spec = FullAttentionSpec(

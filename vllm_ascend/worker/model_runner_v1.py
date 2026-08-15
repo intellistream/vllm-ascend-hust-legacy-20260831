@@ -4341,11 +4341,12 @@ class NPUModelRunner(GPUModelRunner):
                 assert block_stride % dtype_size == 0
                 stride = torch.empty(shape).stride()
                 target_stride = (block_stride // dtype_size, *stride[1:])
+                typed_raw = raw_tensor.view(dtype)
                 tensor = torch.as_strided(
-                    raw_tensor.view(dtype),
+                    typed_raw,
                     size=shape,
                     stride=target_stride,
-                    storage_offset=start // dtype_size,
+                    storage_offset=typed_raw.storage_offset() + start // dtype_size,
                 )
                 reshaped_kv_tensors.append(tensor)
                 page_offset_bytes += page_bytes
