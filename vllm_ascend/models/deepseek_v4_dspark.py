@@ -33,6 +33,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.deepseek_v4 import (
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
@@ -254,12 +255,15 @@ class DeepseekV4DSparkModel(nn.Module):
         return logits_processor(lm_head, self.norm(hidden_states))
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        num_experts = self.config.n_routed_experts
+        if getattr(get_ascend_config(), "mix_placement", False):
+            num_experts += self.config.n_shared_experts
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
+            num_experts=num_experts,
             num_redundant_experts=0,
         )
 
@@ -357,6 +361,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
         standalone embedding/head weights used by the Ascend draft loader.
         """
         expert_mapping = self.model.get_expert_mapping()
+        fused_shared_experts = getattr(get_ascend_config(), "mix_placement", False)
         expert_scale_suffix = (
             ".weight_scale" if getattr(self.config, "expert_dtype", "fp4") == "fp4" else ".weight_scale_inv"
         )
@@ -422,8 +427,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
             # Stacked rules only apply to decoder-layer weights. Head-stack
             # parameters load directly through the fallback below.
             is_layer_param = name.startswith("model.layers.")
+            is_fused_shared_expert = fused_shared_experts and ".mlp.shared_experts." in name
             for param_name, weight_name, stacked_shard_id in stacked_params_mapping:
                 if not is_layer_param or f".{weight_name}." not in name:
+                    continue
+                if is_fused_shared_expert:
                     continue
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]
@@ -431,6 +439,41 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts):
                 loaded_params.add(name)
                 break
             else:
+                if is_fused_shared_expert:
+                    num_shared_experts = self.config.n_shared_experts
+                    split_dim = 1 if ".down_proj." in name else 0
+                    total = loaded_weight.shape[split_dim]
+                    if total % num_shared_experts:
+                        raise ValueError(
+                            "DSpark shared-expert checkpoint dimension is not "
+                            "divisible by n_shared_experts: "
+                            f"name={name}, shape={tuple(loaded_weight.shape)}, "
+                            f"split_dim={split_dim}, n_shared_experts={num_shared_experts}."
+                        )
+                    chunks = loaded_weight.chunk(num_shared_experts, dim=split_dim)
+                    for shared_idx, chunk in enumerate(chunks):
+                        expert_name = name.replace(
+                            ".mlp.shared_experts.",
+                            f".mlp.experts.{self.config.n_routed_experts + shared_idx}.",
+                        )
+                        for param_name, weight_name, expert_id, shard_id in expert_mapping:
+                            if weight_name not in expert_name:
+                                continue
+                            name_mapped = expert_name.replace(weight_name, param_name)
+                            param = params_dict[name_mapped]
+                            weight_loader = typing.cast(typing.Callable[..., bool], param.weight_loader)
+                            success = weight_loader(
+                                param,
+                                chunk,
+                                name_mapped,
+                                shard_id=shard_id,
+                                expert_id=expert_id,
+                                return_success=True,
+                            )
+                            if success:
+                                loaded_params.add(name_mapped)
+                                break
+                    continue
                 if "attn_sink" in name:
                     narrow = loaded_weight[head_start:head_end]
                     with torch.no_grad():
