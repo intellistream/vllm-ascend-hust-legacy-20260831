@@ -812,17 +812,27 @@ class NPUWorker(WorkerBase):
                 raise ValueError(
                     f"VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION must be in (0, 1], got {free_memory_fraction}"
                 )
-            physical_memory_limit = int(free_gpu_memory * free_memory_fraction)
+            # ``profile_result.after_profile`` is a bookkeeping snapshot.  In
+            # particular, it can overstate memory that is available for a new
+            # contiguous allocation after the target and draft models have
+            # populated the caching allocator.  Query the device again at the
+            # allocation boundary and use the smaller value.  This avoids
+            # turning a stale profiler estimate into an oversized KV tensor.
+            current_free_memory, _ = torch.npu.mem_get_info()
+            allocatable_free_memory = min(free_gpu_memory, current_free_memory)
+            physical_memory_limit = int(allocatable_free_memory * free_memory_fraction)
             budgeted_memory = self.available_kv_cache_memory_bytes
             self.available_kv_cache_memory_bytes = min(budgeted_memory, physical_memory_limit)
             logger.warning_once(
                 "ACL graph memory was not profiled; limiting KV cache to "
-                "%.2f GiB (%.1f%% of %.2f GiB physical free memory) and "
+                "%.2f GiB (%.1f%% of %.2f GiB currently allocatable memory; "
+                "profiler snapshot %.2f GiB) and "
                 "preserving the remainder for graph capture and runtime "
                 "allocations. The utilization budget would otherwise allow "
                 "%.2f GiB.",
                 GiB(self.available_kv_cache_memory_bytes),
                 free_memory_fraction * 100,
+                GiB(allocatable_free_memory),
                 GiB(free_gpu_memory),
                 GiB(budgeted_memory),
             )

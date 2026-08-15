@@ -160,6 +160,10 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         with (
             self._patch_memory_profiling(profile_result),
             patch(
+                "torch.npu.mem_get_info",
+                return_value=(int(4 * GiB_bytes), total),
+            ),
+            patch(
                 "vllm_ascend.worker.worker.envs_ascend.VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION",
                 0.7,
             ),
@@ -173,7 +177,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             CUDAGraphMode.FULL_DECODE_ONLY,
         )
         self.assertEqual(worker.npugraph_memory_estimate, 0)
-        self.assertEqual(result, int((init_free - non_kv_cache) * 0.7))
+        self.assertEqual(result, int(4 * GiB_bytes * 0.7))
 
     @patch("vllm_ascend.worker.worker.logger")
     def test_deepseek_v4_compressed_rejects_invalid_free_memory_fraction(self, mock_logger):
@@ -191,6 +195,10 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
 
         with (
             self._patch_memory_profiling(profile_result),
+            patch(
+                "torch.npu.mem_get_info",
+                return_value=(int(4 * GiB_bytes), total),
+            ),
             patch(
                 "vllm_ascend.worker.worker.envs_ascend.VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION",
                 1.1,
