@@ -818,15 +818,23 @@ class NPUWorker(WorkerBase):
             # populated the caching allocator.  Query the device again at the
             # allocation boundary and use the smaller value.  This avoids
             # turning a stale profiler estimate into an oversized KV tensor.
-            current_free_memory, _ = torch.npu.mem_get_info()
-            allocatable_free_memory = min(free_gpu_memory, current_free_memory)
+            current_free_memory, current_total_memory = torch.npu.mem_get_info()
+            allocator_unreserved_memory = max(
+                0,
+                current_total_memory - torch.npu.memory_reserved(),
+            )
+            allocatable_free_memory = min(
+                free_gpu_memory,
+                current_free_memory,
+                allocator_unreserved_memory,
+            )
             physical_memory_limit = int(allocatable_free_memory * free_memory_fraction)
             budgeted_memory = self.available_kv_cache_memory_bytes
             self.available_kv_cache_memory_bytes = min(budgeted_memory, physical_memory_limit)
             logger.warning_once(
                 "ACL graph memory was not profiled; limiting KV cache to "
                 "%.2f GiB (%.1f%% of %.2f GiB currently allocatable memory; "
-                "profiler snapshot %.2f GiB) and "
+                "profiler snapshot %.2f GiB; allocator-unreserved %.2f GiB) and "
                 "preserving the remainder for graph capture and runtime "
                 "allocations. The utilization budget would otherwise allow "
                 "%.2f GiB.",
@@ -834,6 +842,7 @@ class NPUWorker(WorkerBase):
                 free_memory_fraction * 100,
                 GiB(allocatable_free_memory),
                 GiB(free_gpu_memory),
+                GiB(allocator_unreserved_memory),
                 GiB(budgeted_memory),
             )
 

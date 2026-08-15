@@ -161,8 +161,9 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             self._patch_memory_profiling(profile_result),
             patch(
                 "torch.npu.mem_get_info",
-                return_value=(int(4 * GiB_bytes), total),
+                return_value=(int(10 * GiB_bytes), total),
             ),
+            patch("torch.npu.memory_reserved", return_value=int(60 * GiB_bytes)),
             patch(
                 "vllm_ascend.worker.worker.envs_ascend.VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION",
                 0.7,
@@ -199,6 +200,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
                 "torch.npu.mem_get_info",
                 return_value=(int(4 * GiB_bytes), total),
             ),
+            patch("torch.npu.memory_reserved", return_value=int(60 * GiB_bytes)),
             patch(
                 "vllm_ascend.worker.worker.envs_ascend.VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION",
                 1.1,
