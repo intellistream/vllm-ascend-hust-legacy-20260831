@@ -17,7 +17,6 @@
 """INT4 KV cache quantization for dense-attention models."""
 
 import torch
-
 from vllm.logger import init_logger
 
 from .base import AscendAttentionScheme
@@ -41,6 +40,12 @@ class AscendKVCacheInt4Method(AscendAttentionScheme):
 
     def create_weights(self, layer: torch.nn.Module) -> None:
         layer.kv_cache_torch_dtype = torch.uint8
+        # Upgrade impl to the INT4-specific subclass so the packed KBV write /
+        # gather-unpack-dequant read path is always used.
+        if hasattr(layer, "impl"):
+            from vllm_ascend.attention.attention_v1 import AscendInt4AttentionBackendImpl
+
+            layer.impl.__class__ = AscendInt4AttentionBackendImpl
         dtype = torch.get_default_dtype()
         layer.k_cache_scale = torch.nn.Parameter(torch.ones(1, dtype=dtype), requires_grad=False)
         layer.v_cache_scale = torch.nn.Parameter(torch.ones(1, dtype=dtype), requires_grad=False)
