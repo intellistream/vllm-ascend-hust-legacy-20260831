@@ -250,7 +250,7 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     double swiglu_limit
 ) {
     if (x_active_mask.has_value()) {
-        TORCH_CHECK(weight1.size() > 0, "weight1 must contain at least one tensor");
+        TORCH_CHECK(!weight1.empty(), "weight1 must contain at least one tensor");
         const auto weight_dtype = weight1[0].scalar_type();
         const bool floating_dispatch = weight_dtype != at::kChar && weight_dtype != at::kInt;
         if (floating_dispatch) {
