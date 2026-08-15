@@ -85,6 +85,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     # it will consume more NPU memory. If reducing NPU memory usage is a higher priority
     # for your DeepSeek W8A8 scene, then disable it.
     "VLLM_ASCEND_ENABLE_MLAPO": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", "1"))),
+    # Fraction of the physical free NPU memory that may be assigned to KV
+    # cache when ACL graph memory profiling is unavailable. The remainder is
+    # preserved for the later graph capture and runtime allocations.
+    "VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION": lambda: float(
+        os.getenv("VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION", "0.8")
+    ),
     # Whether to enable weight cast format to FRACTAL_NZ.
     # 0: close nz;
     # 1: only quant case enable nz;

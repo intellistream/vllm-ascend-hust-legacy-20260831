@@ -157,7 +157,13 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             non_kv_cache_memory=non_kv_cache,
         )
 
-        with self._patch_memory_profiling(profile_result):
+        with (
+            self._patch_memory_profiling(profile_result),
+            patch(
+                "vllm_ascend.worker.worker.envs_ascend.VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION",
+                0.7,
+            ),
+        ):
             result = worker.determine_available_memory()
 
         worker.model_runner.profile_run.assert_called_once()
@@ -167,7 +173,31 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             CUDAGraphMode.FULL_DECODE_ONLY,
         )
         self.assertEqual(worker.npugraph_memory_estimate, 0)
-        self.assertEqual(result, requested_memory - non_kv_cache)
+        self.assertEqual(result, int((init_free - non_kv_cache) * 0.7))
+
+    @patch("vllm_ascend.worker.worker.logger")
+    def test_deepseek_v4_compressed_rejects_invalid_free_memory_fraction(self, mock_logger):
+        total = int(64 * GiB_bytes)
+        init_free = int(60 * GiB_bytes)
+        non_kv_cache = int(1 * GiB_bytes)
+        worker = self._make_worker(int(total * 0.9), init_free, total)
+        worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        worker.model_config.hf_config.model_type = "deepseek_v4"
+        worker.model_runner.use_compress = True
+        profile_result = self._make_profile_result(
+            free_memory_after=init_free - non_kv_cache,
+            non_kv_cache_memory=non_kv_cache,
+        )
+
+        with (
+            self._patch_memory_profiling(profile_result),
+            patch(
+                "vllm_ascend.worker.worker.envs_ascend.VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION",
+                1.1,
+            ),
+            self.assertRaisesRegex(ValueError, "must be in"),
+        ):
+            worker.determine_available_memory()
 
     @patch("vllm_ascend.worker.worker.logger")
     def test_non_deepseek_compressed_still_profiles_npugraph_memory(self, mock_logger):

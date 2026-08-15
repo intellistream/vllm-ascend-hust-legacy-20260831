@@ -760,6 +760,7 @@ class NPUWorker(WorkerBase):
             profile_torch_peak = torch.npu.memory_stats(self.device).get("allocated_bytes.all.peak", 0)
 
             npugraph_memory_estimate = 0
+            skipped_npugraph_memory_profile = False
             should_profile_npugraph_memory = self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             if should_profile_npugraph_memory and getattr(self.model_runner, "use_compress", False):
                 hf_config = self.model_config.hf_config
@@ -771,6 +772,7 @@ class NPUWorker(WorkerBase):
                         "allocation."
                     )
                     should_profile_npugraph_memory = False
+                    skipped_npugraph_memory_profile = True
             if should_profile_npugraph_memory:
                 npugraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
@@ -803,6 +805,27 @@ class NPUWorker(WorkerBase):
         self.available_kv_cache_memory_bytes = (
             self.requested_memory - profile_result.non_kv_cache_memory - npugraph_memory_estimate_applied
         )
+
+        if skipped_npugraph_memory_profile:
+            free_memory_fraction = envs_ascend.VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION
+            if not 0 < free_memory_fraction <= 1:
+                raise ValueError(
+                    f"VLLM_ASCEND_KV_CACHE_FREE_MEMORY_FRACTION must be in (0, 1], got {free_memory_fraction}"
+                )
+            physical_memory_limit = int(free_gpu_memory * free_memory_fraction)
+            budgeted_memory = self.available_kv_cache_memory_bytes
+            self.available_kv_cache_memory_bytes = min(budgeted_memory, physical_memory_limit)
+            logger.warning_once(
+                "ACL graph memory was not profiled; limiting KV cache to "
+                "%.2f GiB (%.1f%% of %.2f GiB physical free memory) and "
+                "preserving the remainder for graph capture and runtime "
+                "allocations. The utilization budget would otherwise allow "
+                "%.2f GiB.",
+                GiB(self.available_kv_cache_memory_bytes),
+                free_memory_fraction * 100,
+                GiB(free_gpu_memory),
+                GiB(budgeted_memory),
+            )
 
         logger.debug(profile_result)
         logger.info_once(
