@@ -659,6 +659,7 @@ class NPUWorker(WorkerBase):
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot()
+        self.init_torch_allocated = torch.npu.memory_allocated(device)
         self.requested_memory = self.init_snapshot.total_memory * self.cache_config.gpu_memory_utilization
         if self.init_snapshot.free_memory < self.requested_memory:
             GiB = lambda b: round(b / GiB_bytes, 2)
@@ -749,8 +750,21 @@ class NPUWorker(WorkerBase):
         # of the model.
         with memory_profiling(
             self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
+            weights_memory=0,
         ) as profile_result:
+            # ``model_memory_usage`` only measures allocations made inside
+            # model_runner.load_model(). Persistent runner and speculative
+            # drafter buffers are materialized earlier, in the model-runner
+            # constructor, so treating only the loader delta as resident model
+            # memory overestimates the KV budget. The profiling context has
+            # already collected garbage and reset allocator peaks here; measure
+            # every persistent Torch allocation owned by this worker since its
+            # initialization snapshot instead.
+            self.persistent_torch_memory = max(
+                0,
+                torch.npu.memory_allocated(self.device) - self.init_torch_allocated,
+            )
+            profile_result.weights_memory = self.persistent_torch_memory
             self.model_runner.profile_run()
 
             # Record torch peak INSIDE the context and BEFORE graph capture,
@@ -1004,7 +1018,7 @@ class NPUWorker(WorkerBase):
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(self, "peak_activation_memory"):
             redundancy_buffer = 150 * (1 << 20)  # 150 MiB safety margin
             non_kv_memory = (
-                self.model_runner.model_memory_usage
+                self.persistent_torch_memory
                 + self.peak_activation_memory
                 + self.non_torch_memory
                 + npugraph_memory_bytes

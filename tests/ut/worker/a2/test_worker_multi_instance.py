@@ -66,6 +66,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         mock_snapshot.free_memory = init_free_memory
         mock_snapshot.total_memory = init_total_memory
         worker.init_snapshot = mock_snapshot
+        worker.init_torch_allocated = 0
 
         worker.requested_memory = requested_memory
         worker.device = "npu:0"
@@ -91,9 +92,12 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         return profile_result
 
     @staticmethod
-    def _patch_memory_profiling(profile_result):
-        """Return a context manager mocking `memory_profiling` and `torch.npu.memory_stats`."""
+    def _patch_memory_profiling(profile_result, current_torch_allocated=None):
+        """Mock memory profiling and the worker's persistent Torch reading."""
         from contextlib import contextmanager
+
+        if current_torch_allocated is None:
+            current_torch_allocated = profile_result.weights_memory
 
         mock_ctx = MagicMock()
         mock_ctx.__enter__ = MagicMock(return_value=profile_result)
@@ -107,6 +111,10 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
                 patch(
                     "torch.npu.memory_stats",
                     return_value={"allocated_bytes.all.peak": 0},
+                ),
+                patch(
+                    "torch.npu.memory_allocated",
+                    return_value=current_torch_allocated,
                 ),
             ):
                 yield
@@ -138,6 +146,37 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         expected = requested_memory - non_kv_cache
         self.assertEqual(result, expected)
         self.assertGreater(result, 0)
+
+    @patch("vllm_ascend.worker.worker.logger")
+    def test_counts_persistent_drafter_buffers_allocated_before_model_load(self, mock_logger):
+        """Runner/drafter constructor buffers must reduce the KV budget."""
+        total = int(64 * GiB_bytes)
+        requested_memory = int(total * 0.9)
+        loader_reported_weights = int(4 * GiB_bytes)
+        pre_load_drafter_buffers = int(2 * GiB_bytes)
+        persistent_torch_memory = loader_reported_weights + pre_load_drafter_buffers
+        init_free = int(60 * GiB_bytes)
+
+        worker = self._make_worker(
+            requested_memory,
+            init_free,
+            total,
+            model_memory_usage=loader_reported_weights,
+        )
+        profile_result = self._make_profile_result(
+            free_memory_after=init_free - persistent_torch_memory,
+            non_kv_cache_memory=loader_reported_weights,
+        )
+
+        with self._patch_memory_profiling(
+            profile_result,
+            current_torch_allocated=persistent_torch_memory,
+        ):
+            result = worker.determine_available_memory()
+
+        self.assertEqual(worker.persistent_torch_memory, persistent_torch_memory)
+        self.assertEqual(profile_result.weights_memory, persistent_torch_memory)
+        self.assertEqual(result, requested_memory - persistent_torch_memory)
 
     @patch("vllm_ascend.worker.worker.logger")
     def test_deepseek_v4_compressed_skips_npugraph_memory_profile(self, mock_logger):
