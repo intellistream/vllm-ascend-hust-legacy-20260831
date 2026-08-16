@@ -971,16 +971,20 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 )
                 return out, out_scale, None
             else:
-                return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                     x=x,
-                    weight=weight,
-                    group_list=group_list,
-                    weight_scale=weight_scale,
+                    weight=[weight],
+                    weight_scale=[weight_scale],
                     x_scale=x_scale,
+                    group_list=group_list,
                     bias=bias,
-                    swiglu_limit=swiglu_limit,
-                    use_mxfp_quant=False,
+                    quant_dtype=0,
+                    dequant_dtype=0,
+                    quant_mode=0,
+                    dequant_mode=0,
+                    group_list_type=0,
                 )
+                return out, out_scale, None
 
         # W4A8 mxfp
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
