@@ -316,7 +316,6 @@ class MappedOffloadingHandler(OffloadingWorker):
             return self.submit_load(job_id, src_spec, dst_spec)
         raise TypeError("mapped offload supports only NPU-to-CPU stores and CPU-to-NPU loads")
 
-    @override
     def submit_store(
         self,
         job_id: int,
@@ -325,7 +324,6 @@ class MappedOffloadingHandler(OffloadingWorker):
     ) -> bool:
         return self._submit_store(job_id, src_spec, dst_spec)
 
-    @override
     def submit_load(
         self,
         job_id: int,

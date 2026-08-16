@@ -21,7 +21,7 @@ from pathlib import Path
 from vllm.logger import logger
 
 try:
-    from vllm.transformers_utils.modelscope_utils import (
+    from vllm.transformers_utils.modelscope_utils import (  # type: ignore[import-not-found]
         configure_modelscope_runtime,
         should_use_modelscope,
     )

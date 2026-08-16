@@ -122,7 +122,7 @@ def _patch_do_kv_cache_update() -> None:
                 self_impl, layer, key, value, kv_cache, slot_mapping,
             )
 
-        AscendAttentionBackendImpl.do_kv_cache_update = _ascend_kv_update  # type: ignore[method-assign]
+        AscendAttentionBackendImpl.do_kv_cache_update = _ascend_kv_update  # type: ignore[assignment]
         logger.info("SimLLM: patched AscendAttentionBackendImpl.do_kv_cache_update.")
     except Exception:
         logger.debug("SimLLM: Ascend attention backend not available, skipping.")
@@ -529,7 +529,7 @@ def _simllm_execute_model(
     _simllm_build_injection_map_from_scheduler(self, scheduler_output)
 
     self._simllm_scheduler_output = scheduler_output
-    self._simllm_deferrals: set[int] = set()
+    self._simllm_deferrals = set()
 
     # -- Original execute_model (sees modified num_computed_tokens) -------
     outputs = _original_execute_model(
@@ -883,8 +883,14 @@ def _simllm_extract_kv(self: Any, hidden_states: Any) -> None:
                     v_part = KVReuseEngine.gather_from_cache(
                         v_cache, block_ids, s_len, block_size,
                     )
-                    k_sum = k_part if k_sum is None else k_sum.add_(k_part)
-                    v_sum = v_part if v_sum is None else v_sum.add_(v_part)
+                    if k_sum is None:
+                        k_sum = k_part
+                    else:
+                        k_sum.add_(k_part)
+                    if v_sum is None:
+                        v_sum = v_part
+                    else:
+                        v_sum.add_(v_part)
                 assert k_sum is not None and v_sum is not None
                 scale = 1.0 / len(keep_kv)
                 k_per_req = k_sum.mul_(scale)

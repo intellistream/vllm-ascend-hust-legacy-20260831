@@ -801,10 +801,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     if is_moe_model:
         try:
-            from vllm_ascend.ops.fused_moe.fused_moe import (
-                AscendFusedMoE,
-                AscendSharedFusedMoE,
-            )
+            from vllm_ascend.ops.fused_moe import fused_moe as fused_moe_module
         except ImportError as exc:
             logger.warning(
                 "Skipping Ascend fused MoE custom op registration because an "
@@ -812,12 +809,10 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 exc,
             )
         else:
-            REGISTERED_ASCEND_OPS.update(
-                {
-                    "FusedMoE": AscendFusedMoE,
-                    "SharedFusedMoE": AscendSharedFusedMoE,
-                }
-            )
+            REGISTERED_ASCEND_OPS["FusedMoE"] = fused_moe_module.AscendFusedMoE
+            shared_fused_moe = getattr(fused_moe_module, "AscendSharedFusedMoE", None)
+            if shared_fused_moe is not None:
+                REGISTERED_ASCEND_OPS["SharedFusedMoE"] = shared_fused_moe
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
     if is_310p():
@@ -852,14 +847,14 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
             }
         )
         if is_moe_model:
-            from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310, AscendSharedFusedMoE310
-
-            REGISTERED_ASCEND_OPS.update(
-                {
-                    "FusedMoE": AscendFusedMoE310,
-                    "SharedFusedMoE": AscendSharedFusedMoE310,
-                }
+            from vllm_ascend._310p.fused_moe import (
+                fused_moe as fused_moe_310_module,
             )
+
+            REGISTERED_ASCEND_OPS["FusedMoE"] = fused_moe_310_module.AscendFusedMoE310
+            shared_fused_moe_310 = getattr(fused_moe_310_module, "AscendSharedFusedMoE310", None)
+            if shared_fused_moe_310 is not None:
+                REGISTERED_ASCEND_OPS["SharedFusedMoE"] = shared_fused_moe_310
         elif vllm_version_is("0.23.0"):
             from vllm_ascend._310p.fused_moe.fused_moe import AscendFusedMoE310
 

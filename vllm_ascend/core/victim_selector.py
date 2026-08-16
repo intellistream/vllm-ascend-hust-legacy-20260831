@@ -388,7 +388,7 @@ class UnifiedVictimSelector:
             "total_tokens_freed": self._total_tokens_freed,
             "kv_pressure_events": self._kv_pressure_events,
             "consecutive_preempt_ratio": consecutive_preempt_ratio,
-            "preemptions_per_request_p95": self._percentile(self._preemptions_per_request.values(), 95),
+            "preemptions_per_request_p95": self._percentile(list(self._preemptions_per_request.values()), 95),
             "preempted_req_ids": list(self._recent_preempted_req_ids),
             "strategy_hit_rate": hit_rate,
             "utility_strategy_hits": self._utility_strategy_hits,
