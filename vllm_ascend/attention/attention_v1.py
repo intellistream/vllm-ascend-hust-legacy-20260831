@@ -42,6 +42,11 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.context_parallel.common_cp import AscendMetadataForDecode, AscendMetadataForPrefill
+from vllm_ascend.attention.dispatch_audit import (
+    AttentionDispatchAudit,
+    AttentionDispatchIdentity,
+    build_attention_dispatch_action,
+)
 from vllm_ascend.attention.kvcomp_attn.attention_utils import (
     get_kvcomp_decode_params,
     is_enable_hamming_sparse,
@@ -396,6 +401,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.sinks = sinks
         self.layerIndex = 0
         self.enable_hamming_sparse = is_enable_hamming_sparse()
+        self.dispatch_audit_identity = AttentionDispatchIdentity(
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_size,
+        )
+        self.dispatch_audit = AttentionDispatchAudit.from_config(
+            self.vllm_config.additional_config,
+            identity=self.dispatch_audit_identity,
+        )
 
     @staticmethod
     def update_graph_params(
@@ -1063,11 +1077,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
     ):
         num_tokens = query.shape[0]
-        if (
+        paged_attention_eligible = (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
             and using_paged_attention(num_tokens, self.vllm_config)
-            and self.sliding_window is None
-        ):
+        )
+        use_paged_attention = paged_attention_eligible and self.sliding_window is None
+        if self.dispatch_audit is not None:
+            action = build_attention_dispatch_action(
+                attention_state=attn_metadata.attn_state.name,
+                graph_capture=bool(_EXTRA_CTX.capturing),
+                num_tokens=num_tokens,
+                identity=self.dispatch_audit_identity,
+                paged_attention_eligible=paged_attention_eligible,
+                sliding_window_enabled=self.sliding_window is not None,
+            )
+            self.dispatch_audit.record(action)
+        if use_paged_attention:
             output = self.forward_paged_attention(query, attn_metadata, output)
         else:
             output = self.forward_fused_infer_attention(query, key, value, attn_metadata, output, kv_cache)
