@@ -3783,6 +3783,7 @@ class NPUModelRunner(GPUModelRunner):
             # (int4, nvfp4, fp8_e4m3, fp4_e2m1). This must happen after model
             # loading so that attention layers exist, but before any inference.
             from vllm.model_executor.layers.attention import Attention
+
             from vllm_ascend.quantization.kv_cache_utils import setup_kv_cache_quant
 
             cache_dtype = self.vllm_config.cache_config.cache_dtype
@@ -4574,7 +4575,13 @@ class NPUModelRunner(GPUModelRunner):
                     if not isinstance(current_kv_cache_spec, AscendMLAAttentionSpec):
                         k_shape = kv_cache_shape[1:]
                         if hasattr(current_kv_cache_spec, "head_size_v"):
-                            v_shape = (*kv_cache_shape[1:-1], current_kv_cache_spec.head_size_v)
+                            # Packed KV quant (INT4) stores both K and V in the same
+                            # packed per-head slots, so V uses the packed head dim from
+                            # kv_cache_shape rather than the raw v-head size.
+                            if self.vllm_config.cache_config.cache_dtype == "int4":
+                                v_shape = kv_cache_shape[1:]
+                            else:
+                                v_shape = (*kv_cache_shape[1:-1], current_kv_cache_spec.head_size_v)
                         else:
                             v_shape = k_shape
                     else:

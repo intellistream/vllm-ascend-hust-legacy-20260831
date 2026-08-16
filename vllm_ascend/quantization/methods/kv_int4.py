@@ -43,9 +43,13 @@ class AscendKVCacheInt4Method(AscendAttentionScheme):
         # Upgrade impl to the INT4-specific subclass so the packed KBV write /
         # gather-unpack-dequant read path is always used.
         if hasattr(layer, "impl"):
-            from vllm_ascend.attention.attention_v1 import AscendInt4AttentionBackendImpl
+            from vllm_ascend.attention.attention_v1 import (
+                AscendInt4AttentionBackend,
+                AscendInt4AttentionBackendImpl,
+            )
 
             layer.impl.__class__ = AscendInt4AttentionBackendImpl
+            layer.attn_backend = AscendInt4AttentionBackend
         dtype = torch.get_default_dtype()
         layer.k_cache_scale = torch.nn.Parameter(torch.ones(1, dtype=dtype), requires_grad=False)
         layer.v_cache_scale = torch.nn.Parameter(torch.ones(1, dtype=dtype), requires_grad=False)

@@ -2392,8 +2392,10 @@ class AscendInt4AttentionBackendImpl(AscendAttentionBackendImpl):
         if self.key_cache is None:
             self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
 
-        # Write path: quantize + pack + inline-scale store for non-decode states.
-        if key is not None and value is not None and attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
+        # Write path: quantize + pack + inline-scale store for all states, including
+        # DecodeOnly (newly decoded K/V tokens must be cached so later decode steps
+        # attend up-to-date cache contents).
+        if key is not None and value is not None:
             k_packed, v_packed, k_scale, v_scale = self._quantize_kv_to_int4(
                 key, value, attn_metadata.num_actual_tokens
             )
@@ -2413,3 +2415,33 @@ class AscendInt4AttentionBackendImpl(AscendAttentionBackendImpl):
         ):
             return self._forward_int4_prefill(query, key, value, attn_metadata, output)
         raise NotImplementedError(f"INT4 KV cache unsupported attention state: {state}")
+
+
+class AscendInt4AttentionBackend(AscendAttentionBackend):
+    """Attention backend for INT4 KV cache (packed 2x int4/byte + inline scale).
+
+    Mirrors :class:`AscendInt4AttentionBackendImpl` on the meta-backend surface
+    used by the model runner to size KV cache blocks: each head is
+    ``head_size // 2`` INT4 bytes plus an inline fp32 per-token-head scale
+    (4 uint8 slots), matching the core ``INT4_PER_TOKEN_HEAD`` page budget.
+    """
+
+    @staticmethod
+    def get_impl_cls() -> type["AscendInt4AttentionBackendImpl"]:
+        return AscendInt4AttentionBackendImpl
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "",
+    ) -> tuple[int, ...]:
+        return (
+            2,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size // 2 + AscendInt4AttentionBackendImpl._INT4_SCALE_PAD,
+        )
