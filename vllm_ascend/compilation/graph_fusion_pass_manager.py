@@ -16,10 +16,18 @@
 # limitations under the License.
 #
 
+import torch
 from torch import fx as fx
 from vllm.compilation.passes.inductor_pass import get_pass_context
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
+from vllm.logger import logger
+
+from vllm_ascend.utils import can_use_npu_add_rms_norm_bias
+
+
+def _has_ascend_op(name: str) -> bool:
+    return hasattr(torch.ops, "_C_ascend") and hasattr(torch.ops._C_ascend, name)
 
 
 class GraphFusionPassManager:
@@ -49,10 +57,17 @@ class GraphFusionPassManager:
     def configure(self, config: VllmConfig):
         # By default, we enable the graph fusion and quantization fusion pass.
         self.ascend_compilation_config: dict = config.additional_config.get("ascend_compilation_config", {})
+        has_add_rms_norm_bias = can_use_npu_add_rms_norm_bias(config.model_config.dtype)
         if self.ascend_compilation_config.get("fuse_norm_quant", True):
             from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
 
-            self.passes.append(AddRMSNormQuantFusionPass(config))
+            if has_add_rms_norm_bias:
+                self.passes.append(AddRMSNormQuantFusionPass(config))
+            else:
+                logger.warning(
+                    "Skipping AddRMSNormQuantFusionPass because "
+                    "torch.ops._C_ascend.npu_add_rms_norm_bias is unavailable."
+                )
 
         if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
             from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
@@ -62,7 +77,13 @@ class GraphFusionPassManager:
         if self.ascend_compilation_config.get("fuse_allreduce_rms", True):
             from .passes.allreduce_rmsnorm_fusion_pass import MatmulAllReduceAddRMSNormPass
 
-            self.passes.append(MatmulAllReduceAddRMSNormPass(config))
+            if has_add_rms_norm_bias and _has_ascend_op("matmul_allreduce_add_rmsnorm"):
+                self.passes.append(MatmulAllReduceAddRMSNormPass(config))
+            else:
+                logger.warning(
+                    "Skipping MatmulAllReduceAddRMSNormPass because required "
+                    "Ascend fused RMSNorm ops are unavailable."
+                )
 
         if self.ascend_compilation_config.get("fuse_muls_add", True):
             from .passes.muls_add_pass import MulsAddFusionPass
@@ -73,5 +94,11 @@ class GraphFusionPassManager:
             from .passes.sequence_parallelism import SequenceParallelismPass
             from .passes.sequence_parallelism_moe import SequenceParallelismMoePass
 
-            self.passes.append(SequenceParallelismPass(config))
-            self.passes.append(SequenceParallelismMoePass(config))
+            if has_add_rms_norm_bias:
+                self.passes.append(SequenceParallelismPass(config))
+                self.passes.append(SequenceParallelismMoePass(config))
+            else:
+                logger.warning(
+                    "Skipping sequence parallelism fusion passes because "
+                    "torch.ops._C_ascend.npu_add_rms_norm_bias is unavailable."
+                )

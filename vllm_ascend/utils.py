@@ -69,6 +69,7 @@ _IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _HAS_ROPE = None
+_ADD_RMS_NORM_BIAS_AVAILABLE = None
 
 
 def is_310p():
@@ -312,6 +313,39 @@ def enable_custom_op():
         _CUSTOM_OP_ENABLED = False
         logger.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
     return _CUSTOM_OP_ENABLED
+
+
+def can_use_npu_add_rms_norm_bias(dtype: torch.dtype) -> bool:
+    global _ADD_RMS_NORM_BIAS_AVAILABLE
+
+    if _ADD_RMS_NORM_BIAS_AVAILABLE is not None:
+        return _ADD_RMS_NORM_BIAS_AVAILABLE
+    if not enable_custom_op():
+        _ADD_RMS_NORM_BIAS_AVAILABLE = False
+        return _ADD_RMS_NORM_BIAS_AVAILABLE
+    if not hasattr(torch.ops, "_C_ascend") or not hasattr(
+        torch.ops._C_ascend, "npu_add_rms_norm_bias"
+    ):
+        _ADD_RMS_NORM_BIAS_AVAILABLE = False
+        return _ADD_RMS_NORM_BIAS_AVAILABLE
+
+    try:
+        x = torch.randn(2, 4, device="npu", dtype=dtype)
+        residual = torch.randn(2, 4, device="npu", dtype=dtype)
+        weight = torch.randn(4, device="npu", dtype=dtype)
+        torch.ops._C_ascend.npu_add_rms_norm_bias(x, residual, weight, None, 1e-6)
+        torch.npu.synchronize()
+    except Exception as exc:
+        logger.warning(
+            "Ascend npu_add_rms_norm_bias runtime probe failed; dependent "
+            "custom op paths will be skipped: %s",
+            exc,
+        )
+        _ADD_RMS_NORM_BIAS_AVAILABLE = False
+        return _ADD_RMS_NORM_BIAS_AVAILABLE
+
+    _ADD_RMS_NORM_BIAS_AVAILABLE = True
+    return _ADD_RMS_NORM_BIAS_AVAILABLE
 
 
 def find_hccl_library() -> str:
@@ -677,7 +711,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     try:
         from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
-    except ModuleNotFoundError as exc:
+    except ImportError as exc:
         logger.warning(
             "Skipping Ascend fused MoE custom op registration because an optional "
             "upstream dependency is unavailable: %s",
@@ -729,14 +763,17 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     if AscendGatedDeltaNetAttention is not None:
         REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
 
-    if is_moe_model:
-        from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
-
+    if is_moe_model and AscendFusedMoE is not None and AscendSharedFusedMoE is not None:
         REGISTERED_ASCEND_OPS.update(
             {
                 "FusedMoE": AscendFusedMoE,
                 "SharedFusedMoE": AscendSharedFusedMoE,
             }
+        )
+    elif is_moe_model:
+        logger.warning(
+            "Skipping Ascend fused MoE custom op registration for this model "
+            "because the current vLLM fused_moe API is incompatible."
         )
 
     # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
