@@ -236,8 +236,17 @@ def test_mapped_spec_creates_one_worker_for_both_directions(monkeypatch):
 def test_mapped_handler_dispatches_both_routes():
     handler = object.__new__(experimental_mapped.MappedOffloadingHandler)
     calls = []
-    handler._submit_store = lambda job_id, src, dst: calls.append(("store", job_id, src, dst)) or True
-    handler._submit_load = lambda job_id, src, dst: calls.append(("load", job_id, src, dst)) or True
+
+    def submit_store(job_id, src, dst):
+        calls.append(("store", job_id, src, dst))
+        return True
+
+    def submit_load(job_id, src, dst):
+        calls.append(("load", job_id, src, dst))
+        return True
+
+    handler._submit_store = submit_store
+    handler._submit_load = submit_load
     cpu_spec = CPULoadStoreSpec([1])
     gpu_spec = GPULoadStoreSpec([2], group_sizes=[1], block_indices=[0])
 
@@ -296,7 +305,12 @@ def test_failed_event_record_and_stream_sync_poison_until_shutdown_retry():
     handler = _bare_handler()
     unregistered = []
     handler._mapped_handles = [31]
-    handler._unregister_op = lambda handle: unregistered.append(handle) or True
+
+    def unregister(handle):
+        unregistered.append(handle)
+        return True
+
+    handler._unregister_op = unregister
     state = handler._load_state
     stream = _FakeStream(synchronize_failures=1)
     end_event = _FakeEvent(record_failures=1)
@@ -389,7 +403,12 @@ def test_shutdown_retries_failed_completion_event_synchronization():
     handler = _bare_handler()
     handler._mapped_handles = [41]
     unregistered = []
-    handler._unregister_op = lambda handle: unregistered.append(handle) or True
+
+    def unregister(handle):
+        unregistered.append(handle)
+        return True
+
+    handler._unregister_op = unregister
     end_event = _FakeEvent(synchronize_failures=1)
     transfer = _fake_transfer(end_event=end_event)
     handler._load_state.transfers.append(transfer)

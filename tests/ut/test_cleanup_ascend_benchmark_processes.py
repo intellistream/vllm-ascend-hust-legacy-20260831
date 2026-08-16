@@ -21,6 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -261,7 +262,11 @@ def test_signal_uses_verified_pidfd(tmp_path: Path, context: dict[str, str], mon
     closed: list[int] = []
     signals: list[tuple[int, int]] = []
 
-    monkeypatch.setattr(cleanup, "open_process_handle", lambda pid: opened.append(pid) or 73)
+    def open_process_handle(pid: int) -> int:
+        opened.append(pid)
+        return 73
+
+    monkeypatch.setattr(cleanup, "open_process_handle", open_process_handle)
     monkeypatch.setattr(cleanup, "close_process_handle", closed.append)
     monkeypatch.setattr(cleanup, "send_process_signal", lambda pidfd, signum: signals.append((pidfd, signum)))
 
@@ -687,9 +692,7 @@ def test_marker_refresh_retains_reparented_member_before_server_ready(
     assert not marker_file.exists()
 
 
-def test_marker_refresh_replaces_reused_pid_with_new_verified_identity(
-    tmp_path: Path, context: dict[str, str]
-) -> None:
+def test_marker_refresh_replaces_reused_pid_with_new_verified_identity(tmp_path: Path, context: dict[str, str]) -> None:
     marker_file = tmp_path / "server.marker"
     create_process(
         tmp_path,
@@ -970,7 +973,7 @@ def test_target_job_overrides_cleanup_job_identity(
     monkeypatch.setattr(cleanup, "validate_context", lambda _environment: {"GITHUB_JOB": "cleanup-ascend-benchmark"})
 
     def fake_cleanup(**kwargs: object) -> tuple[list[int], list[int], list[int], list[str]]:
-        captured.append(kwargs["context"])
+        captured.append(cast(dict[str, str], kwargs["context"]))
         return [], [], [], []
 
     monkeypatch.setattr(cleanup, "cleanup_processes", fake_cleanup)

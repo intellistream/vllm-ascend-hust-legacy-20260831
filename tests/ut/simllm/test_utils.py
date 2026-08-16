@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -21,7 +23,7 @@ from vllm_ascend.simllm.utils import (
 )
 
 
-class _Nested:
+class _Nested(SimpleNamespace):
     pass
 
 

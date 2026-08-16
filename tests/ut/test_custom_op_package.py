@@ -123,9 +123,14 @@ def test_bootstrap_selects_bundled_artifacts_without_manual_paths(tmp_path: Path
 
 def test_activate_uses_registered_extension_loader(tmp_path: Path):
     opapi = _create_bundled_package(tmp_path)
-    loaded = []
+    loaded: list[str] = []
+
+    def load_runtime(path: str) -> bool:
+        loaded.append(path)
+        return True
+
     namespace = SimpleNamespace(
-        load_kv_cache_block_gather_runtime=lambda path: loaded.append(path) or True,
+        load_kv_cache_block_gather_runtime=load_runtime,
         has_kv_cache_block_gather_runtime=lambda: True,
     )
     fake_torch = SimpleNamespace(ops=SimpleNamespace(_C_ascend=namespace))
