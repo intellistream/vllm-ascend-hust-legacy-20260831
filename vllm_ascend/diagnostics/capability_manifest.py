@@ -43,7 +43,8 @@ import os
 import socket
 import threading
 import time
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
@@ -306,23 +307,76 @@ class CapabilityManifest:
         self._write_summary()
 
     def _write_summary(self) -> None:
-        """Write the merged manifest summary to ``<jsonl>.json`` (best effort)."""
+        """Atomically publish the merged summary to ``<jsonl>.json``.
+
+        Cross-process safe (issue #198 review): the snapshot is computed from a
+        JSONL read serialized by a process-safe lock, then published via a
+        unique temp file + atomic ``os.replace``. Concurrent ranks can never
+        truncate or interleave the summary, and a reader always sees either the
+        previous or the new complete snapshot -- never a partial file.
+        """
         if self._jsonl_path is None:
             return
-        with suppress(OSError):
-            self._jsonl_path.with_name(f"{self._jsonl_path.name}.json").write_text(
-                json.dumps(
+        try:
+            with self._process_lock():
+                payload = json.dumps(
                     self._summary_dict(self._summary_records()),
                     indent=2,
                     sort_keys=True,
-                ),
-                encoding="utf-8",
-            )
+                )
+                self._jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+                summary_path = self._jsonl_path.with_name(
+                    f"{self._jsonl_path.name}.json"
+                )
+                tmp_path = self._jsonl_path.with_name(
+                    f".{self._jsonl_path.name}.json."
+                    f"{self.pid}.{threading.get_ident()}.tmp"
+                )
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    f.write(payload)
+                os.replace(tmp_path, summary_path)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------- internals
 
+    @contextmanager
+    def _process_lock(self) -> Iterator[None]:
+        """Best-effort inter-process lock serializing JSONL append and reads.
+
+        Uses ``fcntl.flock`` on the sibling ``<jsonl>.lock`` file so records
+        from different ranks/processes are appended and snapshots computed
+        one-at-a-time. Falls back to a no-op when ``fcntl`` is unavailable.
+        """
+        if self._jsonl_path is None:
+            yield
+            return
+        try:
+            import fcntl  # noqa: PLC0415 - platform-specific, imported lazily
+
+            lock_path = self._jsonl_path.with_name(
+                f"{self._jsonl_path.name}.lock"
+            )
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+        except (ImportError, OSError):
+            yield
+            return
+        try:
+            with open(lock_path, "a", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            yield
+
     def _append_line(self, entry: CapabilityRecord) -> bool:
-        """Append one JSON line; return True when a line was written."""
+        """Append one JSON line; return True when a line was written.
+
+        The write is serialized by the process-safe lock so interleaved appends
+        from concurrent ranks cannot corrupt the JSONL (issue #198 review).
+        """
         if self._jsonl_path is None:
             return False
         if self._file is None:
@@ -332,11 +386,13 @@ class CapabilityManifest:
             except OSError:
                 self._file = None
                 return False
-        with suppress(OSError):
-            self._file.write(json.dumps(asdict(entry), sort_keys=True) + "\n")
-            self._file.flush()
+        try:
+            with self._process_lock():
+                self._file.write(json.dumps(asdict(entry), sort_keys=True) + "\n")
+                self._file.flush()
             return True
-        return False
+        except OSError:
+            return False
 
 
 # --------------------------------------------------------------------- proxy

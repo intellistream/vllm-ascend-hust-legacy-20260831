@@ -17,6 +17,8 @@
 """Unit tests for the capability/fallback manifest (issue #198)."""
 
 import json
+import multiprocessing as mp
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -219,6 +221,86 @@ def test_summary_worst_status_ordering(tmp_path):
     caps = {entry["capability"]: entry for entry in summary["capabilities"]}
     entry = caps[cm.CAP_RUNNER_V2_MODEL_RUNNER]
     assert entry["status"] == cm.STATUS_UNAVAILABLE  # worst of the four
+
+
+def _contention_worker(jsonl_path, rank, workers, fallback_ready, iterations):
+    """Worker for the multiprocessing contention test (fork- and spawn-safe).
+
+    Rank 0 is the designated failing rank: it appends its ``fallback`` first,
+    then signals the other ranks so every snapshot published afterwards must
+    fold in that worst status.
+    """
+    manifest = cm.CapabilityManifest(
+        Path(jsonl_path), rank=rank, world_size=workers, pid=1000 + rank
+    )
+    if rank == 0:
+        manifest.record(cm.CAP_GRAPH_MODE, cm.STATUS_FALLBACK, reason=f"rank{rank}")
+        fallback_ready.set()
+    else:
+        fallback_ready.wait(timeout=60)
+    for i in range(iterations):
+        manifest.record(
+            cm.CAP_GRAPH_MODE, cm.STATUS_ENABLED, reason=f"rank{rank}-{i}"
+        )
+        manifest.record(
+            cm.CAP_RUNNER_V2_MODEL_RUNNER,
+            cm.STATUS_ENABLED,
+            reason=f"rank{rank}-{i}",
+        )
+        manifest.finalize()
+    manifest.finalize()
+
+
+def test_summary_multiprocessing_contention_never_loses_worst(tmp_path):
+    """Real multiprocessing contention (issue #198 review).
+
+    Concurrent ranks append to the same JSONL and publish snapshots while a
+    reader repeatedly parses the live summary. The summary must always be
+    valid JSON (atomic publish -- no truncation or interleaving) and, once rank
+    0's fallback is in the JSONL, no published snapshot may lose the worst
+    status.
+    """
+    jsonl = tmp_path / "mp.jsonl"
+    summary_path = jsonl.with_name(jsonl.name + ".json")
+    workers = 4
+    iterations = 40
+    fallback_ready = mp.Event()
+
+    procs = [
+        mp.Process(
+            target=_contention_worker,
+            args=(str(jsonl), rank, workers, fallback_ready, iterations),
+        )
+        for rank in range(workers)
+    ]
+    for proc in procs:
+        proc.start()
+
+    observations = 0
+    try:
+        while any(proc.is_alive() for proc in procs):
+            if not summary_path.exists():
+                time.sleep(0.001)
+                continue
+            # Atomic publish guarantees this is always complete, valid JSON.
+            data = json.loads(summary_path.read_text(encoding="utf-8"))
+            caps = {c["capability"]: c["status"] for c in data["capabilities"]}
+            if caps.get(cm.CAP_GRAPH_MODE) is not None:
+                assert caps[cm.CAP_GRAPH_MODE] == cm.STATUS_FALLBACK, caps
+            observations += 1
+    finally:
+        for proc in procs:
+            proc.join(timeout=60)
+    assert not any(proc.is_alive() for proc in procs)
+
+    # The reader must have observed live snapshots while workers were running.
+    assert observations > 0
+    data = json.loads(summary_path.read_text(encoding="utf-8"))
+    caps = {c["capability"]: c for c in data["capabilities"]}
+    entry = caps[cm.CAP_GRAPH_MODE]
+    assert entry["status"] == cm.STATUS_FALLBACK  # worst status never lost
+    assert entry["rank"] == 0
+    assert entry["pid"] == 1000
 
 
 # --------------------------------------------------------------------- from_env
