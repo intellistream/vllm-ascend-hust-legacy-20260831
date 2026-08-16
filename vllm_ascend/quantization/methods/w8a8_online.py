@@ -90,6 +90,13 @@ class AscendW8A8OnlineFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
         return q, scales.unsqueeze(-1).to(weight.dtype)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Idempotency guard mirroring upstream Int8OnlineMoEMethod: vLLM may
+        # call this more than once, and without the guard the already
+        # quantized/transposed int8 weights would be re-quantized and
+        # re-transposed, corrupting the layer.
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
         # Online quantize fp16/bf16 expert weights to int8 per-row (symmetric),
         # matching upstream experts_int8 semantics.
         w13_q, w13_scale = self._quantize_per_row(layer.w13_weight.data)
@@ -110,3 +117,5 @@ class AscendW8A8OnlineFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
         # (W8A8_DYNAMIC) implementation, which transposes the int8 weights
         # to FRACTAL_NZ and prepares weight_scale_fp32 for the NPU kernel.
         super().process_weights_after_loading(layer)
+
+        layer._already_called_process_weights_after_loading = True

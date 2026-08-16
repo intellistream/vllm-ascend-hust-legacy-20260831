@@ -4,7 +4,15 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
-from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.layers.fused_moe import FusedMoE
+
+try:
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+except ImportError:
+    # Pre-RoutedExperts upstream (e.g. the CI vLLM at d886c26): only the
+    # FusedMoE class exists there.
+    RoutedExperts = None
+
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
 
@@ -53,8 +61,21 @@ def test_linear_layer_left_unquantized():
     assert isinstance(method, UnquantizedLinearMethod)
 
 
-def test_fused_moe_routes_to_ascend_online_int8():
-    layer = Mock(spec=MoERunner)
+@pytest.mark.skipif(RoutedExperts is None, reason="RoutedExperts unavailable in this vLLM version")
+def test_routed_experts_routes_to_ascend_online_int8():
+    # Upstream main uses RoutedExperts as the MoE layer type. Build a real
+    # instance (no Mock) so the patched get_quant_method must match it.
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = Mock()
+    method = ExpertsInt8Config().get_quant_method(layer, prefix="model.layers.0.mlp")
+    assert isinstance(method, AscendFusedMoEMethod)
+    assert isinstance(method.quant_method, AscendW8A8OnlineFusedMoEMethod)
+
+
+@pytest.mark.skipif(RoutedExperts is not None, reason="RoutedExperts exists; FusedMoE fallback not used")
+def test_fused_moe_fallback_routes_to_ascend_online_int8():
+    # Pre-RoutedExperts upstream: the FusedMoE class is the MoE layer type.
+    layer = object.__new__(FusedMoE)
     layer.moe_config = Mock()
     method = ExpertsInt8Config().get_quant_method(layer, prefix="model.layers.0.mlp")
     assert isinstance(method, AscendFusedMoEMethod)
@@ -62,7 +83,7 @@ def test_fused_moe_routes_to_ascend_online_int8():
 
 
 def test_unsupported_layer_returns_none():
-    # A plain object is neither LinearBase nor MoERunner.
+    # A plain object is neither LinearBase nor a MoE layer.
     layer = torch.nn.Module()
     method = ExpertsInt8Config().get_quant_method(layer, prefix="foo")
     assert method is None

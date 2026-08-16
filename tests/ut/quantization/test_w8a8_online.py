@@ -128,3 +128,24 @@ class TestAscendW8A8OnlineFusedMoEMethod(TestBase):
         deq = layer.w13_weight.data.to(torch.float32) * layer.w13_weight_scale_fp32.data.unsqueeze(1).to(torch.float32)
         max_err = (deq - w13_fp16.transpose(1, 2).to(torch.float32)).abs().max().item()
         self.assertLess(max_err, 0.5)
+
+    @patch("torch_npu.npu_format_cast")
+    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
+    def test_process_weights_after_loading_is_idempotent(self, mock_get_ascend_config, mock_npu_format_cast):
+        mock_get_ascend_config.return_value = Mock(enable_fused_mc2=0)
+        mock_npu_format_cast.side_effect = lambda weight, _: weight
+
+        layer = self._build_fp16_layer()
+        self.quant_method.process_weights_after_loading(layer)
+        w13_first = layer.w13_weight.data.clone()
+        w13_scale_first = layer.w13_weight_scale_fp32.data.clone()
+        nz_cast_count = mock_npu_format_cast.call_count
+
+        # A second call must be a no-op: no re-quantization, no re-transpose,
+        # no extra NZ cast (mirrors upstream _already_called_... guard).
+        self.quant_method.process_weights_after_loading(layer)
+
+        self.assertTrue(getattr(layer, "_already_called_process_weights_after_loading", False))
+        self.assertTrue(torch.equal(layer.w13_weight.data, w13_first))
+        self.assertTrue(torch.equal(layer.w13_weight_scale_fp32.data, w13_scale_first))
+        self.assertEqual(mock_npu_format_cast.call_count, nz_cast_count)

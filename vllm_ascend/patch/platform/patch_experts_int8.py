@@ -28,10 +28,17 @@
 # Linear layers are left unquantized, matching upstream semantics.
 
 import torch
-from vllm.model_executor.layers.fused_moe import FusedMoE, MoERunner
+from vllm.model_executor.layers.fused_moe import FusedMoE
+
+try:
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+except ImportError:
+    # Pre-RoutedExperts upstream (e.g. the CI vLLM at d886c26): only the
+    # FusedMoE class exists there.
+    RoutedExperts = None
+
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.experts_int8 import ExpertsInt8Config
-from vllm.version import __version__ as VLLM_VERSION
 
 from vllm_ascend.quantization.method_adapters import AscendFusedMoEMethod
 from vllm_ascend.quantization.methods.w8a8_online import (
@@ -40,24 +47,27 @@ from vllm_ascend.quantization.methods.w8a8_online import (
 
 
 def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
-    # vLLM 0.23.0 exposes FusedMoE as a class; newer versions replace it with
-    # the MoERunner factory function, so isinstance must target MoERunner.
-    if VLLM_VERSION.startswith("0.23.0"):
-        return isinstance(layer, FusedMoE)
-    return isinstance(layer, MoERunner)
+    # Upstream main exposes the MoE layer as RoutedExperts. In v0.23.0 it is
+    # a type alias for the FusedMoE class; in newer versions it is an
+    # independent class and FusedMoE became a factory function, so isinstance
+    # must target RoutedExperts. Fall back to FusedMoE only for the
+    # pre-RoutedExperts upstream commit used by CI (d886c26).
+    if RoutedExperts is not None:
+        return isinstance(layer, RoutedExperts)
+    return isinstance(layer, FusedMoE)
 
 
-def get_quant_method(self, layer: torch.nn.Module, prefix: str):
+def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid: int | None = None):
     """Route experts_int8 layers to Ascend NPU kernels.
 
     - LinearBase: left unquantized (matches upstream experts_int8).
-    - FusedMoE: online per-row int8 quantization on the NPU INT8 cube.
+    - RoutedExperts: online per-row int8 quantization on the NPU INT8 cube.
     """
     if isinstance(layer, LinearBase):
         return UnquantizedLinearMethod()
     if _is_fused_moe_layer(layer):
         scheme = AscendW8A8OnlineFusedMoEMethod()
-        return AscendFusedMoEMethod(scheme, layer.moe_config)
+        return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid=tid2eid)
     return None
 
 

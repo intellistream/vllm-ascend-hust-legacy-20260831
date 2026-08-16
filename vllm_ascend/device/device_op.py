@@ -62,7 +62,22 @@ class BaseDeviceAdaptor:
         active_expert_range=None,
         quant_mode: int = -1,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
+        if hasattr(torch.ops._C_ascend, "npu_moe_init_routing_custom"):
+            return torch.ops._C_ascend.npu_moe_init_routing_custom(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
+        # Older torch_npu versions do not register the fused _C_ascend custom
+        # op. Fall back to the native npu_moe_init_routing_v2 API (same call
+        # convention as A5DeviceAdaptor).
+        return A5DeviceAdaptor.npu_moe_init_routing(
             hidden_states,
             topk_ids,
             scale=scale,
@@ -93,7 +108,25 @@ class BaseDeviceAdaptor:
         eps: float = 1e-20,
         bias_opt: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k(
+        if hasattr(torch.ops._C_ascend, "moe_gating_top_k"):
+            topk_weights, topk_ids, out = torch.ops._C_ascend.moe_gating_top_k(
+                x,
+                k=k,
+                k_group=k_group,
+                group_count=group_count,
+                group_select_mode=group_select_mode,
+                renorm=renorm,
+                norm_type=norm_type,
+                out_flag=out_flag,
+                routed_scaling_factor=routed_scaling_factor,
+                eps=eps,
+                bias_opt=bias_opt,
+            )
+            return topk_weights, topk_ids.to(torch.int32), out
+        # Older torch_npu versions do not register the fused _C_ascend custom
+        # op. Fall back to the native npu_moe_gating_top_k API (same call
+        # convention as A5DeviceAdaptor).
+        return A5DeviceAdaptor.moe_gating_top_k(
             x,
             k=k,
             k_group=k_group,
@@ -106,7 +139,6 @@ class BaseDeviceAdaptor:
             eps=eps,
             bias_opt=bias_opt,
         )
-        return topk_weights, topk_ids.to(torch.int32), out
 
     @staticmethod
     def npu_dynamic_quant(
@@ -142,14 +174,31 @@ class BaseDeviceAdaptor:
         if use_mxfp_quant:
             raise RuntimeError("MXFP MoE quantization is only supported on Ascend A5.")
 
-        return torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
+        if hasattr(torch.ops._C_ascend, "grouped_matmul_swiglu_quant_weight_nz"):
+            return torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
+                x=x,
+                weight=weight,
+                weight_scale=weight_scale,
+                x_scale=x_scale,
+                group_list=group_list,
+                bias=bias,
+                swiglu_limit=swiglu_limit,
+            )
+        # Older torch_npu versions do not register the fused _C_ascend custom
+        # op. Fall back to the native npu_grouped_matmul_swiglu_quant_v2 API
+        # (same call convention as A5DeviceAdaptor).
+        return A5DeviceAdaptor.npu_grouped_matmul_swiglu_quant(
             x=x,
             weight=weight,
+            group_list=group_list,
             weight_scale=weight_scale,
             x_scale=x_scale,
-            group_list=group_list,
             bias=bias,
+            use_mxfp_quant=use_mxfp_quant,
+            act_quant_type=act_quant_type,
+            weight_quant_type=weight_quant_type,
             swiglu_limit=swiglu_limit,
+            mxfp_quant_dtype=mxfp_quant_dtype,
         )
 
     @staticmethod

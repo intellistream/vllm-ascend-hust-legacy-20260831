@@ -40,6 +40,7 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
+    EXPERTS_INT8_METHOD,
     FP8_METHOD,
     AscendDeviceType,
     bootstrap_custom_op_env,
@@ -248,6 +249,7 @@ class NPUPlatform(Platform):
         ASCEND_QUANTIZATION_METHOD,
         COMPRESSED_TENSORS_METHOD,
         FP8_METHOD,
+        EXPERTS_INT8_METHOD,
         "deepseek_v4_fp8",
     ]
 
