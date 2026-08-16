@@ -21,6 +21,7 @@ from pathlib import Path
 from vllm import envs
 from vllm.logger import logger
 
+from vllm_ascend.quantization.constants import MODELSLIM_CONFIG_FILENAME
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD
 
 
@@ -103,8 +104,6 @@ def detect_quantization_method(model: str, revision: str | None = None) -> str |
         ``"compressed-tensors"`` for LLM-Compressor models,
         or ``None`` if no quantization signature is found.
     """
-    from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
-
     # Case 1: ModelSlim — look for quant_model_description.json
     modelslim_path = get_model_file(model, MODELSLIM_CONFIG_FILENAME, revision=revision)
     if modelslim_path is not None:

@@ -15,14 +15,26 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import logging
+
 import torch
 from vllm.triton_utils import HAS_TRITON
+
+logger = logging.getLogger(__name__)
 
 try:
     import vllm_ascend.ops.fused_moe.fused_moe  # noqa
 except ModuleNotFoundError as exc:
     if exc.name != "vllm.model_executor.layers.fused_moe.runner.default_moe_runner":
         raise
+    logger.warning("Skipping Ascend fused MoE ops because the vLLM MoE runner is unavailable.")
+except ImportError as exc:
+    if "UnquantizedFusedMoEMethod" not in str(exc):
+        raise
+    logger.warning(
+        "Skipping Ascend fused MoE ops because the current vLLM fused_moe API "
+        "does not expose UnquantizedFusedMoEMethod."
+    )
 import vllm_ascend.ops.layernorm  # noqa
 import vllm_ascend.ops.register_custom_ops  # noqa
 
@@ -32,8 +44,11 @@ if HAS_TRITON:
     import vllm_ascend.ops.triton.linearnorm.split_qkv_tp_rmsnorm_rope
 
 import vllm_ascend.ops.vocab_parallel_embedding  # noqa
-from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-from vllm_ascend.ops.rotary_embedding import AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding
+from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul  # noqa: E402
+from vllm_ascend.ops.rotary_embedding import (  # noqa: E402
+    AscendDeepseekScalingRotaryEmbedding,
+    AscendRotaryEmbedding,
+)
 
 
 class dummyFusionOp:

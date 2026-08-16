@@ -16,10 +16,14 @@
 #
 
 import importlib
+import importlib.util
+import logging
 
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.utils import is_310p
+
+logger = logging.getLogger(__name__)
 
 
 def _import_optional_patch(module_name: str) -> None:
@@ -28,6 +32,18 @@ def _import_optional_patch(module_name: str) -> None:
     except ModuleNotFoundError as exc:
         if exc.name != "torchvision":
             raise
+
+
+def _import_patch_if_module_exists(module_name: str, required_module: str) -> None:
+    if importlib.util.find_spec(required_module) is None:
+        logger.warning(
+            "Skipping %s because %s is unavailable.",
+            module_name,
+            required_module,
+        )
+        return
+    importlib.import_module(module_name)
+
 
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_triton
@@ -39,8 +55,14 @@ import vllm_ascend.patch.worker.patch_weight_utils  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
 import vllm_ascend.patch.worker.patch_bert  # noqa
 import vllm_ascend.patch.worker.patch_distributed  # noqa
-import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
-import vllm_ascend.patch.worker.patch_minimax_m2_linear_attn  # noqa
+_import_patch_if_module_exists(
+    "vllm_ascend.patch.worker.patch_minimax_m2",
+    "vllm.model_executor.layers.mamba.linear_attn",
+)
+_import_patch_if_module_exists(
+    "vllm_ascend.patch.worker.patch_minimax_m2_linear_attn",
+    "vllm.model_executor.layers.mamba.linear_attn",
+)
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_qwen3_next_mtp  # noqa
 
@@ -63,4 +85,7 @@ import vllm_ascend.patch.worker.patch_v2.patch_block_table  # noqa
 import vllm_ascend.patch.worker.patch_gqa_c8  # noqa
 _import_optional_patch("vllm_ascend.patch.worker.patch_qwen3vl")
 import vllm_ascend.patch.worker.patch_v2.patch_attn_utils  # noqa
-import vllm_ascend.patch.worker.patch_bailing_moe_linear  # noqa
+_import_patch_if_module_exists(
+    "vllm_ascend.patch.worker.patch_bailing_moe_linear",
+    "vllm.model_executor.layers.mamba.linear_attn",
+)

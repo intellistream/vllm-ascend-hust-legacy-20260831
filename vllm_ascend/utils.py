@@ -650,7 +650,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.conv import AscendConv3dLayer
-    from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm, AscendRMSNormGated
     from vllm_ascend.ops.linear import (
         AscendColumnParallelLinear,
@@ -686,6 +685,15 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         )
         AscendFusedMoE = None
         AscendSharedFusedMoE = None
+    try:
+        from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
+    except ModuleNotFoundError as exc:
+        logger.warning(
+            "Skipping Ascend GDN custom op registration because an optional "
+            "upstream dependency is unavailable: %s",
+            exc,
+        )
+        AscendGatedDeltaNetAttention = None
     is_moe_model = bool(
         vllm_config is not None
         and vllm_config.model_config is not None
@@ -717,8 +725,9 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         "Conv3dLayer": AscendConv3dLayer,
         "RelPosAttention": AscendRelPosAttention,
         "CustomQwen2Decoder": AscendCustomQwen2Decoder,
-        "GatedDeltaNetAttention": AscendGatedDeltaNetAttention,
     }
+    if AscendGatedDeltaNetAttention is not None:
+        REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
 
     if is_moe_model:
         from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE, AscendSharedFusedMoE
@@ -754,8 +763,6 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
                 "RMSNorm": AscendRMSNorm310,
                 "GemmaRMSNorm": AscendGemmaRMSNorm310,
                 "RMSNormGated": AscendRMSNormGated310,
-                "FusedMoE": AscendFusedMoE310,
-                "SharedFusedMoE": AscendSharedFusedMoE310,
                 "ParallelLMHead": AscendParallelLMHead310,
                 "VocabParallelEmbedding": AscendVocabParallelEmbedding310,
                 "MMEncoderAttention": AscendMMEncoderAttention310,

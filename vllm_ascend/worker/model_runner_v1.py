@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import importlib
 import math
 import sys
 import time
@@ -41,6 +42,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
@@ -117,14 +119,6 @@ from vllm_ascend.patch.worker.patch_module import patch_torch_npu_argsort
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.sample.sampler import AscendSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
-from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
-from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
-from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
-from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
-    AscendExtractHiddenStatesProposer,
-)
-from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
-from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm_ascend.utils import (
     calc_split_factor,
@@ -154,11 +148,52 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedE
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+
+    from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
+    from vllm_ascend.spec_decode.draft_proposer import AscendDraftModelProposer
+    from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+    from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
+        AscendExtractHiddenStatesProposer,
+    )
+    from vllm_ascend.spec_decode.medusa_proposer import AscendMedusaProposer
+    from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
+SpecDecodeClassSpec: TypeAlias = tuple[str, str]
 
-from vllm.model_executor.layers.attention import Attention, MLAAttention
+_EAGLE_PROPOSER: SpecDecodeClassSpec = (
+    "vllm_ascend.spec_decode.eagle_proposer",
+    "AscendEagleProposer",
+)
+_DRAFT_PROPOSER: SpecDecodeClassSpec = (
+    "vllm_ascend.spec_decode.draft_proposer",
+    "AscendDraftModelProposer",
+)
+_DFLASH_PROPOSER: SpecDecodeClassSpec = (
+    "vllm_ascend.spec_decode.dflash_proposer",
+    "AscendDflashProposer",
+)
+_MEDUSA_PROPOSER: SpecDecodeClassSpec = (
+    "vllm_ascend.spec_decode.medusa_proposer",
+    "AscendMedusaProposer",
+)
+_EXTRACT_HIDDEN_STATES_PROPOSER: SpecDecodeClassSpec = (
+    "vllm_ascend.spec_decode.extract_hidden_states_proposer",
+    "AscendExtractHiddenStatesProposer",
+)
+
+
+def _is_spec_decode_instance(value: object, *specs: SpecDecodeClassSpec) -> bool:
+    for module_name, class_name in specs:
+        try:
+            cls = getattr(importlib.import_module(module_name), class_name)
+        except (AttributeError, ImportError):
+            continue
+        if isinstance(value, cls):
+            return True
+    return False
+
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -544,10 +579,10 @@ class NPUModelRunner(GPUModelRunner):
             if get_pp_group().is_last_rank:
                 self.drafter = self._get_drafter()
                 if self.speculative_config.method == "eagle3":
-                    assert isinstance(self.drafter, AscendEagleProposer)
+                    assert _is_spec_decode_instance(self.drafter, _EAGLE_PROPOSER)
                     self.use_aux_hidden_state_outputs = self.drafter.eagle3_use_aux_hidden_state
                 elif self.speculative_config.method == "extract_hidden_states":
-                    assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
+                    assert _is_spec_decode_instance(self.drafter, _EXTRACT_HIDDEN_STATES_PROPOSER)
                     self.use_aux_hidden_state_outputs = True
                 self.rejection_sampler = RejectionSampler(self.sampler)
         self.discard_request_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
@@ -1367,13 +1402,13 @@ class NPUModelRunner(GPUModelRunner):
             draft_token_ids = None
         elif self.speculative_config.method in ("ngram", "suffix"):
             draft_token_ids = self.drafter.propose(valid_sampled_token_ids)
-        elif isinstance(self.drafter, AscendMedusaProposer):
+        elif _is_spec_decode_instance(self.drafter, _MEDUSA_PROPOSER):
             draft_token_ids = self.drafter.propose(
                 valid_sampled_token_ids, sampling_metadata, spec_decode_metadata, sample_hidden_states
             )
         elif self.speculative_config.uses_extract_hidden_states():
             # Handle extract_hidden_states method
-            assert isinstance(self.drafter, AscendExtractHiddenStatesProposer)
+            assert _is_spec_decode_instance(self.drafter, _EXTRACT_HIDDEN_STATES_PROPOSER)
             assert isinstance(valid_sampled_token_ids, torch.Tensor), (
                 "sampled_token_ids should be a torch.Tensor for "
                 "extract_hidden_states method."
@@ -2665,7 +2700,12 @@ class NPUModelRunner(GPUModelRunner):
             if kv_cache_gid > 0:
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(kv_cache_gid)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer):
+                if _is_spec_decode_instance(
+                    self.drafter,
+                    _EAGLE_PROPOSER,
+                    _DRAFT_PROPOSER,
+                    _DFLASH_PROPOSER,
+                ):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
                         spec_decode_common_attn_metadata = cm
                 else:
@@ -3104,7 +3144,12 @@ class NPUModelRunner(GPUModelRunner):
         if self.speculative_config and (
             self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model()
         ):
-            assert isinstance(self.drafter, AscendEagleProposer | AscendDflashProposer | AscendDraftModelProposer)
+            assert _is_spec_decode_instance(
+                self.drafter,
+                _EAGLE_PROPOSER,
+                _DFLASH_PROPOSER,
+                _DRAFT_PROPOSER,
+            )
             block_size = (self.kernel_block_sizes[0] if isinstance(
             self.kernel_block_sizes, list) else self.kernel_block_sizes)
             self.drafter.initialize_attn_backend(kv_cache_config, block_size)
