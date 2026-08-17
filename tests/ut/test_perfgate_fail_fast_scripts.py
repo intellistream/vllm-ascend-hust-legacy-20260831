@@ -159,9 +159,7 @@ def test_stage2_revalidates_latest_main_in_enforce_mode(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert "required revalidation" in result.stdout
-    assert "run_ascend_benchmark_ci.sh" in Path(env["FAKE_BASH_LOG"]).read_text(
-        encoding="utf-8"
-    )
+    assert "run_ascend_benchmark_ci.sh" in Path(env["FAKE_BASH_LOG"]).read_text(encoding="utf-8")
     github_env = Path(env["GITHUB_ENV"]).read_text(encoding="utf-8")
     assert "PERFGATE_STAGE2_EXECUTED" in github_env
     assert "PERFGATE_STAGE2_BASELINE_AVAILABLE" in github_env
@@ -272,18 +270,10 @@ def _prepare_central_baseline_repo(tmp_path: Path, *, target_sha: str) -> tuple[
     spec_hash = "a" * 64
     target_repo = "vLLM-HUST/vllm-ascend-hust"
     artifact = (
-        f'{{"same_spec":{{"scenario":"random-online","spec_id":"{spec_id}",'
-        f'"resolved_spec_hash":"{spec_hash}"}}}}\n'
+        f'{{"same_spec":{{"scenario":"random-online","spec_id":"{spec_id}","resolved_spec_hash":"{spec_hash}"}}}}\n'
     )
     artifact_path = (
-        worktree
-        / "baselines"
-        / target_repo
-        / target_sha
-        / scenario
-        / spec_id
-        / spec_hash
-        / "run_leaderboard.json"
+        worktree / "baselines" / target_repo / target_sha / scenario / spec_id / spec_hash / "run_leaderboard.json"
     )
     metadata_path = artifact_path.with_name("baseline-metadata.json")
     artifact_path.parent.mkdir(parents=True)
@@ -309,9 +299,7 @@ def _prepare_central_baseline_repo(tmp_path: Path, *, target_sha: str) -> tuple[
     _git(worktree, "remote", "add", "origin", str(remote))
     _git(worktree, "push", "origin", "benchmark-baselines")
     _git(tmp_path, "clone", str(remote), str(benchmark_repo))
-    spec_file.write_text(
-        json.dumps({"id": spec_id, "scenario": scenario}) + "\n", encoding="utf-8"
-    )
+    spec_file.write_text(json.dumps({"id": spec_id, "scenario": scenario}) + "\n", encoding="utf-8")
     return benchmark_repo, spec_file
 
 
@@ -484,9 +472,7 @@ def test_fetch_baseline_explicit_fallback_accepts_different_main_sha(tmp_path: P
     scenario = "random-online"
     spec_hash = "a" * 64
     target_repo = "vLLM-HUST/vllm-ascend-hust"
-    artifact_path = (
-        f"baselines/{target_repo}/{main_sha}/{scenario}/{spec_id}/{spec_hash}/run_leaderboard.json"
-    )
+    artifact_path = f"baselines/{target_repo}/{main_sha}/{scenario}/{spec_id}/{spec_hash}/run_leaderboard.json"
     artifact = worktree / artifact_path
     artifact_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
     pointer = worktree / f"pointers/{target_repo}/{scenario}/{spec_id}/latest-main.json"
