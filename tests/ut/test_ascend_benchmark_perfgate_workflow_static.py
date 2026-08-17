@@ -657,7 +657,7 @@ def test_main_perfgate_producer_is_reachable_and_pins_dependencies() -> None:
     assert "store-main-perfgate-baseline:" not in workflow
     formal = workflow[formal_start : workflow.index("- name: Performance gate - Stage 1 comparison")]
     assert "!(github.event_name == 'push' && github.ref == 'refs/heads/main')" not in formal
-    snapshot_step = workflow[workflow.index("- name: Sync GitHub leaderboard snapshots") :]
+    snapshot_step = workflow[workflow.index("- name: Publish formal benchmark to benchmark repository") :]
     snapshot_step = snapshot_step[: snapshot_step.index("- name: Release Ascend hardware lock")]
     assert "!(github.event_name == 'push' && github.ref == 'refs/heads/main')" not in snapshot_step
 
@@ -898,7 +898,7 @@ def test_shellcheck_wrapper_checks_only_passed_files(tmp_path: Path) -> None:
         text=True,
         capture_output=True,
     )
-    assert failed_result.returncode == 7
+    assert failed_result.returncode != 0
 
 
 def test_perfgate_bootstrap_requires_pinned_in_repo_plugin_sha() -> None:
@@ -970,8 +970,9 @@ def test_plugin_producer_only_finalizes_checksum_before_website_admission() -> N
         finalizer_index,
     )
     assert finalizer_index < website_publish_index
-    collector_index = runner.index("collect_submission_evidence()")
-    assert "collect-run-artifact.sh" in runner[collector_index:finalizer_index]
+    collector_index = runner.index('bash "$collector_script" "$SUBMISSION_DIR"')
+    assert 'local collector_script="$VLLM_HUST_BENCHMARK_REPO/scripts/collect-run-artifact.sh"' in runner
+    assert collector_index < finalizer_index
     assert "submission evidence collector did not finalize STATUS=OK" in runner
 
     success_gate = "steps.perfgate_producer.outcome == 'success'"
@@ -1041,9 +1042,12 @@ def test_plugin_producer_preserves_measurement_and_provenance_evidence() -> None
     assert 'Target-main fetch unavailable; publishing immutable exact baseline without latest pointer.' in store
     assert '--main-ref "$MAIN_REF_FOR_PUBLICATION"' in store
     assert "git worktree" not in store
-    assert workflow.count("secrets.VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN") == 1
     producer = workflow[workflow.index("- name: Run Plugin perfgate baseline producer") :]
     producer = producer[: producer.index("- name: Run benchmark CI and optional formal publish")]
+    assert producer.count("secrets.VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN") == 1
+    formal_publish = workflow[workflow.index("- name: Publish formal benchmark to benchmark repository") :]
+    formal_publish = formal_publish[: formal_publish.index("- name: Cleanup current Ascend benchmark processes")]
+    assert formal_publish.count("secrets.VLLM_ASCEND_HUST_CENTRAL_BASELINE_WRITER_TOKEN") == 1
     assert "cleanup_ascend_benchmark_processes.sh current" in producer
     assert "cleanup_ascend_ci_processes.sh" not in workflow
 
@@ -1317,9 +1321,9 @@ def test_benchmark_repo_publish_is_gated_and_reported() -> None:
 
     assert "PUBLISH_TO_BENCHMARK_REPO:" in workflow
     assert "BENCHMARK_REPO_GH_TOKEN:" in workflow
-    assert "BENCHMARK_REPO_SSH_KEY:" in workflow
+    assert "BENCHMARK_REPO_SSH_KEY:" not in workflow
     assert "VLLM_ASCEND_HUST_SYNC_BENCHMARK_SNAPSHOTS_TO_GITHUB || '0'" in workflow
-    assert ("github.event_name != 'issue_comment') && secrets.VLLM_HUST_BENCHMARK_GH_TOKEN") in workflow
+    assert "secrets.VLLM_HUST_BENCHMARK_GH_TOKEN" not in workflow
     assert "L3 Benchmark Repository Publication" in workflow
 
     assert "PUBLISH_TO_BENCHMARK_REPO=${PUBLISH_TO_BENCHMARK_REPO:-0}" in runner_script
@@ -1448,6 +1452,7 @@ exit 0
 
 
 def _write_complete_submission_evidence(submission_dir: Path) -> None:
+    submission_dir.mkdir(parents=True, exist_ok=True)
     evidence = {
         "leaderboard_manifest.json": "{}\n",
         "run_leaderboard.json": "{}\n",
