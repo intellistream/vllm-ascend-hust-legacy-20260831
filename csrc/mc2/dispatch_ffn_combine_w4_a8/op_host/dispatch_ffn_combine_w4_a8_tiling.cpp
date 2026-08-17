@@ -253,14 +253,20 @@ static ge::graphStatus DispatchFFNCombineW4A8TilingFuncImpl(gert::TilingContext 
     // ptrC/ptrC2 alias reuse: allocate max(N, n2), not N + n2
     // ptrA1Int4/ptrA2Int4 alias reuse: allocate max(K, k2), not K + k2
     // (lifetimes separated by SyncAll barrier after GMM1 loop, same pattern as W8A8 ptrA/ptrPermutedToken)
-    uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK * sizeof(int32_t) +
+    const uint64_t expandedRowIdxWorkspace =
+        (info.M + 256 - 1) / 256 * 256 * info.topK * sizeof(int32_t);
+    const uint64_t expertIdxScratchWorkspace =
+        (static_cast<uint64_t>(info.M) * info.topK * sizeof(int32_t) + 32 - 1) / 32 * 32;
+    uint64_t cocWorkspace = expandedRowIdxWorkspace +
                             info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 2 +
                             info.maxOutputSize * sizeof(float) * 2 +
                             info.maxOutputSize * std::max(info.N, n2) * sizeof(int16_t) * 2 +
                             info.maxOutputSize * std::max(info.K, k2) +
                             info.worldSize * sizeof(int32_t) * 16;
 
-    workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, initRoutingWorkspace);
+    const uint64_t routingWorkspace =
+        expandedRowIdxWorkspace + expertIdxScratchWorkspace + initRoutingWorkspace;
+    workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, routingWorkspace);
 
 
     // 5. communication
