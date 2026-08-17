@@ -39,9 +39,12 @@ namespace {
     constexpr uint32_t WEIGHT_INDEX = 1;
     constexpr uint32_t WEIGHT2_INDEX = 2;
     constexpr uint32_t EXPERTID_INDEX = 3;
+    constexpr uint32_t X_ACTIVE_MASK_INDEX = 7;
     constexpr uint32_t BLOCK_NUM = 20;
     constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16 * 1024 * 1024;
     constexpr uint64_t MB_SIZE = 1024 * 1024UL;
+    constexpr uint64_t MAX_MASKED_ROUTE_ELEMENTS = 4096;
+    constexpr uint64_t MAX_ROUTING_EXPERTS = 5120;
 }
 
 namespace optiling {
@@ -143,6 +146,49 @@ static ge::graphStatus DispatchFFNCombineBF16GetPlatformInfoAndSetTiling(gert::T
     return ge::GRAPH_SUCCESS;
 }
 
+static bool HasXActiveMask(gert::TilingContext *context)
+{
+    return context->GetOptionalInputShape(X_ACTIVE_MASK_INDEX) != nullptr;
+}
+
+static ge::graphStatus CheckXActiveMask(
+    gert::TilingContext *context, const char *nodeName, const DispatchFFNCombineBF16Info &info)
+{
+    const gert::StorageShape *maskShape = context->GetOptionalInputShape(X_ACTIVE_MASK_INDEX);
+    if (maskShape == nullptr) {
+        return ge::GRAPH_SUCCESS;
+    }
+
+    const auto *maskDesc = context->GetOptionalInputDesc(X_ACTIVE_MASK_INDEX);
+    const auto *xDesc = context->GetInputDesc(X_INDEX);
+    OP_TILING_CHECK(maskDesc == nullptr || maskDesc->GetDataType() != ge::DT_BOOL,
+        OP_LOGE(nodeName, "x_active_mask must have bool dtype."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(xDesc == nullptr || xDesc->GetDataType() != ge::DT_BF16,
+        OP_LOGE(nodeName, "x_active_mask is currently supported only for BF16 input."),
+        return ge::GRAPH_FAILED);
+
+    const gert::Shape &storageShape = maskShape->GetStorageShape();
+    OP_TILING_CHECK(storageShape.GetDimNum() != 1,
+        OP_LOGE(nodeName, "x_active_mask must be rank 1, got rank %lu.", storageShape.GetDimNum()),
+        return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(storageShape.GetDim(0) != static_cast<int64_t>(info.M),
+        OP_LOGE(nodeName, "x_active_mask length must equal local tokens M=%u, got %ld.",
+            info.M, storageShape.GetDim(0)), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(info.M < 2,
+        OP_LOGE(nodeName, "masked BF16 dispatch_ffn_combine requires physical M >= 2, got M=%u.", info.M),
+        return ge::GRAPH_FAILED);
+
+    const uint64_t routeElements = static_cast<uint64_t>(info.M) * info.topK;
+    OP_TILING_CHECK(routeElements > MAX_MASKED_ROUTE_ELEMENTS,
+        OP_LOGE(nodeName, "masked route domain M*top_k=%lu exceeds supported limit %lu.",
+            routeElements, MAX_MASKED_ROUTE_ELEMENTS), return ge::GRAPH_FAILED);
+    const uint64_t routingExperts = static_cast<uint64_t>(info.worldSize) * info.expertPerRank + 1;
+    OP_TILING_CHECK(routingExperts > MAX_ROUTING_EXPERTS,
+        OP_LOGE(nodeName, "masked routing expert inventory=%lu exceeds supported limit %lu.",
+            routingExperts, MAX_ROUTING_EXPERTS), return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
 void SetTilingData(CoCTiling &cocTilingData, DispatchFFNCombineBF16Info &info)
 {
     cocTilingData.m0 = 128;
@@ -179,6 +225,9 @@ static ge::graphStatus DispatchFFNCombineBF16TilingFuncImpl(gert::TilingContext 
     OP_TILING_CHECK(DispatchFFNCombineBF16GetPlatformInfoAndSetTiling(context, info) != ge::GRAPH_SUCCESS,
         OP_LOGE(context->GetNodeName(), "DispatchFFNCombineBF16 GetPlatformInfoAndSetTiling Failed"),
         return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckXActiveMask(context, nodeName, info) != ge::GRAPH_SUCCESS,
+        OP_LOGE(nodeName, "DispatchFFNCombineBF16 x_active_mask validation failed"),
+        return ge::GRAPH_FAILED);
 
     SetTilingData(tilingData->cocTiling, info);
 
@@ -203,8 +252,9 @@ static ge::graphStatus DispatchFFNCombineBF16TilingFuncImpl(gert::TilingContext 
     int64_t scaleDim0 = 0;
     int64_t ubSize = 196352;
     int64_t expertCapacity = 0;
-    int64_t expertNum = info.expertPerRank * info.worldSize;
-    int64_t activeNum = info.M * info.topK;
+    const bool hasXActiveMask = HasXActiveMask(context);
+    int64_t expertNum = static_cast<int64_t>(info.expertPerRank) * info.worldSize + (hasXActiveMask ? 1 : 0);
+    int64_t activeNum = static_cast<int64_t>(info.M) * info.topK;
     int64_t dropPadMode = 0;
      int64_t expertTokensCountOrCumsumFlag = 2;
      bool expertTokensBeforeCapacityFlag = false;
@@ -234,19 +284,28 @@ static ge::graphStatus DispatchFFNCombineBF16TilingFuncImpl(gert::TilingContext 
     uint32_t n2 = info.K;
     uint32_t k2 = info.N / 2;
 
-    uint64_t cocWorkspace = (info.M + 256 - 1) / 256 * 256 * info.topK *sizeof(int32_t) +
-                            info.worldSize * info.worldSize * info.expertPerRank * sizeof(int32_t) * 3 +
-                            info.maxOutputSize * sizeof(float) * 2 +
-                            info.maxOutputSize * info.N * sizeof(int16_t) +
-                            info.maxOutputSize * n2 * sizeof(int16_t) +
-                            info.maxOutputSize * info.K * sizeof(int16_t) +
-                            info.maxOutputSize * k2 * sizeof(int16_t) +
-                            info.worldSize * sizeof(int32_t) * 16 +
-                            (info.expertPerRank + info.worldSize) * sizeof(int32_t) * 16;
+    const uint64_t expandedRowIdxWorkspace =
+        (static_cast<uint64_t>(info.M) + 256 - 1) / 256 * 256 * info.topK * sizeof(int32_t);
+    const uint64_t expertIdxScratchWorkspace = hasXActiveMask ?
+        (static_cast<uint64_t>(info.M) * info.topK * sizeof(int32_t) + 31) / 32 * 32 : 0;
+    const uint64_t countMatrixWorkspace =
+        static_cast<uint64_t>(info.worldSize) * info.worldSize * info.expertPerRank * sizeof(int32_t);
+    uint64_t cocWorkspace = expandedRowIdxWorkspace +
+                            std::max(expertIdxScratchWorkspace, countMatrixWorkspace) +
+                            countMatrixWorkspace * 2 +
+                            static_cast<uint64_t>(info.maxOutputSize) * sizeof(float) * 2 +
+                            static_cast<uint64_t>(info.maxOutputSize) * info.N * sizeof(int16_t) +
+                            static_cast<uint64_t>(info.maxOutputSize) * n2 * sizeof(int16_t) +
+                            static_cast<uint64_t>(info.maxOutputSize) * info.K * sizeof(int16_t) +
+                            static_cast<uint64_t>(info.maxOutputSize) * k2 * sizeof(int16_t) +
+                            static_cast<uint64_t>(info.worldSize) * sizeof(int32_t) * 16 +
+                            static_cast<uint64_t>(info.expertPerRank + info.worldSize) * sizeof(int32_t) * 16;
                             // std::max(info.maxOutputSize * info.N * sizeof(int16_t), info.maxOutputSize * n2 * sizeof(int16_t)) +
                             // std::max(info.maxOutputSize * info.K * sizeof(int8_t), info.maxOutputSize * k2 * sizeof(int8_t));
 
-    workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, initRoutingWorkspace);
+    const uint64_t routingWorkspace =
+        expandedRowIdxWorkspace + expertIdxScratchWorkspace + initRoutingWorkspace;
+    workSpaces[0] = SYSTEM_NEED_WORKSPACE + std::max(cocWorkspace, routingWorkspace);
 
 
     // 5. communication

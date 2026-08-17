@@ -70,6 +70,19 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  out,
                  expert_token_nums);
     } else {
+        if (x_active_mask.has_value()) {
+            const at::Tensor &mask = x_active_mask.value();
+            TORCH_CHECK(x.scalar_type() == at::kBFloat16,
+                        "x_active_mask is currently supported only for the BF16 dispatch_ffn_combine path");
+            TORCH_CHECK(mask.dim() == 1, "x_active_mask must be one-dimensional");
+            TORCH_CHECK(mask.scalar_type() == at::kBool, "x_active_mask must have bool dtype");
+            TORCH_CHECK(mask.is_contiguous(), "x_active_mask must be contiguous");
+            TORCH_CHECK(mask.sym_size(0) == x.sym_size(0),
+                        "x_active_mask must have one entry per input token");
+            TORCH_CHECK(x.sym_size(0) >= 2,
+                        "masked BF16 dispatch_ffn_combine requires a physical token dimension of at least 2");
+            TORCH_CHECK(mask.device() == x.device(), "x_active_mask must be on the same device as x");
+        }
         EXEC_NPU_CMD(aclnnDispatchFFNCombineBF16,
                  x,
                  weight1,
@@ -78,6 +91,7 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine(
                  scale1,
                  scale2,
                  probs,
+                 x_active_mask.has_value() ? x_active_mask.value() : at::Tensor(),
                  group_ep_ptr,
                  max_output_size,
                  out,

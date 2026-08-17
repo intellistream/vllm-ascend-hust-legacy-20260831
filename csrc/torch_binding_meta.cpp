@@ -249,6 +249,22 @@ std::tuple<at::Tensor&, at::Tensor&> dispatch_ffn_combine_meta(
     const c10::optional<at::Tensor> &x_active_mask,
     double swiglu_limit
 ) {
+    if (x_active_mask.has_value()) {
+        TORCH_CHECK(!weight1.empty(), "weight1 must contain at least one tensor");
+        const auto weight_dtype = weight1[0].scalar_type();
+        const bool floating_dispatch = weight_dtype != at::kChar && weight_dtype != at::kInt;
+        if (floating_dispatch) {
+            TORCH_CHECK(x.scalar_type() == at::kBFloat16,
+                        "x_active_mask is currently supported only for the BF16 dispatch_ffn_combine path");
+            TORCH_CHECK(x_active_mask->dim() == 1, "x_active_mask must be one-dimensional");
+            TORCH_CHECK(x_active_mask->scalar_type() == at::kBool, "x_active_mask must have bool dtype");
+            TORCH_CHECK(x_active_mask->is_contiguous(), "x_active_mask must be contiguous");
+            TORCH_CHECK(x_active_mask->sym_size(0) == x.sym_size(0),
+                        "x_active_mask must have one entry per input token");
+            TORCH_CHECK(x.sym_size(0) >= 2,
+                        "masked BF16 dispatch_ffn_combine requires a physical token dimension of at least 2");
+        }
+    }
     return {out, expert_token_nums};
 }
 
