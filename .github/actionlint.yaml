@@ -19,6 +19,7 @@ self-hosted-runner:
     - ascend
     - 910b
     - docker
+    - vllm-ascend-0-23-0rc1
     - vllm-ascend-0-21-0rc1
     - linux-aarch64-a2b3-pool
     - linux-aarch64-a2b3-0
@@ -30,3 +31,5 @@ self-hosted-runner:
     - linux-aarch64-a2b3-npu1
     - linux-aarch64-a2b3-npu2
     - linux-aarch64-a2b3-npu3
+    - npu-count-1
+    - npu-count-2

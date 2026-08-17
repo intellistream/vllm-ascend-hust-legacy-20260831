@@ -104,8 +104,8 @@ def test_engine_core_cleanup_is_scoped_and_runs_before_hardware_unlock() -> None
     assert "if ! command -v setsid >/dev/null 2>&1; then" in runner_script
     assert "setsid is required to launch the benchmark with an isolated process group" in runner_script
     assert "VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL" in workflow
-    assert "linux-aarch64-a2b3-npu0" in workflow
-    assert "vllm-ascend-0-21-0rc1" in workflow
+    assert "npu-count-2" in workflow
+    assert "vllm-ascend-0-23-0rc1" in workflow
     assert "      - ascend\n      - 910b\n      - docker" in workflow
     assert 'ASCEND_RT_VISIBLE_DEVICES: "0"' in workflow
     assert "cleanup-ascend-benchmark:" in workflow
@@ -172,10 +172,10 @@ def test_ascend_benchmark_workflow_wires_two_stage_perfgate() -> None:
         "      - ascend\n"
         "      - 910b\n"
         "      - docker\n"
-        "      - vllm-ascend-0-21-0rc1\n"
+        "      - vllm-ascend-0-23-0rc1\n"
         "      - linux-aarch64-a2b3-pool\n"
         "      - ascend-benchmark\n"
-        "      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-npu0' }}"
+        "      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'npu-count-2' }}"
     ) in workflow
     assert (
         "HARDWARE_CHIP_MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_chip_model || '910B2' }}"
@@ -908,9 +908,9 @@ def test_perfgate_bootstrap_requires_pinned_in_repo_plugin_sha() -> None:
     validation_end = workflow.index("\n      - name:", validation_start + 1)
     validation = workflow[validation_start:validation_end]
     assert "inputs.benchmark_scenarios == 'perfgate-bootstrap'" in validation
-    assert 'ASCEND_HUST_LOCAL_CHECKOUT:-0' in validation
-    assert 'ASCEND_HUST_REPOSITORY:-' in validation
-    assert 'ASCEND_HUST_REF:-' in validation
+    assert "ASCEND_HUST_LOCAL_CHECKOUT:-0" in validation
+    assert "ASCEND_HUST_REPOSITORY:-" in validation
+    assert "ASCEND_HUST_REF:-" in validation
     assert "=~ ^[0-9a-f]{40}$" in validation
     producer = workflow[workflow.index("- name: Run Plugin perfgate baseline producer") :]
     producer = producer[: producer.index("- name: Upload Plugin perfgate producer artifact")]
@@ -990,11 +990,7 @@ def test_ssh_443_configuration_pins_github_host_key() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
     assert "HostKeyAlias github.com" in workflow
-    assert (
-        "github.com ssh-ed25519 "
-        "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
-        in workflow
-    )
+    assert "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" in workflow
     assert 'chmod 600 "$HOME/.ssh/known_hosts"' in workflow
 
 
@@ -1029,7 +1025,7 @@ def test_plugin_producer_preserves_measurement_and_provenance_evidence() -> None
     assert '--runtime-manager-sha "$RUNTIME_MANAGER_SHA"' in store
     assert "GIT_ASKPASS" in store
     assert 'GIT_CONFIG_GLOBAL="$GIT_CONFIG_FILE"' in store
-    assert 'GIT_CONFIG_NOSYSTEM=1' in store
+    assert "GIT_CONFIG_NOSYSTEM=1" in store
     assert "GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM" in store
     assert 'CENTRAL_REPO_URL="https://github.com:443/' in store
     assert store.index('export GIT_CONFIG_GLOBAL="$GIT_CONFIG_FILE"') < store.index(
@@ -1037,9 +1033,9 @@ def test_plugin_producer_preserves_measurement_and_provenance_evidence() -> None
     )
     assert 'TARGET_MAIN_URL="https://github.com:443/${TARGET_REPOSITORY}.git"' in store
     assert '"$TARGET_MAIN_URL" main:refs/remotes/origin/main' in store
-    assert 'origin main:refs/remotes/origin/main' not in store
-    assert 'MAIN_REF_FOR_PUBLICATION=HEAD' in store
-    assert 'Target-main fetch unavailable; publishing immutable exact baseline without latest pointer.' in store
+    assert "origin main:refs/remotes/origin/main" not in store
+    assert "MAIN_REF_FOR_PUBLICATION=HEAD" in store
+    assert "Target-main fetch unavailable; publishing immutable exact baseline without latest pointer." in store
     assert '--main-ref "$MAIN_REF_FOR_PUBLICATION"' in store
     assert "git worktree" not in store
     producer = workflow[workflow.index("- name: Run Plugin perfgate baseline producer") :]

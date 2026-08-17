@@ -324,10 +324,10 @@ jobs:
       - ascend
       - 910b
       - docker
-      - vllm-ascend-0-21-0rc1
+      - vllm-ascend-0-23-0rc1
       - linux-aarch64-a2b3-pool
       - ascend-benchmark
-      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-npu0' }}
+      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'npu-count-2' }}
     # Main publication executes one warmup and three measured client passes.
     timeout-minutes: ${{ fromJSON(github.event_name == 'push' && github.ref == 'refs/heads/main' && '150' || (github.event_name == 'workflow_dispatch' && inputs.cleanup_validation_timeout_minutes || '60')) }}
     env:
@@ -385,7 +385,7 @@ jobs:
       NODE_COUNT: "1"
       ASCEND_BENCHMARK_USE_SUDO: ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_USE_SUDO || 'auto' }}
       ASCEND_BENCHMARK_ROOT_HELPER: ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_ROOT_HELPER || '' }}
-      # Each pool runner exposes one physical NPU as container-local logical device 0.
+      # Keep the benchmark single-device; the container exposes logical device 0.
       ASCEND_RT_VISIBLE_DEVICES: "0"
       ALLOW_RANDOM_HF_PUBLISH: ${{ vars.VLLM_ASCEND_HUST_ALLOW_RANDOM_HF_PUBLISH || '0' }}
       SAME_SPEC_BENCHMARK_ENABLED: ${{ (github.event_name == 'workflow_dispatch' && inputs.cleanup_validation_mode != 'normal') && '0' || (vars.VLLM_ASCEND_HUST_SAME_SPEC_BENCHMARK_ENABLED || '1') }}
@@ -1629,8 +1629,8 @@ jobs:
       - ascend
       - 910b
       - docker
-      - vllm-ascend-0-21-0rc1
-      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'linux-aarch64-a2b3-npu0' }}
+      - vllm-ascend-0-23-0rc1
+      - ${{ vars.VLLM_ASCEND_HUST_BENCHMARK_RUNNER_LABEL || 'npu-count-2' }}
     timeout-minutes: 10
     permissions:
       contents: read
