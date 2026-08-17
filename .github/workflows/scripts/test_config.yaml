@@ -608,6 +608,7 @@
     - CMakeLists.txt
   tests:
     - tests/ut/
+    - tests/ut/test_matmul_allreduce_add_rmsnorm_cmake.py
 # Single File
 - name: misc
   optional: false
@@ -861,5 +862,4 @@ partition:
   a3_x2: 3
   a3_x4: 3
   cpu_x0: 1
-
 
