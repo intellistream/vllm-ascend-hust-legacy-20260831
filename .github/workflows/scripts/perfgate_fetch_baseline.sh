@@ -93,6 +93,8 @@ fi
 target_root="baselines/${TARGET_REPOSITORY}/${COMMIT}/${scenario}/${spec_id}"
 baseline_file=""
 baseline_metadata_file=""
+baseline_metadata_local_file=""
+baseline_identity_mismatch=""
 while IFS= read -r metadata_path; do
   [[ "$metadata_path" == */baseline-metadata.json ]] || continue
   metadata_json=$(git -C "$BENCHMARK_REPO_DIR" show "$baseline_ref:$metadata_path") || continue
@@ -116,6 +118,17 @@ while IFS= read -r metadata_path; do
   if [[ "$actual_sha" != "$expected_sha" ]]; then
     baseline_unavailable "Perfgate baseline artifact checksum mismatch: $candidate_artifact_path"
   fi
+  if ! jq -e --arg expected_scenario "$scenario" --arg expected_spec_id "$spec_id" \
+    --arg expected_spec_hash "$(jq -er '.identity.spec_hash' <<<"$metadata_json")" \
+    '.same_spec.scenario == $expected_scenario and
+     .same_spec.spec_id == $expected_spec_id and
+     .same_spec.resolved_spec_hash == $expected_spec_hash' \
+    "$candidate_artifact" >/dev/null; then
+    baseline_identity_mismatch="$candidate_artifact_path"
+    continue
+  fi
+  baseline_metadata_local_file="$OUTPUT_DIR/baseline-metadata-${COMMIT:0:8}.json"
+  printf '%s\n' "$metadata_json" >"$baseline_metadata_local_file"
   baseline_file="$candidate_artifact"
   baseline_metadata_file="$metadata_path"
   break
@@ -125,6 +138,9 @@ baseline_commit="$COMMIT"
 baseline_source="exact"
 if [[ -z "$baseline_file" ]]; then
   if [[ "$ALLOW_BASELINE_FALLBACK" != "1" ]]; then
+    if [[ -n "$baseline_identity_mismatch" ]]; then
+      baseline_unavailable "No exact perfgate baseline matched same-spec identity for $TARGET_REPOSITORY@$COMMIT ($scenario/$spec_id); rejected $baseline_identity_mismatch"
+    fi
     baseline_unavailable "No exact perfgate baseline found for $TARGET_REPOSITORY@$COMMIT ($scenario/$spec_id)"
   fi
   pointer_path="pointers/${TARGET_REPOSITORY}/${scenario}/${spec_id}/latest-main.json"
@@ -166,6 +182,16 @@ if [[ -z "$baseline_file" ]]; then
     <<<"$pointer_metadata" >/dev/null; then
     baseline_unavailable "latest-main pointer metadata does not match the referenced artifact: $pointer_metadata_path"
   fi
+  if ! jq -e --arg expected_scenario "$scenario" --arg expected_spec_id "$spec_id" \
+    --arg expected_spec_hash "$pointer_spec_hash" \
+    '.same_spec.scenario == $expected_scenario and
+     .same_spec.spec_id == $expected_spec_id and
+     .same_spec.resolved_spec_hash == $expected_spec_hash' \
+    "$baseline_file" >/dev/null; then
+    baseline_unavailable "latest-main pointer artifact does not match same-spec identity: $pointer_artifact_path"
+  fi
+  baseline_metadata_local_file="$OUTPUT_DIR/baseline-metadata-latest-main.json"
+  printf '%s\n' "$pointer_metadata" >"$baseline_metadata_local_file"
   baseline_metadata_file="$pointer_metadata_path"
   baseline_commit="latest-main"
   baseline_source="latest-main-fallback"
@@ -181,8 +207,12 @@ write_env PERFGATE_BASELINE_FILE "$resolved_file"
 write_env PERFGATE_BASELINE_AVAILABLE 1
 write_env PERFGATE_BASELINE_COMMIT "$baseline_commit"
 write_env PERFGATE_BASELINE_SOURCE "$baseline_source"
+write_env PERFGATE_BASELINE_REPOSITORY_COMMIT "$(git -C "$BENCHMARK_REPO_DIR" rev-parse "$baseline_ref")"
 if [[ -n "$baseline_metadata_file" ]]; then
   write_env PERFGATE_BASELINE_METADATA_PATH "$baseline_metadata_file"
+fi
+if [[ -n "$baseline_metadata_local_file" ]]; then
+  write_env PERFGATE_BASELINE_METADATA_FILE "$baseline_metadata_local_file"
 fi
 
 echo "Fetched perfgate baseline: $baseline_commit ($baseline_source) -> $resolved_file"

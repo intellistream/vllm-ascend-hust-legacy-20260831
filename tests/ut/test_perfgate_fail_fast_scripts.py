@@ -159,9 +159,7 @@ def test_stage2_revalidates_latest_main_in_enforce_mode(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert "required revalidation" in result.stdout
-    assert "run_ascend_benchmark_ci.sh" in Path(env["FAKE_BASH_LOG"]).read_text(
-        encoding="utf-8"
-    )
+    assert "run_ascend_benchmark_ci.sh" in Path(env["FAKE_BASH_LOG"]).read_text(encoding="utf-8")
     github_env = Path(env["GITHUB_ENV"]).read_text(encoding="utf-8")
     assert "PERFGATE_STAGE2_EXECUTED" in github_env
     assert "PERFGATE_STAGE2_BASELINE_AVAILABLE" in github_env
@@ -272,18 +270,10 @@ def _prepare_central_baseline_repo(tmp_path: Path, *, target_sha: str) -> tuple[
     spec_hash = "a" * 64
     target_repo = "vLLM-HUST/vllm-ascend-hust"
     artifact = (
-        f'{{"same_spec":{{"scenario":"random-online","spec_id":"{spec_id}",'
-        f'"resolved_spec_hash":"{spec_hash}"}}}}\n'
+        f'{{"same_spec":{{"scenario":"random-online","spec_id":"{spec_id}","resolved_spec_hash":"{spec_hash}"}}}}\n'
     )
     artifact_path = (
-        worktree
-        / "baselines"
-        / target_repo
-        / target_sha
-        / scenario
-        / spec_id
-        / spec_hash
-        / "run_leaderboard.json"
+        worktree / "baselines" / target_repo / target_sha / scenario / spec_id / spec_hash / "run_leaderboard.json"
     )
     metadata_path = artifact_path.with_name("baseline-metadata.json")
     artifact_path.parent.mkdir(parents=True)
@@ -309,9 +299,7 @@ def _prepare_central_baseline_repo(tmp_path: Path, *, target_sha: str) -> tuple[
     _git(worktree, "remote", "add", "origin", str(remote))
     _git(worktree, "push", "origin", "benchmark-baselines")
     _git(tmp_path, "clone", str(remote), str(benchmark_repo))
-    spec_file.write_text(
-        json.dumps({"id": spec_id, "scenario": scenario}) + "\n", encoding="utf-8"
-    )
+    spec_file.write_text(json.dumps({"id": spec_id, "scenario": scenario}) + "\n", encoding="utf-8")
     return benchmark_repo, spec_file
 
 
@@ -374,8 +362,54 @@ def test_fetch_baseline_reads_central_nested_exact_artifact(tmp_path: Path) -> N
     )
     assert result.returncode == 0, result.stderr
     assert (output_dir / f"baseline-{target_sha[:8]}.json").is_file()
-    assert "PERFGATE_BASELINE_AVAILABLE" in github_env.read_text(encoding="utf-8")
-    assert "PERFGATE_BASELINE_METADATA_PATH" in github_env.read_text(encoding="utf-8")
+    metadata_file = output_dir / f"baseline-metadata-{target_sha[:8]}.json"
+    assert metadata_file.is_file()
+    env_text = github_env.read_text(encoding="utf-8")
+    assert "PERFGATE_BASELINE_AVAILABLE" in env_text
+    assert "PERFGATE_BASELINE_METADATA_PATH" in env_text
+    assert "PERFGATE_BASELINE_METADATA_FILE" in env_text
+    assert "PERFGATE_BASELINE_REPOSITORY_COMMIT" in env_text
+    assert str(metadata_file) in env_text
+
+
+def test_fetch_baseline_rejects_artifact_same_spec_identity_mismatch(
+    tmp_path: Path,
+) -> None:
+    target_sha = "3" * 40
+    benchmark_repo, spec_file = _prepare_central_baseline_repo(tmp_path, target_sha=target_sha)
+    worktree = tmp_path / "central-worktree"
+    artifact_path = next(worktree.glob("baselines/**/run_leaderboard.json"))
+    artifact = artifact_path.read_text(encoding="utf-8").replace("a" * 64, "b" * 64)
+    artifact_path.write_text(artifact, encoding="utf-8")
+    metadata_path = artifact_path.with_name("baseline-metadata.json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["artifact"]["sha256"] = hashlib.sha256(artifact.encode()).hexdigest()
+    metadata_path.write_text(json.dumps(metadata) + "\n", encoding="utf-8")
+    _git(worktree, "add", ".")
+    _git(worktree, "commit", "-m", "test mismatched same-spec artifact")
+    _git(worktree, "push", "origin", "benchmark-baselines")
+
+    github_env = tmp_path / "github-env"
+    result = subprocess.run(
+        ["/bin/bash", str(FETCH_BASELINE_SCRIPT), target_sha],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "GITHUB_ENV": str(github_env),
+            "PERFGATE_MODE": "enforce",
+            "VLLM_HUST_BENCHMARK_REPO": str(benchmark_repo),
+            "SAME_SPEC_SPEC_FILE": str(spec_file),
+            "BENCH_SCENARIO": "random-online",
+            "PERFGATE_TARGET_REPOSITORY": "vLLM-HUST/vllm-ascend-hust",
+            "PERFGATE_BASELINE_OUTPUT_DIR": str(tmp_path / "output"),
+        },
+    )
+
+    assert result.returncode == 2
+    assert "same-spec identity" in github_env.read_text(encoding="utf-8")
 
 
 def test_fetch_baseline_retries_transient_fetch_failure(tmp_path: Path) -> None:
@@ -484,9 +518,7 @@ def test_fetch_baseline_explicit_fallback_accepts_different_main_sha(tmp_path: P
     scenario = "random-online"
     spec_hash = "a" * 64
     target_repo = "vLLM-HUST/vllm-ascend-hust"
-    artifact_path = (
-        f"baselines/{target_repo}/{main_sha}/{scenario}/{spec_id}/{spec_hash}/run_leaderboard.json"
-    )
+    artifact_path = f"baselines/{target_repo}/{main_sha}/{scenario}/{spec_id}/{spec_hash}/run_leaderboard.json"
     artifact = worktree / artifact_path
     artifact_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
     pointer = worktree / f"pointers/{target_repo}/{scenario}/{spec_id}/latest-main.json"
