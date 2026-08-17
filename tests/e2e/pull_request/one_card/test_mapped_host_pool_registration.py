@@ -6,7 +6,7 @@ import weakref
 
 import torch
 import torch_npu  # noqa: F401
-import vllm_ascend.vllm_ascend_C  # noqa: F401
+import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
 STRESS_CYCLES = 32
 

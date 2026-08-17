@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from pathlib import Path
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
+else:  # pragma: no cover - Python 3.10
+    import tomli as tomllib  # type: ignore[import-not-found]
 
 
 def test_build_requirements_only_contain_setup_dependencies():
@@ -32,8 +33,7 @@ def test_custom_op_metadata_uses_opc_discovery_filename():
     build_functions = (root / "csrc/cmake/func.cmake").read_text()
 
     assert (
-        "set(CUSTOM_OPS_INFO_JSON "
-        "${CUSTOM_OPS_INFO_DIR}/aic-${OPINFO_COMPUTE_UNIT}-ops-info.json)" in build_functions
+        "set(CUSTOM_OPS_INFO_JSON ${CUSTOM_OPS_INFO_DIR}/aic-${OPINFO_COMPUTE_UNIT}-ops-info.json)" in build_functions
     )
     assert "copy_if_different ${OPS_INFO_JSON} ${CUSTOM_OPS_INFO_JSON}" in build_functions
     assert "DEPENDS ${CUSTOM_OPS_INFO_JSON}" in build_functions

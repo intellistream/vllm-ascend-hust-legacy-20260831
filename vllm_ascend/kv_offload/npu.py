@@ -1,4 +1,4 @@
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -8,15 +8,19 @@ from vllm_ascend.kv_offload.experimental_mapped import (
     MappedOffloadingSpec as _MappedOffloadingSpec,
 )
 
-try:
+_TIERING_IMPORT_ERROR: ModuleNotFoundError | None = None
+if TYPE_CHECKING:
     from vllm.v1.kv_offload.tiering.spec import (
-        TieringOffloadingSpec as _TieringOffloadingSpec,
+        TieringOffloadingSpec as _TieringOffloadingSpecBase,
     )
-except ModuleNotFoundError as exc:
-    _TieringOffloadingSpec = None
-    _TIERING_IMPORT_ERROR = exc
 else:
-    _TIERING_IMPORT_ERROR = None
+    try:
+        from vllm.v1.kv_offload.tiering.spec import (
+            TieringOffloadingSpec as _TieringOffloadingSpecBase,
+        )
+    except ModuleNotFoundError as exc:
+        _TieringOffloadingSpecBase = object
+        _TIERING_IMPORT_ERROR = exc
 
 
 def _set_cpu_bytes_from_legacy_num_blocks(
@@ -75,22 +79,14 @@ class MappedOffloadingSpec(_MappedOffloadingSpec):
         super().__init__(vllm_config, kv_cache_config)
 
 
-if _TieringOffloadingSpec is not None:
+class NPUTieringOffloadingSpec(_TieringOffloadingSpecBase):
+    """Ascend NPU implementation of vLLM's multi-tier KV offloading spec."""
 
-    class NPUTieringOffloadingSpec(_TieringOffloadingSpec):
-        """Ascend NPU implementation of vLLM's multi-tier KV offloading spec."""
-
-        def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-            _set_cpu_bytes_from_legacy_num_blocks(vllm_config, kv_cache_config)
-            super().__init__(vllm_config, kv_cache_config)
-
-else:
-
-    class NPUTieringOffloadingSpec:
-        """Placeholder for vLLM builds that do not yet expose tiering APIs."""
-
-        def __init__(self, *args: Any, **kwargs: Any):
+    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
+        if _TIERING_IMPORT_ERROR is not None:
             raise ImportError("NPUTieringOffloadingSpec requires vllm.v1.kv_offload.tiering") from _TIERING_IMPORT_ERROR
+        _set_cpu_bytes_from_legacy_num_blocks(vllm_config, kv_cache_config)
+        super().__init__(vllm_config, kv_cache_config)
 
 
 CPUOffloadingSpec = NPUOffloadingSpec
