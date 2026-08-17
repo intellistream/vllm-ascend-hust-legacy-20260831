@@ -310,14 +310,16 @@ class TestUtils(TestBase):
                 self.assertTrue(utils.vllm_version_is.__wrapped__("1.0.0"))
                 self.assertFalse(utils.vllm_version_is.__wrapped__("2.0.0"))
         utils.get_vllm_upstream_version.cache_clear()
-        with mock.patch("vllm.__upstream_version__", "1.0.0", create=True), mock.patch(
-            "vllm.__version__", "1.0.0.post2.dev3+g123456789"
+        with (
+            mock.patch("vllm.__upstream_version__", "1.0.0", create=True),
+            mock.patch("vllm.__version__", "1.0.0.post2.dev3+g123456789"),
         ):
             self.assertTrue(utils.vllm_version_is.__wrapped__("1.0.0"))
             self.assertFalse(utils.vllm_version_is.__wrapped__("2.0.0"))
         utils.get_vllm_upstream_version.cache_clear()
-        with mock.patch("vllm.__upstream_version__", "2.0.0rc1", create=True), mock.patch(
-            "vllm.__version__", "2.0.0rc1.post1.dev7+g123456789"
+        with (
+            mock.patch("vllm.__upstream_version__", "2.0.0rc1", create=True),
+            mock.patch("vllm.__version__", "2.0.0rc1.post1.dev7+g123456789"),
         ):
             self.assertTrue(utils.vllm_version_is.__wrapped__("2.0.0rc1"))
             self.assertFalse(utils.vllm_version_is.__wrapped__("1.0.0"))

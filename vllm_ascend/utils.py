@@ -385,16 +385,13 @@ def is_add_rms_norm_bias_custom_op_available() -> bool:
             failures.append(f"{candidate}: {exc}")
             continue
 
-        missing_symbols = [
-            symbol for symbol in _ADD_RMS_NORM_BIAS_REQUIRED_SYMBOLS if not hasattr(opapi, symbol)
-        ]
+        missing_symbols = [symbol for symbol in _ADD_RMS_NORM_BIAS_REQUIRED_SYMBOLS if not hasattr(opapi, symbol)]
         if not missing_symbols:
             return True
         failures.append(f"{candidate}: missing {', '.join(missing_symbols)}")
 
     logger.warning_once(
-        "Disable npu_add_rms_norm_bias custom op because no available "
-        "OPAPI library exports all required symbols: %s",
+        "Disable npu_add_rms_norm_bias custom op because no available OPAPI library exports all required symbols: %s",
         "; ".join(failures),
     )
     return False
@@ -645,10 +642,7 @@ def vllm_version_is(target_vllm_version: str):
         current_version = get_vllm_upstream_version()
         target_version = _normalize_vllm_compat_version(target_vllm_version)
     except InvalidVersion as exc:
-        raise ValueError(
-            f"Invalid target vllm version {target_vllm_version}. "
-            "Please use x.y.z or x.y.zrcN."
-        ) from exc
+        raise ValueError(f"Invalid target vllm version {target_vllm_version}. Please use x.y.z or x.y.zrcN.") from exc
 
     return current_version == target_version
 
@@ -760,9 +754,7 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
     )
 
     is_moe_model = bool(
-        vllm_config is not None
-        and vllm_config.model_config is not None
-        and vllm_config.model_config.is_moe
+        vllm_config is not None and vllm_config.model_config is not None and vllm_config.model_config.is_moe
     )
 
     global REGISTERED_ASCEND_OPS
