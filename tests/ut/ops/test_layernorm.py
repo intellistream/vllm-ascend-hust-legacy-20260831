@@ -5,10 +5,30 @@ import torch
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 
+from vllm_ascend.ops import layernorm as layernorm_module
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
 enable_custom_op()
+
+
+def test_add_rms_norm_bias_capability_requires_both_cann_symbols():
+    opapi = MagicMock(spec=["aclnnAddRmsNormBias"])
+    layernorm_module._aclnn_add_rms_norm_bias_available.cache_clear()
+    with patch.object(layernorm_module.ctypes, "CDLL", return_value=opapi):
+        assert layernorm_module._aclnn_add_rms_norm_bias_available() is False
+
+
+def test_add_rms_norm_bias_capability_accepts_complete_cann_runtime():
+    opapi = MagicMock(
+        spec=[
+            "aclnnAddRmsNormBias",
+            "aclnnAddRmsNormBiasGetWorkspaceSize",
+        ]
+    )
+    layernorm_module._aclnn_add_rms_norm_bias_available.cache_clear()
+    with patch.object(layernorm_module.ctypes, "CDLL", return_value=opapi):
+        assert layernorm_module._aclnn_add_rms_norm_bias_available() is True
 
 
 @pytest.fixture

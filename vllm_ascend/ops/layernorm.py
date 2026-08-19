@@ -14,6 +14,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import ctypes
+from functools import cache
 
 import torch
 from torch import nn
@@ -23,6 +25,22 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormG
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 from vllm_ascend.utils import enable_custom_op, get_weight_prefetch_method
+
+
+@cache
+def _aclnn_add_rms_norm_bias_available() -> bool:
+    """Return whether the image CANN runtime exports the fused bias op."""
+    try:
+        opapi = ctypes.CDLL("libopapi.so")
+    except OSError:
+        return False
+    return all(
+        hasattr(opapi, symbol)
+        for symbol in (
+            "aclnnAddRmsNormBias",
+            "aclnnAddRmsNormBiasGetWorkspaceSize",
+        )
+    )
 
 
 class AscendRMSNorm(RMSNorm):
@@ -69,7 +87,7 @@ class AscendRMSNorm(RMSNorm):
 
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            if enable_custom_op():
+            if enable_custom_op() and _aclnn_add_rms_norm_bias_available():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, self.weight, self.bias, self.variance_epsilon
                 )
@@ -98,7 +116,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
 
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            if enable_custom_op():
+            if enable_custom_op() and _aclnn_add_rms_norm_bias_available():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, 1.0 + self.weight, None, self.variance_epsilon
                 )
