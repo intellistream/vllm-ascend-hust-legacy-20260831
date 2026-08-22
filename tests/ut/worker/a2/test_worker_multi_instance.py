@@ -179,38 +179,48 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
         self.assertEqual(result, requested_memory - persistent_torch_memory)
 
     @patch("vllm_ascend.worker.worker.logger")
-    def test_deepseek_v4_compressed_skips_npugraph_memory_profile(self, mock_logger):
-        """DSV4 DSA must not run the pre-KV graph memory profiling path."""
+    def test_deepseek_v4_compressed_profiles_npugraph_memory(self, mock_logger):
+        """DSV4 graph requirements must reduce the KV budget before allocation."""
         total = int(64 * GiB_bytes)
         requested_memory = int(total * 0.9)
         init_free = int(60 * GiB_bytes)
         non_kv_cache = int(1 * GiB_bytes)
+        npugraph_memory = int(2 * GiB_bytes)
 
         worker = self._make_worker(requested_memory, init_free, total)
         worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         worker.model_config.hf_config.model_type = "deepseek_v4"
         worker.model_runner.use_compress = True
-        worker.model_runner.profile_cudagraph_memory.return_value = int(2 * GiB_bytes)
+        worker.model_runner.profile_cudagraph_memory.return_value = npugraph_memory
         profile_result = self._make_profile_result(
             free_memory_after=init_free - non_kv_cache,
             non_kv_cache_memory=non_kv_cache,
         )
 
-        with self._patch_memory_profiling(profile_result):
+        with (
+            self._patch_memory_profiling(profile_result),
+            patch(
+                "vllm_ascend.worker.worker.envs_vllm.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS",
+                True,
+            ),
+        ):
             result = worker.determine_available_memory()
 
         worker.model_runner.profile_run.assert_called_once()
-        worker.model_runner.profile_cudagraph_memory.assert_not_called()
+        worker.model_runner.profile_cudagraph_memory.assert_called_once_with()
         self.assertEqual(
             worker.vllm_config.compilation_config.cudagraph_mode,
             CUDAGraphMode.FULL_DECODE_ONLY,
         )
-        self.assertEqual(worker.npugraph_memory_estimate, 0)
-        self.assertEqual(result, requested_memory - non_kv_cache)
+        self.assertEqual(worker.npugraph_memory_estimate, npugraph_memory)
+        self.assertEqual(
+            result,
+            requested_memory - non_kv_cache - npugraph_memory,
+        )
 
     @patch("vllm_ascend.worker.worker.logger")
-    def test_non_deepseek_compressed_still_profiles_npugraph_memory(self, mock_logger):
-        """The DSV4 guard must not disable graph memory profiling globally."""
+    def test_profiles_npugraph_memory_when_estimate_is_not_applied(self, mock_logger):
+        """Keep profiling receipts even when the estimate is advisory only."""
         total = int(64 * GiB_bytes)
         requested_memory = int(total * 0.9)
         init_free = int(60 * GiB_bytes)

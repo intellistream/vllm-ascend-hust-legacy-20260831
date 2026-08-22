@@ -775,16 +775,6 @@ class NPUWorker(WorkerBase):
 
             npugraph_memory_estimate = 0
             should_profile_npugraph_memory = self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            if should_profile_npugraph_memory and getattr(self.model_runner, "use_compress", False):
-                hf_config = self.model_config.hf_config
-                if getattr(hf_config, "model_type", None) == "deepseek_v4":
-                    logger.warning_once(
-                        "Skipping ACL graph memory profiling for DeepSeek-V4 "
-                        "DSA compressed attention. Graph mode remains enabled; "
-                        "the normal ACL graph capture still runs after KV cache "
-                        "allocation."
-                    )
-                    should_profile_npugraph_memory = False
             if should_profile_npugraph_memory:
                 npugraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
