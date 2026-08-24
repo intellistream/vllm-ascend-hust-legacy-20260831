@@ -116,6 +116,7 @@ def create_inplace_split_batch_slices(
     cudagraph_capture_sizes: list[int] | tuple[int, ...],
     inplace_max_remainder_tokens: int | None = None,
     *,
+    force_split: bool = False,
     offset_match_policy: str = "exact",
     offset_capture_sizes: list[int] | tuple[int, ...] | None = None,
     offset_min_graph_tokens: int = 1,
@@ -134,7 +135,7 @@ def create_inplace_split_batch_slices(
     sorted_capture_sizes = sorted(set(cudagraph_capture_sizes))
     padded_without_split = _padded_graph_size(total_num_tokens, sorted_capture_sizes)
 
-    if padded_without_split == total_num_tokens:
+    if padded_without_split == total_num_tokens and not force_split:
         return None, NO_SPLIT_EXACT_GRAPH_HIT
 
     num_reqs = len(num_scheduled_tokens_per_request)

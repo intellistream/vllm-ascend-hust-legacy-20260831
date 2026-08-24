@@ -1040,6 +1040,9 @@ class SplitBatchConfig:
         self.inplace_validate_metadata_ptrs: bool = bool(
             split_batch_config.get("inplace_validate_metadata_ptrs", False)
         )
+        self.force_split: bool = bool(
+            split_batch_config.get("force_split", False)
+        )
         self.inplace_force_pa_for_offset: bool = bool(
             split_batch_config.get("inplace_force_pa_for_offset", False)
         )

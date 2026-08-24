@@ -448,6 +448,7 @@ class InplaceSplitRunner:
             uniform_decode_query_len=uniform_decode_query_len,
             cudagraph_capture_sizes=cudagraph_capture_sizes,
             inplace_max_remainder_tokens=split_batch_config.inplace_max_remainder_tokens,
+            force_split=split_batch_config.force_split,
             offset_match_policy=split_batch_config.inplace_offset_match_policy,
             offset_capture_sizes=offset_capture_sizes,
             offset_min_graph_tokens=split_batch_config.inplace_offset_min_graph_tokens,
