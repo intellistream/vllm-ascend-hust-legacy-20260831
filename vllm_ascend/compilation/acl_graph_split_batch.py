@@ -104,8 +104,17 @@ def refresh_block_table_in_place(
 
 def should_template_fia_seq_lens(forward_context: Any) -> bool:
     batch_descriptor = getattr(forward_context, "batch_descriptor", None)
-    return (getattr(batch_descriptor, "capture_metadata_mode", "") == "template"
-            and getattr(batch_descriptor, "attention_backend", "") == "fia")
+    if not (getattr(batch_descriptor, "capture_metadata_mode", "") == "template"
+            and getattr(batch_descriptor, "attention_backend", "") == "fia"):
+        return False
+    # Zero-padding split: the last seq_lens entry belongs to a real request,
+    # not a padding dummy. Templating would pin that request's KV length to
+    # the template value and corrupt its attention output.
+    actual = getattr(forward_context, "split_actual_num_tokens", None)
+    graph = getattr(forward_context, "split_graph_num_tokens", None)
+    if actual is not None and graph is not None and int(actual) >= int(graph):
+        return False
+    return True
 
 
 def _get_fia_key_t(key_tensor: Any, fallback: int) -> int:

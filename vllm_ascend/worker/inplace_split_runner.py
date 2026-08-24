@@ -1072,7 +1072,13 @@ class InplaceSplitRunner:
             if (split_slice.start_num_tokens > 0
                     and split_attention_backend == "fia"
                     and ubatch_attn_metadata is not None
-                    and ubatch_batch_descriptor.capture_metadata_mode == "template"):
+                    and ubatch_batch_descriptor.capture_metadata_mode == "template"
+                    and split_slice.graph_num_tokens > split_slice.num_tokens):
+                # Template the dummy padding request's KV length only. For a
+                # zero-padding split (graph_num_tokens == num_tokens) the last
+                # seq_lens entry belongs to a real request; templating it
+                # would pin that request's KV length to the block-size
+                # template value and corrupt its attention output.
                 from vllm_ascend.compilation.acl_graph_split_batch import template_fia_seq_lens_list
                 template_fia_seq_lens_list(ubatch_attn_metadata, self.block_size)
 
