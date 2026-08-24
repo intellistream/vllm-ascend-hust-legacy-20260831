@@ -260,21 +260,37 @@ def _tensor_payload(payload: dict[str, Any],
     return cur
 
 
-def _split_from_slices(row: dict[str, Any]) -> dict[str, int] | None:
-    splits = row.get("splits")
-    if not isinstance(splits, list) or len(splits) < 2:
+def _split_from_step_descriptors(
+        step_descriptors: list[dict[str, Any]]) -> dict[str, int] | None:
+    """Rebuild one observed split from the current split_descriptor events.
+
+    The legacy split_slices event no longer exists; each decode step now
+    emits one split_descriptor event per microbatch (payload-nested). idx 0
+    is the head microbatch and the largest idx is the offset microbatch.
+    """
+    by_idx: dict[int, dict[str, Any]] = {}
+    for row in step_descriptors:
+        payload = row.get("payload") or {}
+        idx = payload.get("idx")
+        if idx is None:
+            continue
+        by_idx[int(idx)] = payload
+    if 0 not in by_idx or max(by_idx) < 1:
+        return None
+    first_payload = by_idx[0]
+    last_payload = by_idx[max(by_idx)]
+    first_tokens = int(first_payload.get("actual_num_tokens", 0) or 0)
+    second_tokens = int(last_payload.get("actual_num_tokens", 0) or 0)
+    second_start = int((last_payload.get("batch_descriptor") or {}).get(
+        "start_num_tokens", 0) or 0)
+    if first_tokens <= 0 or second_tokens <= 0 or second_start <= 0:
         return None
     return {
-        "total_tokens":
-        int(sum(int(s.get("num_tokens", 0) or 0) for s in splits)),
-        "first_tokens":
-        int(splits[0].get("num_tokens", 0) or 0),
-        "second_tokens":
-        int(splits[1].get("num_tokens", 0) or 0),
-        "first_start_num_tokens":
-        int(splits[0].get("start_num_tokens", 0) or 0),
-        "second_start_num_tokens":
-        int(splits[1].get("start_num_tokens", 0) or 0),
+        "total_tokens": first_tokens + second_tokens,
+        "first_tokens": first_tokens,
+        "second_tokens": second_tokens,
+        "first_start_num_tokens": 0,
+        "second_start_num_tokens": second_start,
     }
 
 
@@ -288,10 +304,16 @@ def _split_histogram_key(split: dict[str, int]) -> str:
 def _descriptor_matches_expected(row: dict[str, Any],
                                  expected_split: dict[str, int],
                                  expected_graph_variant: str) -> bool:
-    descriptor = row.get("batch_descriptor") or {}
+    payload = row.get("payload") or {}
+    descriptor = payload.get("batch_descriptor") or {}
+    # Prefer the actual (non-padded) token count. split_descriptor reports it
+    # as actual_num_tokens; inplace_lazy_capture_complete reports it as
+    # num_tokens. Fall back to the descriptor's (graph) size last.
+    actual_tokens = payload.get(
+        "actual_num_tokens",
+        payload.get("num_tokens", descriptor.get("num_tokens", 0)))
     return (
-        int(descriptor.get("num_tokens", row.get("actual_num_tokens", 0)) or 0)
-        == int(expected_split["second_tokens"])
+        int(actual_tokens or 0) == int(expected_split["second_tokens"])
         and int(descriptor.get("start_num_tokens", 0) or 0)
         == int(expected_split["second_start_num_tokens"])
         and str(descriptor.get("graph_variant", expected_graph_variant))
@@ -301,9 +323,11 @@ def _descriptor_matches_expected(row: dict[str, Any],
 
 def _execution_matches_expected(row: dict[str, Any],
                                 expected_split: dict[str, int]) -> bool:
+    payload = row.get("payload") or {}
     return (
-        int(row.get("num_tokens", 0) or 0) == int(expected_split["second_tokens"])
-        and int(row.get("start_num_tokens", 0) or 0)
+        int(payload.get("num_tokens", 0) or 0)
+        == int(expected_split["second_tokens"])
+        and int(payload.get("start_num_tokens", 0) or 0)
         == int(expected_split["second_start_num_tokens"])
     )
 
@@ -322,19 +346,22 @@ def _summarize_split_debug_trace(
         event_counts[event] = event_counts.get(event, 0) + 1
 
     planner_decisions = [
-        row for row in rows if row.get("event") == "split_planner_decision"
+        row for row in rows if row.get("event") in (
+            "inplace_split_planning_result", "inplace_split_precheck_failed")
     ]
     fallback_reason_histogram: dict[str, int] = {}
     for row in planner_decisions:
-        reason = row.get("reason")
-        fallback_to = row.get("fallback_to")
+        payload = row.get("payload") or {}
+        reason = payload.get("reason")
         if reason is None:
             continue
-        if fallback_to is not None or str(reason).startswith("no_split_"):
+        # Current schema replaced `fallback_to` with `has_plan`. Precheck
+        # failures carry no has_plan key and always mean no split happened.
+        if not payload.get("has_plan", False) or str(reason).startswith(
+                "no_split_"):
             reason_key = str(reason)
             fallback_reason_histogram[reason_key] = (
                 fallback_reason_histogram.get(reason_key, 0) + 1)
-    split_slices = [row for row in rows if row.get("event") == "split_slices"]
     descriptors = [row for row in rows if row.get("event") == "split_descriptor"]
     inplace_exec_events = {"inplace_serial_execution"}
     expected_graph_variant = "inplace_serial"
@@ -347,32 +374,37 @@ def _summarize_split_debug_trace(
     captures = [
         row for row in rows
         if row.get("event") == "acl_graph_capture"
-        and row.get("phase") == "post"
-        and int((row.get("batch_descriptor") or {}).get(
+        and (row.get("payload") or {}).get("phase") == "post"
+        and int(((row.get("payload") or {}).get("batch_descriptor") or {}).get(
             "start_num_tokens", 0) or 0) > 0
     ]
     acl_replays = [
         row for row in rows
         if row.get("event") == "acl_graph_replay"
-        and row.get("phase") == "post"
-        and int((row.get("batch_descriptor") or {}).get(
+        and (row.get("payload") or {}).get("phase") == "post"
+        and int(((row.get("payload") or {}).get("batch_descriptor") or {}).get(
             "start_num_tokens", 0) or 0) > 0
     ]
     lazy_capture_complete = [
         row for row in rows
         if row.get("event") == "inplace_lazy_capture_complete"
-        and int((row.get("batch_descriptor") or {}).get(
+        and int(((row.get("payload") or {}).get("batch_descriptor") or {}).get(
             "start_num_tokens", 0) or 0) > 0
     ]
 
     observed_splits: list[dict[str, Any]] = []
     observed_split_histogram: dict[str, int] = {}
-    for row in split_slices:
-        split = _split_from_slices(row)
+    # The legacy split_slices event no longer exists; rebuild each observed
+    # split from the per-step split_descriptor microbatch events instead.
+    descriptors_by_step: dict[Any, list[dict[str, Any]]] = {}
+    for row in descriptors:
+        descriptors_by_step.setdefault(row.get("step_id"), []).append(row)
+    for step_id, step_descriptors in descriptors_by_step.items():
+        split = _split_from_step_descriptors(step_descriptors)
         if split is None:
             continue
         record = {
-            "step_id": row.get("step_id"),
+            "step_id": step_id,
             **split,
         }
         observed_splits.append(record)
@@ -417,20 +449,20 @@ def _summarize_split_debug_trace(
 
     second_exec = expected_exec if expected_split is not None else [
         row for row in inplace_exec
-        if int(row.get("start_num_tokens", 0) or 0) > 0
+        if int((row.get("payload") or {}).get("start_num_tokens", 0) or 0) > 0
     ]
+    # Current inplace execution events report tensor views under `payload`.
+    # Only input_ids/positions are reliably present (the metadata tensor dict
+    # is often empty and slot_mapping/block_tables are no longer emitted), so
+    # pointer-stability validation is limited to those two fields.
     ptr_fields = {
         "input_ids": ("input_ids", ),
         "positions": ("positions", ),
-        "query_start_loc": ("metadata", "query_start_loc"),
-        "seq_lens": ("metadata", "seq_lens"),
-        "block_tables": ("metadata", "block_tables"),
-        "slot_mapping": ("metadata", "slot_mapping"),
     }
     ptr_stability: dict[str, Any] = {}
     for name, keys in ptr_fields.items():
         tensor_payloads = [
-            info for info in (_tensor_payload(row, *keys)
+            info for info in (_tensor_payload(row.get("payload") or {}, *keys)
                               for row in second_exec) if info is not None
         ]
         values = []
@@ -495,19 +527,21 @@ def _summarize_split_debug_trace(
     parallel_gate = {
         "descriptor_parallel_stream_count": sum(
             1 for row in expected_descriptors
-            if bool(row.get("in_parallel_streams", False))),
+            if bool((row.get("payload") or {}).get("in_parallel_streams",
+                                                   False))),
         "execution_parallel_stream_count": sum(
             1 for row in second_exec
-            if str(row.get("stream", "")) == "parallel"),
+            if str((row.get("payload") or {}).get("stream", "")) == "parallel"),
         "original_offset_view_count": sum(
             1 for row in second_exec
-            if row.get("buffer_source") == "original_offset_view"),
+            if (row.get("payload") or {}).get("buffer_source")
+            == "original_offset_view"),
         "parallel_graph_entry_pool_count": sum(
             1 for row in second_exec
-            if row.get("graph_entry_pool") == "parallel"),
+            if (row.get("payload") or {}).get("graph_entry_pool") == "parallel"),
         "parallel_graph_params_pool_count": sum(
             1 for row in second_exec
-            if row.get("graph_params_pool") == "parallel"),
+            if (row.get("payload") or {}).get("graph_params_pool") == "parallel"),
     }
 
     failures: list[str] = []
@@ -653,9 +687,10 @@ def create_parser() -> FlexibleArgumentParser:
 
     # Default compilation config: pass explicitly so Ascend platform sees it.
     # IMPORTANT: Only include keys that exist on vLLM's `CompilationConfig`.
+    # vllm 0.23+ removed the `level` field (replaced by `mode`, which already
+    # defaults to VLLM_COMPILE for V1), so it must not be passed here.
     cudagraph_sizes = [1,2,3,4,5,6,7,8]
     compilation_config = {
-        "level": 3,
         "cudagraph_mode": "FULL_DECODE_ONLY",
         "cudagraph_capture_sizes": cudagraph_sizes,
     }
@@ -951,7 +986,8 @@ def create_parser() -> FlexibleArgumentParser:
         type=str,
         default=None,
         help=(
-            "Expected split_planner_decision reason when validating an "
+            "Expected no-split reason from the inplace_split_planning_result "
+            "or inplace_split_precheck_failed debug event when validating an "
             "intentional inplace fallback, for example no_split_mrope. "
             "When set, trace validation requires no offset inplace execution."
         ),
