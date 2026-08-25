@@ -42,6 +42,7 @@ from vllm_ascend.worker.inplace_split_ops import (
     tokens_slice_for_inplace_execution,
     trim_split_output,
 )
+from vllm_ascend.worker.inplace_split_worker_pool import SplitReplayWorkerPool
 from vllm_ascend.worker.inplace_split_utils import SplitBatchSlice
 
 if TYPE_CHECKING:
@@ -201,6 +202,13 @@ class InplaceSplitRunner:
         self._runner = runner
         self._inplace_parallel_output_release_events: list[
             torch.npu.Event | None] = []
+        self._replay_worker_pool: SplitReplayWorkerPool | None = None
+
+    def _get_replay_worker_pool(self) -> SplitReplayWorkerPool:
+        """Lazy persistent replay workers (created on the engine device)."""
+        if self._replay_worker_pool is None:
+            self._replay_worker_pool = SplitReplayWorkerPool(num_workers=2)
+        return self._replay_worker_pool
 
     @property
     def device(self) -> torch.device:
@@ -1451,18 +1459,10 @@ class InplaceSplitRunner:
                 with split_error_lock:
                     split_errors.append((slice_idx, e))
 
-        split_workers: list[threading.Thread] = []
-        for slice_idx in range(num_splits):
-            worker = threading.Thread(
-                target=_run_inplace_parallel_worker,
-                args=(slice_idx,),
-                name=f"inplace-parallel-replay-{slice_idx}",
-            )
-            split_workers.append(worker)
-            worker.start()
-
-        for worker in split_workers:
-            worker.join()
+        self._get_replay_worker_pool().dispatch([
+            (lambda i=slice_idx: _run_inplace_parallel_worker(i))
+            for slice_idx in range(num_splits)
+        ])
 
         if split_errors:
             split_errors.sort(key=lambda item: item[0])
@@ -1905,18 +1905,10 @@ class InplaceSplitRunner:
                 with split_error_lock:
                     split_errors.append((slice_idx, e))
 
-        split_workers: list[threading.Thread] = []
-        for slice_idx in range(num_splits):
-            worker = threading.Thread(
-                target=_run_dual_pad_worker,
-                args=(slice_idx,),
-                name=f"dual-pad-replay-{slice_idx}",
-            )
-            split_workers.append(worker)
-            worker.start()
-
-        for worker in split_workers:
-            worker.join()
+        self._get_replay_worker_pool().dispatch([
+            (lambda i=slice_idx: _run_dual_pad_worker(i))
+            for slice_idx in range(num_splits)
+        ])
 
         if split_errors:
             split_errors.sort(key=lambda item: item[0])
