@@ -26,6 +26,45 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.utils import enable_sp
 
 
+def rebind_attn_metadata_slot_mapping(attn_metadata: Any,
+                                      slot_mapping: torch.Tensor) -> Any:
+    """Point every per-layer metadata's slot_mapping at ``slot_mapping``.
+
+    Used when capturing the parallel-stream graph pool: the captured
+    ``npu_scatter_pa_kv_cache`` KV-write binds the slot_mapping address it
+    sees at capture time.  Without rebinding, parallel-pool graphs bind the
+    head of the runner's persistent slot_mapping buffer, which at runtime
+    holds split-0's slots, so split-1 would write its K/V into split-0's
+    cache slots.
+    """
+    import dataclasses
+
+    def _rebind_single(meta: Any) -> Any:
+        if meta is None or not dataclasses.is_dataclass(meta):
+            return meta
+        kwargs: dict = {}
+        if "slot_mapping" in getattr(meta, "__dataclass_fields__", {}):
+            kwargs["slot_mapping"] = slot_mapping
+        for sub_field in ("prefill", "decode", "decode_meta"):
+            sub = getattr(meta, sub_field, None)
+            if sub is not None and dataclasses.is_dataclass(sub):
+                if "slot_mapping" in getattr(sub, "__dataclass_fields__",
+                                             {}):
+                    kwargs[sub_field] = dataclasses.replace(
+                        sub, slot_mapping=slot_mapping)
+        return dataclasses.replace(meta, **kwargs) if kwargs else meta
+
+    if isinstance(attn_metadata, dict):
+        return {k: _rebind_single(v) for k, v in attn_metadata.items()}
+    if isinstance(attn_metadata, list):
+        return [
+            {k: _rebind_single(v) for k, v in d.items()}
+            if isinstance(d, dict) else _rebind_single(d)
+            for d in attn_metadata
+        ]
+    return _rebind_single(attn_metadata)
+
+
 def clone_attn_metadata_block_tables(attn_metadata: Any) -> Any:
     import dataclasses
 
@@ -316,7 +355,7 @@ def stabilize_inplace_common_attn_metadata_list(
     mrope_positions_gpu: Any = None,
     positions_gpu: Any = None,
 ) -> list[Any]:
-    if split_mode not in ("inplace_serial", "inplace_parallel") or inplace_split_plan is None:
+    if split_mode not in ("inplace_serial", "inplace_parallel", "dual_pad") or inplace_split_plan is None:
         return common_attn_metadata_list
     stabilized: list[Any] = []
     for split_idx, common_attn_metadata in enumerate(common_attn_metadata_list):

@@ -1043,6 +1043,14 @@ class SplitBatchConfig:
         self.force_split: bool = bool(
             split_batch_config.get("force_split", False)
         )
+
+        # DUAL_PAD (dual-pad) mode: minimum padding saved (without split vs
+        # with split) required to actually split the batch. Mirrors the
+        # reference implementation's `cudagraph_split_pad_threshold` (which is
+        # not present in vllm-hust's CompilationConfig), so it lives here.
+        self.cudagraph_split_pad_threshold: int = int(
+            split_batch_config.get("cudagraph_split_pad_threshold", 0)
+        )
         self.inplace_force_pa_for_offset: bool = bool(
             split_batch_config.get("inplace_force_pa_for_offset", False)
         )
@@ -1110,14 +1118,14 @@ class SplitBatchConfig:
         self._validate()
 
     def _validate(self):
-        valid_modes = ("parallel_buffer", "inplace_serial", "inplace_parallel")
+        valid_modes = ("parallel_buffer", "inplace_serial", "inplace_parallel", "dual_pad")
         if self.mode not in valid_modes:
             raise ValueError(
                 f"split_batch_config.mode must be one of {valid_modes}, got '{self.mode}'"
             )
-        if self.mode in ("inplace_serial", "inplace_parallel") and self.num_splits != 2:
+        if self.mode in ("inplace_serial", "inplace_parallel", "dual_pad") and self.num_splits != 2:
             raise ValueError(
-                f"split_batch_config.num_splits must be 2 for inplace modes, got {self.num_splits}"
+                f"split_batch_config.num_splits must be 2 for inplace/dual_pad modes, got {self.num_splits}"
             )
         valid_offset_policies = ("exact", "bucket")
         if self.inplace_offset_match_policy not in valid_offset_policies:

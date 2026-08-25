@@ -725,7 +725,7 @@ def create_parser() -> FlexibleArgumentParser:
         "--split-mode",
         type=str,
         default="parallel_buffer",
-        choices=["parallel_buffer", "inplace_serial", "inplace_parallel"],
+        choices=["parallel_buffer", "inplace_serial", "inplace_parallel", "dual_pad"],
         help="split_batch_config.mode for the enabled run.",
     )
     test_group.add_argument(
@@ -920,6 +920,16 @@ def create_parser() -> FlexibleArgumentParser:
             "Force split-batch for every decode step regardless of padding "
             "savings (split_batch_config.force_split). Useful for benchmarking "
             "the split path on all batch sizes including exact graph hits."
+        ),
+    )
+    test_group.add_argument(
+        "--cudagraph-split-pad-threshold",
+        type=int,
+        default=0,
+        help=(
+            "DUAL_PAD only: minimum padding saved (without split vs with "
+            "split) required to actually split "
+            "(split_batch_config.cudagraph_split_pad_threshold)."
         ),
     )
     test_group.add_argument(
@@ -1369,6 +1379,7 @@ def _build_split_additional_config(
     mixed_request_min_prefill_reqs_for_prefill_split: int = 2,
     macro_graph_config: dict[str, Any] | None = None,
     pa_shape_list: list[int] | None = None,
+    cudagraph_split_pad_threshold: int = 0,
 ) -> dict[str, Any]:
     cfg: dict[str, Any] = {
         "enabled": enabled,
@@ -1384,7 +1395,10 @@ def _build_split_additional_config(
         cfg["parallel_capture_sizes"] = parallel_capture_sizes
     if force_split:
         cfg["force_split"] = True
-    if split_mode.startswith("inplace"):
+    if split_mode == "dual_pad":
+        cfg["cudagraph_split_pad_threshold"] = int(
+            cudagraph_split_pad_threshold)
+    elif split_mode.startswith("inplace"):
         cfg["enable_inplace_lazy_capture"] = not macro_graph_enabled
         cfg["inplace_validate_metadata_ptrs"] = bool(validate_ptrs)
         cfg["inplace_force_pa_for_offset"] = bool(
@@ -1811,6 +1825,8 @@ def main() -> int:
         parallel_capture_sizes = sorted(
             set(parallel_capture_sizes) | set(inplace_offset_capture_sizes))
     force_split = bool(args.pop("force_split"))
+    cudagraph_split_pad_threshold = int(
+        args.pop("cudagraph_split_pad_threshold"))
     validate_ptrs = bool(args.pop("validate_ptrs"))
     inplace_force_pa_for_offset = bool(
         args.pop("inplace_force_pa_for_offset"))
@@ -1968,6 +1984,7 @@ def main() -> int:
             mixed_request_min_prefill_reqs_for_prefill_split),
         macro_graph_config=None,
         pa_shape_list=pa_shape_list,
+        cudagraph_split_pad_threshold=cudagraph_split_pad_threshold,
     )
     split_enabled_cfg = _build_split_additional_config(
         enabled=True,
@@ -2005,6 +2022,7 @@ def main() -> int:
             mixed_request_min_prefill_reqs_for_prefill_split),
         macro_graph_config=macro_graph_config,
         pa_shape_list=pa_shape_list,
+        cudagraph_split_pad_threshold=cudagraph_split_pad_threshold,
     )
 
     # Preferred: coordinator mode spawns 2 child processes then compares.

@@ -395,6 +395,19 @@ class InplaceSplitRunner:
         spec_decode_enabled: bool,
         cudagraph_capture_sizes: list[int],
     ) -> tuple[Any, str]:
+        if split_batch_config.mode == "dual_pad":
+            return self._should_split_dual_pad(
+                split_batch_config=split_batch_config,
+                cudagraph_mode=cudagraph_mode,
+                num_scheduled_tokens_np=num_scheduled_tokens_np,
+                num_reqs=num_reqs,
+                total_num_tokens=total_num_tokens,
+                has_lora=has_lora,
+                is_mla=is_mla,
+                is_mrope=is_mrope,
+                spec_decode_enabled=spec_decode_enabled,
+                cudagraph_capture_sizes=cudagraph_capture_sizes,
+            )
         from vllm_ascend.inplace_split_debug import (
             is_enabled as _debug_enabled,
         )
@@ -475,6 +488,75 @@ class InplaceSplitRunner:
 
         logger.info(
             "DUAL_INPLACE split decision: has_plan=%s, reason=%s, total_tokens=%d",
+            split_plan is not None, reason,
+            split_plan.total_num_tokens if split_plan else 0,
+        )
+
+        return split_plan, reason
+
+    def _should_split_dual_pad(
+        self,
+        *,
+        split_batch_config: Any,
+        cudagraph_mode: CUDAGraphMode,
+        num_scheduled_tokens_np: np.ndarray,
+        num_reqs: int,
+        total_num_tokens: int,
+        has_lora: bool,
+        is_mla: bool,
+        is_mrope: bool,
+        spec_decode_enabled: bool,
+        cudagraph_capture_sizes: list[int],
+    ) -> tuple[Any, str]:
+        """DUAL_PAD split decision: largest main graph hit + padded remainder.
+
+        Uses the reference implementation's decision logic (no offset graphs,
+        no lazy capture): split only when the padding saved exceeds
+        ``cudagraph_split_pad_threshold`` (unless ``force_split``).
+        """
+        from vllm_ascend.inplace_split_debug import (
+            is_enabled as _debug_enabled,
+            log_event,
+        )
+        from vllm_ascend.worker.dual_pad_utils import (
+            create_dual_pad_split_batch_slices,
+            dual_pad_precheck_reason,
+        )
+
+        precheck_reason = dual_pad_precheck_reason(
+            split_batch_config=split_batch_config,
+            cudagraph_mode=cudagraph_mode,
+            num_reqs=num_reqs,
+            has_lora=has_lora,
+            is_mla=is_mla,
+            is_mrope=is_mrope,
+            spec_decode_enabled=spec_decode_enabled,
+        )
+        if precheck_reason is not None:
+            if _debug_enabled():
+                log_event("inplace_split_precheck_failed",
+                          {"reason": precheck_reason})
+            return None, precheck_reason
+
+        split_plan, reason = create_dual_pad_split_batch_slices(
+            num_scheduled_tokens_per_request=num_scheduled_tokens_np,
+            total_num_tokens=total_num_tokens,
+            cudagraph_capture_sizes=cudagraph_capture_sizes,
+            parallel_capture_sizes=getattr(
+                split_batch_config, "parallel_capture_sizes", None),
+            cudagraph_split_pad_threshold=getattr(
+                split_batch_config, "cudagraph_split_pad_threshold", 0),
+            force_split=bool(getattr(split_batch_config, "force_split", False)),
+        )
+
+        if _debug_enabled():
+            log_event("inplace_split_planning_result", {
+                "reason": reason,
+                "has_plan": split_plan is not None,
+            })
+
+        logger.info(
+            "DUAL_PAD split decision: has_plan=%s, reason=%s, total_tokens=%d",
             split_plan is not None, reason,
             split_plan.total_num_tokens if split_plan else 0,
         )
@@ -1419,6 +1501,440 @@ class InplaceSplitRunner:
                     self._record_inplace_parallel_output_release_event()
         return result
 
+    def _extract_second_split_slot_mapping(
+        self,
+        split_batch_slices: Any,
+        attn_metadata: Any,
+    ) -> torch.Tensor | None:
+        """Return split-1's slot_mapping tensor from its attention metadata.
+
+        All layers share the common-metadata slot_mapping view, so any layer
+        object provides it.  Returns None when unavailable (the caller then
+        skips the parallel slot_mapping copy).
+        """
+        if len(split_batch_slices) < 2 or attn_metadata is None:
+            return None
+        if not (isinstance(attn_metadata, list) and len(attn_metadata) > 1):
+            return None
+        second_meta = attn_metadata[1]
+        if isinstance(second_meta, dict):
+            second_meta = next(iter(second_meta.values()), None)
+        for candidate in (second_meta,
+                          getattr(second_meta, "decode", None),
+                          getattr(second_meta, "decode_meta", None)):
+            slot_mapping = getattr(candidate, "slot_mapping", None)
+            if isinstance(slot_mapping, torch.Tensor):
+                return slot_mapping
+        return None
+
+    def _prepare_dual_pad_split_inputs(
+        self,
+        split_batch_slices: Any,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None,
+        second_slot_mapping: torch.Tensor | None = None,
+    ) -> None:
+        """Dual-pad input pre-write.
+
+        Copies the second split's input_ids / positions / inputs_embeds into
+        the dedicated parallel-stream buffers and zero-pads each split tail to
+        its own padded graph size (mirrors the reference implementation's
+        pre-write in model_runner_v3.py L1174-1220).
+
+        Also copies the second split's slot_mapping into the dedicated
+        parallel slot_mapping buffer that the parallel-pool graphs' KV-write
+        op (npu_scatter_pa_kv_cache) was captured against.  Without this copy
+        split-1 would scatter its K/V into split-0's cache slots, corrupting
+        split-0's KV cache.
+        """
+        if len(split_batch_slices) < 2:
+            return
+        runner = self._runner
+        second = split_batch_slices[1]
+        second_start = int(second.token_slice.start)
+        second_stop = int(second.token_slice.stop)
+        second_num_tokens = second_stop - second_start
+        second_padded = int(second.graph_num_tokens)
+
+        # The source buffers (input_ids / positions / slot_mapping) were
+        # produced on stream_main.  Order the parallel-stream copies after
+        # them so split-1 never reads a stale value (the reference pre-write
+        # runs on the default stream and so avoids this hazard entirely).
+        self.stream_parallel.wait_stream(self.stream_main)
+
+        with torch.npu.stream(self.stream_parallel):
+            parallel_slot_mapping = getattr(
+                runner, "slot_mapping_parallel_streams", None)
+            if (parallel_slot_mapping is not None
+                    and second_slot_mapping is not None):
+                parallel_slot_mapping[:second_num_tokens].copy_(
+                    second_slot_mapping[:second_num_tokens])
+                if second_padded > second_num_tokens:
+                    # PADDING_SLOT_ID (-1): the graph's KV-write op processes
+                    # the full padded size; padded lanes must not write KV.
+                    parallel_slot_mapping[
+                        second_num_tokens:second_padded].fill_(-1)
+
+            parallel_positions = getattr(
+                runner, "positions_parallel_streams", None)
+            if parallel_positions is not None and positions is not None:
+                if positions.ndim == 2:
+                    parallel_positions[:, :second_num_tokens].copy_(
+                        positions[:, second_start:second_stop])
+                    if second_padded > second_num_tokens:
+                        parallel_positions[:, second_num_tokens:second_padded].fill_(0)
+                else:
+                    parallel_positions[:second_num_tokens].copy_(
+                        positions[second_start:second_stop])
+                    if second_padded > second_num_tokens:
+                        parallel_positions[second_num_tokens:second_padded].fill_(0)
+
+            parallel_input_ids = getattr(
+                runner, "input_ids_parallel_streams", None)
+            if parallel_input_ids is not None and input_ids is not None:
+                parallel_input_ids[:second_num_tokens].copy_(
+                    input_ids[second_start:second_stop])
+                if second_padded > second_num_tokens:
+                    parallel_input_ids[second_num_tokens:second_padded].fill_(0)
+
+            parallel_inputs_embeds = getattr(
+                runner, "inputs_embeds_parallel_streams", None)
+            if (parallel_inputs_embeds is not None
+                    and inputs_embeds is not None):
+                parallel_inputs_embeds[:second_num_tokens].copy_(
+                    inputs_embeds[second_start:second_stop], non_blocking=True)
+                if second_padded > second_num_tokens:
+                    parallel_inputs_embeds[
+                        second_num_tokens:second_padded].fill_(0)
+
+        # Zero-pad the main-stream (split 0) tail in the original buffers.
+        first = split_batch_slices[0]
+        first_num_tokens = int(first.num_tokens)
+        first_padded = int(first.graph_num_tokens)
+        if first_padded > first_num_tokens and input_ids is not None:
+            input_ids[first_num_tokens:first_padded].fill_(0)
+            if positions is not None:
+                if positions.ndim == 2:
+                    positions[:, first_num_tokens:first_padded].fill_(0)
+                else:
+                    positions[first_num_tokens:first_padded].fill_(0)
+
+    def _make_split_batch_metadata_dual_pad(
+        self,
+        split_ubatch_slices: Any,
+        split_batch_slices: Any,
+        attn_metadata: Any,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None,
+        intermediate_tensors: Any,
+        batch_descriptor: BatchDescriptor,
+        aclgraph_runtime_mode: CUDAGraphMode,
+        inplace_attention_backend: str | None = None,
+    ):
+        """Build per-split forward contexts + sliced inputs for dual-pad.
+
+        Both splits dispatch through the standard (``start_num_tokens=0``)
+        dispatcher path so they reuse the graphs captured at startup (main
+        pool for split 0, parallel pool for split 1 via
+        ``in_parallel_streams``).  Split 1's execution inputs are rebound to
+        the dedicated parallel-stream buffers (values pre-copied by
+        ``_prepare_dual_pad_split_inputs``).
+        """
+        from vllm.forward_context import get_forward_context
+
+        from vllm_ascend.ascend_forward_context import create_ascend_forward_context
+
+        cur_forward_context = get_forward_context()
+        dp_metadata = getattr(cur_forward_context, 'dp_metadata', None)
+        runner = self._runner
+
+        # Contexts use local (per-buffer) token coordinates so cos/sin covers
+        # the full graph size, matching what graph capture bound.  The
+        # attention metadata, by contrast, was already split with the original
+        # (main-buffer) token coordinates by split_attn_metadata + stabilize.
+        from vllm.v1.worker.ubatch_utils import UBatchSlice
+        context_ubatch_slices = [
+            UBatchSlice(s.request_slice, slice(0, int(s.graph_num_tokens)))
+            for s in split_batch_slices
+        ]
+
+        ubatch_metadata = []
+        for i, split_slice in enumerate(split_batch_slices):
+            in_parallel_streams = i > 0
+            ubatch_attn_metadata = None
+            if attn_metadata is not None:
+                if isinstance(attn_metadata, list) and i < len(attn_metadata):
+                    ubatch_attn_metadata = attn_metadata[i]
+                else:
+                    ubatch_attn_metadata = attn_metadata
+
+            ubatch_cudagraph_mode, ubatch_batch_descriptor = (
+                self.cudagraph_dispatcher.dispatch(
+                    num_tokens=split_slice.graph_num_tokens,
+                    uniform_decode=True,
+                    has_lora=batch_descriptor.has_lora,
+                ))
+
+            ctx_stream = (self.stream_parallel if in_parallel_streams
+                          else self.stream_main)
+
+            if in_parallel_streams:
+                ctx_positions = getattr(
+                    runner, "positions_parallel_streams", None)
+            else:
+                ctx_positions = positions
+            if ctx_positions is None:
+                ctx_positions = positions
+            if ctx_positions is not None:
+                ctx_positions = ctx_positions[:split_slice.graph_num_tokens]
+
+            with torch.npu.stream(ctx_stream):
+                split_forward_context = create_ascend_forward_context(
+                    cur_forward_context,
+                    attn_metadata=ubatch_attn_metadata,
+                    vllm_config=self.vllm_config,
+                    dp_metadata=dp_metadata,
+                    ubatch_slices=context_ubatch_slices,
+                    batch_descriptor=ubatch_batch_descriptor,
+                    cudagraph_runtime_mode=ubatch_cudagraph_mode,
+                    ubatch_num=i,
+                    positions=ctx_positions,
+                    in_parallel_streams=in_parallel_streams,
+                    cos_sin_slot_id=i,
+                )
+            setattr(split_forward_context, "split_inplace_mode", "dual_pad")
+            setattr(split_forward_context, "forced_attention_backend",
+                    inplace_attention_backend)
+            setattr(split_forward_context, "allow_inplace_lazy_capture",
+                    False)
+            setattr(split_forward_context, "split_actual_num_tokens",
+                    int(split_slice.num_tokens))
+            setattr(split_forward_context, "split_graph_num_tokens",
+                    int(split_slice.graph_num_tokens))
+
+            sliced_input_ids, sliced_positions, sliced_inputs_embeds, \
+                sliced_intermediate_tensors = slice_split_batch_inputs(
+                    split_slice.token_slice, input_ids, positions,
+                    inputs_embeds, intermediate_tensors,
+                    vllm_config=self.vllm_config,
+                )
+
+            if in_parallel_streams:
+                num_tokens = int(split_slice.num_tokens)
+                padded_tokens = int(split_slice.graph_num_tokens)
+                if (sliced_input_ids is not None
+                        and getattr(runner, "input_ids_parallel_streams", None) is not None):
+                    sliced_input_ids = (
+                        runner.input_ids_parallel_streams[:padded_tokens])
+                if (sliced_positions is not None
+                        and getattr(runner, "positions_parallel_streams", None) is not None):
+                    sliced_positions = (
+                        runner.positions_parallel_streams[:padded_tokens])
+                if (sliced_inputs_embeds is not None
+                        and getattr(runner, "inputs_embeds_parallel_streams", None) is not None):
+                    sliced_inputs_embeds = (
+                        runner.inputs_embeds_parallel_streams[:padded_tokens])
+
+            ubatch_metadata.append(
+                AscendUbatchMetadata(
+                    context=split_forward_context,
+                    input_ids=sliced_input_ids,
+                    positions=sliced_positions,
+                    inputs_embeds=sliced_inputs_embeds,
+                    intermediate_tensors=sliced_intermediate_tensors,
+                    num_tokens=split_slice.graph_num_tokens,
+                )
+            )
+        return ubatch_metadata
+
+    def run_dual_pad(
+        self,
+        split_plan: Any,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Any,
+        inputs_embeds: torch.Tensor | None,
+        attn_metadata: Any,
+        cudagraph_mode: CUDAGraphMode,
+        batch_descriptor: BatchDescriptor,
+        **model_kwargs,
+    ) -> torch.Tensor:
+        """Execute a dual-pad split (two independent padded buffers).
+
+        Reuses the dual-inplace parallel skeleton (two worker threads on
+        stream_main / stream_parallel, per-split attn param updates, event
+        based merge) but with dual-pad input semantics: split 1 reads from the
+        dedicated parallel-stream buffers and both splits dispatch through the
+        standard (non-offset) graph path.
+        """
+        split_cfg = getattr(self.ascend_config, "split_batch_config", None)
+        split_slices = split_plan.split_slices
+        original_forward_context = get_forward_context()
+        num_splits = len(split_slices)
+
+        from vllm_ascend.worker.inplace_split_utils import (
+            select_inplace_attention_backend,
+        )
+        inplace_attention_backend = select_inplace_attention_backend(
+            split_plan,
+            lambda shape: using_paged_attention(shape, self.vllm_config))
+
+        if self.stream_main is None:
+            self._runner.stream_main = torch.npu.current_stream()
+        if self.stream_parallel is None:
+            self._runner.stream_parallel = torch.npu.Stream(device=self.device)
+
+        self._apply_inplace_parallel_replay_stream_limits()
+
+        second_slot_mapping = self._extract_second_split_slot_mapping(
+            split_slices, attn_metadata)
+        self._prepare_dual_pad_split_inputs(
+            split_slices, input_ids, positions, inputs_embeds,
+            second_slot_mapping=second_slot_mapping)
+
+        from vllm.v1.worker.ubatch_utils import UBatchSlice
+        split_ubatch_slices = [
+            UBatchSlice(s.request_slice, s.token_slice)
+            for s in split_slices
+        ]
+
+        ubatch_metadata = self._make_split_batch_metadata_dual_pad(
+            split_ubatch_slices=split_ubatch_slices,
+            split_batch_slices=split_slices,
+            attn_metadata=attn_metadata,
+            input_ids=input_ids,
+            positions=positions,
+            inputs_embeds=inputs_embeds,
+            intermediate_tensors=intermediate_tensors,
+            batch_descriptor=batch_descriptor,
+            aclgraph_runtime_mode=cudagraph_mode,
+            inplace_attention_backend=inplace_attention_backend,
+        )
+
+        clone_split_outputs = _inplace_parallel_clone_split_outputs(
+            allow_auto_direct_outputs=True,
+            split_cfg=split_cfg,
+            split_batch_slices=split_slices,
+            aclgraph_runtime_mode=cudagraph_mode,
+            merge_sync_policy=_INPLACE_PARALLEL_MERGE_SYNC_POLICY,
+        )
+
+        results: list[Any | None] = [None] * num_splits
+        split_done_events: list[torch.npu.Event | None] = [None] * num_splits
+        split_errors: list[tuple[int, Exception]] = []
+        split_error_lock = threading.Lock()
+
+        self._wait_inplace_parallel_output_release_events(
+            (self.stream_main, self.stream_parallel))
+
+        def _finish_dual_pad_split_result(
+                slice_idx: int,
+                split_result: Any,
+                *,
+                parallel_streams: bool,
+                target_stream: torch.npu.Stream) -> None:
+            split_slice = split_slices[slice_idx]
+            with torch.npu.stream(target_stream):
+                trimmed_result = trim_split_output(
+                    split_result, split_slice.num_tokens)
+                if clone_split_outputs:
+                    trimmed_result = clone_split_output(trimmed_result)
+                results[slice_idx] = trimmed_result
+                if parallel_streams:
+                    split_done_events[slice_idx] = (
+                        self._record_replay_stream_event(target_stream))
+
+        def _run_dual_pad_worker(slice_idx: int) -> None:
+            try:
+                split_slice = split_slices[slice_idx]
+                metadata = ubatch_metadata[slice_idx]
+                parallel_streams = slice_idx > 0
+                target_stream = (self.stream_parallel if parallel_streams
+                                 else self.stream_main)
+
+                with torch.inference_mode():
+                    with torch.npu.stream(target_stream):
+                        with override_forward_context(metadata.context):
+                            split_result = self.model(
+                                input_ids=metadata.input_ids,
+                                positions=metadata.positions,
+                                inputs_embeds=metadata.inputs_embeds,
+                                intermediate_tensors=metadata.intermediate_tensors,
+                                **model_kwargs,
+                            )
+                            if (metadata.context.cudagraph_runtime_mode
+                                    == CUDAGraphMode.FULL):
+                                if parallel_streams:
+                                    self._update_attn_params_for_split_ubatch(
+                                        metadata.context,
+                                        split_slice.graph_num_tokens,
+                                        parallel_streams=True)
+                                else:
+                                    self._update_attn_params_for_wrapper(
+                                        metadata.context,
+                                        split_slice.graph_num_tokens)
+
+                _finish_dual_pad_split_result(
+                    slice_idx,
+                    split_result,
+                    parallel_streams=parallel_streams,
+                    target_stream=target_stream)
+            except Exception as e:
+                with split_error_lock:
+                    split_errors.append((slice_idx, e))
+
+        split_workers: list[threading.Thread] = []
+        for slice_idx in range(num_splits):
+            worker = threading.Thread(
+                target=_run_dual_pad_worker,
+                args=(slice_idx,),
+                name=f"dual-pad-replay-{slice_idx}",
+            )
+            split_workers.append(worker)
+            worker.start()
+
+        for worker in split_workers:
+            worker.join()
+
+        if split_errors:
+            split_errors.sort(key=lambda item: item[0])
+            failed_slice_idx, first_error = split_errors[0]
+            raise RuntimeError(
+                "dual pad replay worker failed at "
+                f"slice_idx={failed_slice_idx}: {first_error}") from first_error
+
+        merged_results: list[Any] = [
+            result for result in results if result is not None
+        ]
+        if len(merged_results) != num_splits:
+            raise RuntimeError(
+                "Missing dual pad split result: "
+                f"expected={num_splits}, got={len(merged_results)}")
+
+        if _INPLACE_PARALLEL_MERGE_SYNC_POLICY == "host_sync":
+            self.stream_main.synchronize()
+            if num_splits > 1:
+                self.stream_parallel.synchronize()
+            with override_forward_context(original_forward_context):
+                result = merge_split_outputs(merged_results)
+                if not clone_split_outputs:
+                    self._record_inplace_parallel_output_release_event()
+            return result
+
+        with torch.npu.stream(self.stream_main):
+            self._wait_replay_stream_events(self.stream_main,
+                                            split_done_events)
+            for merged_result in merged_results:
+                _record_stream_tree_for_npugraph_ex(merged_result,
+                                                    self.stream_main)
+            with override_forward_context(original_forward_context):
+                result = merge_split_outputs(merged_results)
+                if not clone_split_outputs:
+                    self._record_inplace_parallel_output_release_event()
+        return result
+
     def capture_parallel_stream_graphs(self) -> None:
         from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 
@@ -1428,7 +1944,10 @@ class InplaceSplitRunner:
         if not hasattr(runner, 'cudagraph_batch_sizes_parallel') or runner.cudagraph_batch_sizes_parallel is None:
             return
         for batch_size in runner.cudagraph_batch_sizes_parallel:
+            # Capture uniform-decode graphs so the BatchDescriptor (uniform
+            # flag included) matches the runtime dispatch used by dual-pad.
             runner._dummy_run(
                 batch_size,
                 in_parallel_streams=True,
+                uniform_decode=True,
             )

@@ -116,6 +116,7 @@ from vllm_ascend.worker.inplace_split_ops import (
     context_ubatch_slices_for_inplace,
     dual_stream_attention_config,
     merge_split_outputs,
+    rebind_attn_metadata_slot_mapping,
     stabilize_inplace_common_attn_metadata_list,
     trim_split_output,
 )
@@ -2448,6 +2449,13 @@ class NPUModelRunner(GPUModelRunner):
                         inplace_attention_backend=attn_backend,
                         **model_kwargs,
                     )
+                elif split_mode == "dual_pad":
+                    hidden_states = self._inplace_split_runner.run_dual_pad(
+                        inplace_split_plan, input_ids, positions,
+                        intermediate_tensors, inputs_embeds, attn_metadata,
+                        cudagraph_mode, batch_desc,
+                        **model_kwargs,
+                    )
                 else:
                     hidden_states = self._model_forward(
                         num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
@@ -3755,7 +3763,12 @@ class NPUModelRunner(GPUModelRunner):
                 positions = self.positions[:num_tokens_padded]
 
             # update global cos, sin
-            update_cos_sin(positions)
+            # Parallel-stream graphs bind the slot-1 cos/sin buffers (the
+            # runtime dual-pad split-1 forward context uses cos_sin_slot_id=1),
+            # so the capture-time update must target slot 1 as well.
+            update_cos_sin(
+                positions,
+                slot_id=(1 if in_parallel_streams else 0))
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
@@ -3793,9 +3806,24 @@ class NPUModelRunner(GPUModelRunner):
                 if hasattr(self.drafter, "model") and hasattr(self.drafter.model, "compute_logits"):
                     return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
+            capture_attn_metadata = attn_metadata
+            if in_parallel_streams:
+                capture_attn_metadata = clone_attn_metadata_block_tables(
+                    capture_attn_metadata)
+                # Bind the parallel-pool graphs to the dedicated slot_mapping
+                # buffer: at runtime _prepare_dual_pad_split_inputs copies
+                # split-1's slots into it, so the captured KV-write op
+                # scatters split-1 K/V into split-1's own cache slots
+                # instead of split-0's.
+                parallel_slot_mapping = getattr(
+                    self, "slot_mapping_parallel_streams", None)
+                if parallel_slot_mapping is not None:
+                    capture_attn_metadata = (
+                        rebind_attn_metadata_slot_mapping(
+                            capture_attn_metadata,
+                            parallel_slot_mapping.gpu[:num_tokens_padded]))
             with set_ascend_forward_context(
-                clone_attn_metadata_block_tables(attn_metadata)
-                if in_parallel_streams else attn_metadata,
+                capture_attn_metadata,
                 self.vllm_config,
                 num_tokens=num_tokens_padded,
                 num_tokens_across_dp=num_tokens_across_dp,
@@ -3808,6 +3836,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
                 in_parallel_streams=in_parallel_streams,
+                cos_sin_slot_id=(1 if in_parallel_streams else 0),
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
@@ -4005,6 +4034,15 @@ class NPUModelRunner(GPUModelRunner):
                     dtype=self.dtype, numpy=False)
                 self.positions_parallel_streams = self._make_buffer(
                     self.max_num_tokens, dtype=torch.int64)
+                # Dedicated slot_mapping for the parallel-stream graph pool.
+                # The captured KV-write op (npu_scatter_pa_kv_cache) binds the
+                # slot_mapping address seen at capture time; without this
+                # buffer the parallel graphs would bind the head of the
+                # persistent slot_mapping buffer, which at runtime holds
+                # split-0's slots, so split-1 would overwrite split-0's KV.
+                self.slot_mapping_parallel_streams = self._make_buffer(
+                    self.max_num_tokens, dtype=torch.int32)
+                self.slot_mapping_parallel_streams.gpu.fill_(-1)
                 self._inplace_split_runner = InplaceSplitRunner(self)
                 logger.info(
                     "DUAL_INPLACE mode enabled: mode=%s, parallel_streams=%s",

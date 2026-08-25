@@ -39,18 +39,21 @@ MODEL_DEFAULT = "/data/shared-models/Qwen2.5-0.5B-Instruct"
 PROMPTS = ["你好，请介绍一下你自己。", "What is the capital of France?"]
 
 
-def build_additional_config(split_enabled: bool, force_split: bool = False) -> dict:
+def build_additional_config(split_enabled: bool, force_split: bool = False,
+                            split_mode: str = "inplace_parallel") -> dict:
     cfg = {
         "split_batch_config": {
             "enabled": split_enabled,
-            "mode": "inplace_parallel",
+            "mode": split_mode,
             "num_splits": 2,
             "enable_parallel_streams": True,
             "min_batch_size_for_split": 4,
-            "enable_inplace_lazy_capture": True,
-            "inplace_parallel_replay_policy": "full_graph_parallel",
         }
     }
+    if split_mode == "inplace_parallel":
+        cfg["split_batch_config"]["enable_inplace_lazy_capture"] = True
+        cfg["split_batch_config"][
+            "inplace_parallel_replay_policy"] = "full_graph_parallel"
     if force_split:
         cfg["split_batch_config"]["force_split"] = True
     return cfg
@@ -67,7 +70,8 @@ def build_compilation_config(cudagraph: bool) -> dict | None:
 
 def run_offline(model: str, prompts: list[str],
                 split_enabled: bool, cudagraph: bool,
-                force_split: bool = False) -> None:
+                force_split: bool = False,
+                split_mode: str = "inplace_parallel") -> None:
     from vllm import LLM, SamplingParams
 
     kwargs = dict(
@@ -75,7 +79,8 @@ def run_offline(model: str, prompts: list[str],
         max_model_len=1024,
         gpu_memory_utilization=0.8,
         enforce_eager=not cudagraph,
-        additional_config=build_additional_config(split_enabled, force_split),
+        additional_config=build_additional_config(
+            split_enabled, force_split, split_mode),
     )
     if cudagraph:
         kwargs["compilation_config"] = build_compilation_config(cudagraph)
@@ -98,7 +103,8 @@ def run_offline(model: str, prompts: list[str],
 
 
 def run_serve(model: str, split_enabled: bool, cudagraph: bool,
-              force_split: bool = False) -> None:
+              force_split: bool = False,
+              split_mode: str = "inplace_parallel") -> None:
     import openai
     from vllm.utils.network_utils import get_open_port
 
@@ -111,7 +117,8 @@ def run_serve(model: str, split_enabled: bool, cudagraph: bool,
         "--gpu_memory_utilization", "0.8",
         "--port", str(port),
         "--additional-config",
-        json.dumps(build_additional_config(split_enabled, force_split)),
+        json.dumps(build_additional_config(
+            split_enabled, force_split, split_mode)),
     ]
     if compilation_config is not None:
         server_args += ["--compilation-config", json.dumps(compilation_config)]
@@ -149,6 +156,11 @@ def main() -> int:
                         help="run without split_batch_config (baseline)")
     parser.add_argument("--force-split", action="store_true",
                         help="force split even on exact graph size hit")
+    parser.add_argument("--split-mode", choices=("inplace_parallel", "dual_pad"),
+                        default="inplace_parallel",
+                        help="dual-stream execution mode (default: "
+                             "inplace_parallel; dual_pad requires --batch-size "
+                             ">= 5 to actually split with default capture sizes)")
     parser.add_argument("--eager", action="store_true",
                         help="skip cudagraph (enforce eager)")
     args = parser.parse_args()
@@ -161,13 +173,15 @@ def main() -> int:
     if args.mode in ("offline", "both"):
         try:
             run_offline(args.model, prompts, split_enabled, cudagraph,
-                        force_split=args.force_split)
+                        force_split=args.force_split,
+                        split_mode=args.split_mode)
         except Exception as exc:  # noqa: BLE001 - report and continue
             failures.append(("offline", exc))
     if args.mode in ("serve", "both"):
         try:
             run_serve(args.model, split_enabled, cudagraph,
-                      force_split=args.force_split)
+                      force_split=args.force_split,
+                      split_mode=args.split_mode)
         except Exception as exc:  # noqa: BLE001 - report and continue
             failures.append(("serve", exc))
 
