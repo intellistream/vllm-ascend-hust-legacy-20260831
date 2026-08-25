@@ -62,6 +62,7 @@ from vllm_ascend.compilation.acl_graph import (
     get_draft_graph_prefill_params,
     get_graph_params,
     update_draft_graph_params_workspaces,
+    update_graph_params_parallel_workspaces,
     update_graph_params_workspaces,
 )
 from vllm_ascend.compilation.acl_graph_split_batch import ensure_graph_param_key
@@ -956,7 +957,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if _EXTRA_CTX.is_draft_model:
                 update_draft_graph_params_workspaces(param_key, workspace)
             else:
-                update_graph_params_workspaces(param_key, workspace)
+                if in_parallel_streams:
+                    update_graph_params_parallel_workspaces(param_key, workspace)
+                else:
+                    update_graph_params_workspaces(param_key, workspace)
 
         # Handle graph capturing mode
         stream = torch_npu.npu.current_stream()
@@ -1099,7 +1103,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if _EXTRA_CTX.is_draft_model:
                 update_draft_graph_params_workspaces(num_tokens, workspace)
             else:
-                update_graph_params_workspaces(num_tokens, workspace)
+                if in_parallel_streams:
+                    update_graph_params_parallel_workspaces(num_tokens, workspace)
+                else:
+                    update_graph_params_workspaces(num_tokens, workspace)
 
         # Handle graph capturing mode
         stream = torch_npu.npu.current_stream()
@@ -1177,7 +1184,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     context_lens=attn_metadata.seq_lens,
                     out=output,
                 )
-                update_graph_params_workspaces(num_tokens, workspace)
+                if in_parallel_streams:
+                    update_graph_params_parallel_workspaces(num_tokens, workspace)
+                else:
+                    update_graph_params_workspaces(num_tokens, workspace)
 
             # Handle graph capturing mode
             stream = torch_npu.npu.current_stream()
