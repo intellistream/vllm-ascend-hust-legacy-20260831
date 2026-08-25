@@ -1049,7 +1049,10 @@ def create_parser() -> FlexibleArgumentParser:
         default="./split_batch_correctness_results",
         help=(
             "Base output directory. This script will always create a timestamp subdir "
-            "and write all results there (including console.log)."
+            "and write all results there (including console.log). If the timestamp "
+            "name is already taken (e.g. concurrent runs started within the same "
+            "second), a numeric suffix (_1, _2, ...) is appended so runs never "
+            "share a dir."
         ),
     )
     test_group.add_argument(
@@ -1167,6 +1170,29 @@ def _save_json(path: str, obj: Any) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2, default=str)
+
+
+def _make_unique_run_dir(output_dir_base: str) -> tuple[str, str]:
+    """Create and return a unique (out_dir, timestamp) run dir under base.
+
+    The dir name starts as a second-resolution timestamp. If that name is
+    already taken (e.g. concurrent runs started within the same second), a
+    numeric suffix (_1, _2, ...) is appended. Directories are created with
+    exist_ok=False so two runs can never share one dir and overwrite each
+    other's prompts.json / outputs / console.log.
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for suffix in range(0, 1000):
+        name = timestamp if suffix == 0 else f"{timestamp}_{suffix}"
+        out_dir = os.path.join(str(output_dir_base), name)
+        try:
+            os.makedirs(out_dir)
+            return out_dir, timestamp
+        except FileExistsError:
+            continue
+    raise RuntimeError(
+        f"could not allocate a unique run dir under {output_dir_base!r} "
+        f"for timestamp {timestamp}")
 
 
 def _serialize_outputs(prompts: list[str], outputs) -> list[dict[str, Any]]:
@@ -1479,9 +1505,7 @@ def _run_single(
 
 
 def _coordinator_subprocess(*, base_args: dict[str, Any], prompts: list[str], **ctx) -> int:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = os.path.join(str(ctx["output_dir_base"]), timestamp)
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir, timestamp = _make_unique_run_dir(str(ctx["output_dir_base"]))
 
     prompts_path = os.path.join(out_dir, "prompts.json")
     _save_json(prompts_path, prompts)
@@ -1733,14 +1757,12 @@ def _coordinator_subprocess(*, base_args: dict[str, Any], prompts: list[str], **
 
 def _make_run_dir(*, output_dir_base: str, output_file: str | None) -> tuple[str, str]:
     """Return (out_dir, timestamp). If output_file is set, derive out_dir from it."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if output_file:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_dir = os.path.dirname(str(output_file)) or "."
         os.makedirs(out_dir, exist_ok=True)
         return out_dir, timestamp
-    out_dir = os.path.join(str(output_dir_base), timestamp)
-    os.makedirs(out_dir, exist_ok=True)
-    return out_dir, timestamp
+    return _make_unique_run_dir(str(output_dir_base))
 
 
 def main() -> int:
