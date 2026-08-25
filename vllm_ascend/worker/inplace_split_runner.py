@@ -1670,12 +1670,32 @@ class InplaceSplitRunner:
                 else:
                     ubatch_attn_metadata = attn_metadata
 
-            ubatch_cudagraph_mode, ubatch_batch_descriptor = (
-                self.cudagraph_dispatcher.dispatch(
-                    num_tokens=split_slice.graph_num_tokens,
-                    uniform_decode=True,
-                    has_lora=batch_descriptor.has_lora,
-                ))
+            if in_parallel_streams:
+                # Parallel-pool graphs are keyed by the exact padded parallel
+                # size; the main dispatcher would re-pad the size to the
+                # nearest main capture size and miss the captured graph.
+                from vllm_ascend.worker.dual_pad_utils import (
+                    make_dual_pad_parallel_batch_descriptor)
+                ubatch_cudagraph_mode = CUDAGraphMode.FULL
+                ubatch_batch_descriptor = (
+                    make_dual_pad_parallel_batch_descriptor(
+                        split_slice.graph_num_tokens,
+                        has_lora=batch_descriptor.has_lora,
+                        num_active_loras=getattr(
+                            batch_descriptor, "num_active_loras", 0),
+                        uniform_decode_query_len=(
+                            self.cudagraph_dispatcher
+                            .uniform_decode_query_len),
+                        max_num_seqs=(
+                            self.vllm_config.scheduler_config.max_num_seqs),
+                    ))
+            else:
+                ubatch_cudagraph_mode, ubatch_batch_descriptor = (
+                    self.cudagraph_dispatcher.dispatch(
+                        num_tokens=split_slice.graph_num_tokens,
+                        uniform_decode=True,
+                        has_lora=batch_descriptor.has_lora,
+                    ))
 
             ctx_stream = (self.stream_parallel if in_parallel_streams
                           else self.stream_main)

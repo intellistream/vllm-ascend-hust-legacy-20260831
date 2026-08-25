@@ -3622,6 +3622,23 @@ class NPUModelRunner(GPUModelRunner):
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
         )
+        if in_parallel_streams:
+            # DUAL_PAD parallel-pool capture: graphs must be keyed by the
+            # exact parallel size.  The main-pool dispatcher above would pad
+            # the size to the nearest main capture size, which mis-keys the
+            # graph (runtime lookup misses) and breaks dummy metadata
+            # construction (num_reqs vs num_reqs_padded mismatch).
+            assert uniform_decode, (
+                "parallel stream graph capture requires uniform decode")
+            from vllm_ascend.worker.dual_pad_utils import (
+                make_dual_pad_parallel_batch_descriptor)
+            batch_desc = make_dual_pad_parallel_batch_descriptor(
+                num_tokens_unpadded,
+                has_lora=num_active_loras > 0,
+                num_active_loras=num_active_loras,
+                uniform_decode_query_len=self.uniform_decode_query_len,
+                max_num_seqs=max_num_reqs,
+            )
         if self.use_cp:
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,

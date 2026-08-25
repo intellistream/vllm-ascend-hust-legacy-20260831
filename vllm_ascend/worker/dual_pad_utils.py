@@ -39,12 +39,53 @@ from typing import Any, Optional
 import numpy as np
 
 from vllm.config import CUDAGraphMode
+from vllm.forward_context import BatchDescriptor
 
 from vllm_ascend.worker.inplace_split_utils import (
     INPLACE_SPLIT_DRY_RUN,
     InplaceSplitPlan,
     SplitBatchSlice,
 )
+
+
+def make_dual_pad_parallel_batch_descriptor(
+    num_tokens: int,
+    *,
+    has_lora: bool = False,
+    num_active_loras: int = 0,
+    uniform_decode_query_len: int = 1,
+    max_num_seqs: int | None = None,
+) -> BatchDescriptor:
+    """Exact-size BatchDescriptor for dual-pad parallel-pool graphs.
+
+    Parallel-pool graphs are keyed by the padded parallel size itself.  They
+    must not go through the main-pool cudagraph padding: the main dispatcher
+    would round the size up to the nearest main capture size, which mis-keys
+    the captured graph (runtime lookup misses) and breaks dummy metadata
+    construction at capture time (num_reqs vs padded num_reqs mismatch).
+    Mirrors CudagraphDispatcher._create_padded_batch_descriptor's uniform
+    FULL-decode num_reqs formula, minus the padding lookup.
+    """
+    if num_tokens <= 0:
+        raise ValueError(
+            "num_tokens must be positive for dual-pad parallel-pool graphs")
+    if uniform_decode_query_len <= 0:
+        raise ValueError("uniform_decode_query_len must be positive")
+    if num_tokens % uniform_decode_query_len != 0:
+        raise ValueError(
+            "num_tokens must be divisible by uniform_decode_query_len for "
+            "dual-pad parallel-pool graphs")
+    num_reqs = num_tokens // uniform_decode_query_len
+    if max_num_seqs is not None:
+        num_reqs = min(num_reqs, max_num_seqs)
+    return BatchDescriptor(
+        num_tokens=num_tokens,
+        num_reqs=num_reqs,
+        uniform=True,
+        has_lora=has_lora,
+        num_active_loras=num_active_loras,
+        start_num_tokens=0,
+    )
 
 # --- dual-pad no-split reasons ----------------------------------------------
 NO_SPLIT_DP_MODE_DISABLED = "no_split_dual_pad_mode_disabled"
