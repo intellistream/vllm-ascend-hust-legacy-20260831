@@ -23,6 +23,7 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 from ..utils import weak_ref_tensors
+from .trace import emit_aclgraph_dispatch
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 _STREAM_RESOURCE_ERROR_CODE = "207008"
@@ -147,6 +148,14 @@ class ACLGraphWrapper:
             # matches. This enables properly dispatching to the correct
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
+            emit_aclgraph_dispatch(
+                action="bypass",
+                batch_descriptor=batch_descriptor,
+                runtime_mode=aclgraph_runtime_mode,
+                wrapper_mode=self.runtime_mode,
+                is_draft_model=_EXTRA_CTX.is_draft_model,
+                use_eagle=self.use_eagle,
+            )
             return self.runnable(*args, **kwargs)
 
         if batch_descriptor not in self.concrete_aclgraph_entries:
@@ -156,6 +165,14 @@ class ACLGraphWrapper:
         entry = self.concrete_aclgraph_entries[batch_descriptor]
 
         if entry.aclgraph is None:
+            emit_aclgraph_dispatch(
+                action="capture",
+                batch_descriptor=batch_descriptor,
+                runtime_mode=aclgraph_runtime_mode,
+                wrapper_mode=self.runtime_mode,
+                is_draft_model=_EXTRA_CTX.is_draft_model,
+                use_eagle=self.use_eagle,
+            )
             if self.aclgraph_options.debug_log_enable:
                 # Since we capture aclgraph for many different shapes and
                 # capturing is fast, we don't need to log it for every
@@ -241,6 +258,14 @@ class ACLGraphWrapper:
             )
 
         logger.info_once("Replaying aclgraph")
+        emit_aclgraph_dispatch(
+            action="replay",
+            batch_descriptor=batch_descriptor,
+            runtime_mode=aclgraph_runtime_mode,
+            wrapper_mode=self.runtime_mode,
+            is_draft_model=_EXTRA_CTX.is_draft_model,
+            use_eagle=self.use_eagle,
+        )
         # In async scheduling or multi-threaded (MT) scenarios, it is possible that
         # the CPU's record event (from update_attn_params) for the iteration i completes
         # before the grph replay of iteration i-1.

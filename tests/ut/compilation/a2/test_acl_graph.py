@@ -298,8 +298,10 @@ class TestACLGraphWrapper(TestBase):
     @patch("vllm_ascend.compilation.acl_graph.envs")
     @patch("vllm_ascend.compilation.acl_graph.compilation_counter")
     @patch("vllm_ascend.compilation.acl_graph.weak_ref_tensors")
+    @patch("vllm_ascend.compilation.acl_graph.emit_aclgraph_dispatch")
     def test_call_replay_graph(
         self,
+        mock_emit_aclgraph_dispatch,
         mock_weak_ref_tensors,
         mock_compilation_counter,
         mock_envs,
@@ -367,6 +369,10 @@ class TestACLGraphWrapper(TestBase):
 
         # Verify graph replay happened
         mock_npu_graph.replay.assert_called_once()
+        assert [
+            call.kwargs["action"]
+            for call in mock_emit_aclgraph_dispatch.call_args_list
+        ] == ["capture", "replay"]
 
         # Both calls should return the weak ref output
         self.assertEqual(first_result, "test_output")  # Original output
