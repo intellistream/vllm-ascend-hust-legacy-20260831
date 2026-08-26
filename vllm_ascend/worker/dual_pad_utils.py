@@ -84,7 +84,6 @@ def make_dual_pad_parallel_batch_descriptor(
         uniform=True,
         has_lora=has_lora,
         num_active_loras=num_active_loras,
-        start_num_tokens=0,
     )
 
 # --- dual-pad no-split reasons ----------------------------------------------

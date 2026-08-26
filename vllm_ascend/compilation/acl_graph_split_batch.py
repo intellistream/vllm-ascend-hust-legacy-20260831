@@ -27,7 +27,8 @@ def is_allowed_inplace_lazy_capture(
     batch_descriptor: BatchDescriptor,
     aclgraph_runtime_mode: CUDAGraphMode,
 ) -> bool:
-    start = int(getattr(batch_descriptor, "start_num_tokens", 0) or 0)
+    rm = getattr(batch_descriptor, "runtime_metadata", None)
+    start = int(rm.token_offset) if rm is not None else 0
     if start <= 0:
         return False
     if aclgraph_runtime_mode not in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
@@ -39,12 +40,9 @@ def is_allowed_inplace_lazy_capture(
         "inplace_parallel",
     ):
         return False
-    if getattr(batch_descriptor, "graph_variant", "") not in (
-        "inplace_serial",
-        "inplace_parallel",
-    ):
+    if rm is None or rm.variant not in ("inplace_serial", "inplace_parallel"):
         return False
-    if getattr(batch_descriptor, "attention_backend", "") not in ("fia", "pa"):
+    if rm.backend_tag not in ("fia", "pa"):
         return False
     return True
 
@@ -104,8 +102,9 @@ def refresh_block_table_in_place(
 
 def should_template_fia_seq_lens(forward_context: Any) -> bool:
     batch_descriptor = getattr(forward_context, "batch_descriptor", None)
-    if not (getattr(batch_descriptor, "capture_metadata_mode", "") == "template"
-            and getattr(batch_descriptor, "attention_backend", "") == "fia"):
+    rm = getattr(batch_descriptor, "runtime_metadata", None)
+    if not (rm is not None and rm.metadata_mode == "template"
+            and rm.backend_tag == "fia"):
         return False
     # Zero-padding split: the last seq_lens entry belongs to a real request,
     # not a padding dummy. Templating would pin that request's KV length to
@@ -181,14 +180,8 @@ def get_graph_param_key(
     if not isinstance(desc, BatchDescriptor):
         return runtime_shape
 
-    start = desc.start_num_tokens
-    has_descriptor_variant = (
-        start > 0
-        or bool(desc.graph_variant)
-        or bool(desc.attention_backend)
-        or bool(desc.capture_metadata_mode)
-    )
-    if has_descriptor_variant:
+    rm = desc.runtime_metadata
+    if rm is not None:
         return desc
     return runtime_shape
 

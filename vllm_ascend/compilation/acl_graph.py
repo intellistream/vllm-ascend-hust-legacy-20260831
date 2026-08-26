@@ -250,7 +250,8 @@ class ACLGraphWrapper:
         entry = entries[batch_descriptor]
 
         if entry.aclgraph is None:
-            start_num_tokens = batch_descriptor.start_num_tokens
+            rm = getattr(batch_descriptor, "runtime_metadata", None)
+            start_num_tokens = int(rm.token_offset) if rm is not None else 0
             is_inplace_lazy_capture = is_allowed_inplace_lazy_capture(
                 forward_context, batch_descriptor, aclgraph_runtime_mode
             )

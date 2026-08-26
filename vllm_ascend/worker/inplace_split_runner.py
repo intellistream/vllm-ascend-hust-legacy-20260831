@@ -22,7 +22,12 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 from vllm.config import CUDAGraphMode
-from vllm.forward_context import BatchDescriptor, get_forward_context, override_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    CUDAGraphRuntimeMetadata,
+    get_forward_context,
+    override_forward_context,
+)
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
@@ -683,7 +688,8 @@ class InplaceSplitRunner:
         if batch_descriptor is None:
             return False
         cg_mode = getattr(context, "cudagraph_runtime_mode", CUDAGraphMode.NONE)
-        start_nt = int(getattr(batch_descriptor, "start_num_tokens", 0) or 0)
+        _rm = getattr(batch_descriptor, "runtime_metadata", None)
+        start_nt = int(_rm.token_offset) if _rm is not None else 0
         allow_lazy = bool(getattr(context, "allow_inplace_lazy_capture", False))
         has_graph = self._has_aclgraph_for_context(context)
         result = (cg_mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE)
@@ -1100,25 +1106,31 @@ class InplaceSplitRunner:
                 else:
                     ubatch_attn_metadata = attn_metadata
 
+            ubatch_runtime_metadata = None
+            if split_slice.start_num_tokens > 0:
+                ubatch_runtime_metadata = CUDAGraphRuntimeMetadata(
+                    token_offset=split_slice.start_num_tokens,
+                    variant="inplace_parallel",
+                    backend_tag=split_attention_backend,
+                    metadata_mode=capture_metadata_mode,
+                )
             ubatch_cudagraph_mode, ubatch_batch_descriptor = (
                 self.cudagraph_dispatcher.dispatch(
                     num_tokens=split_slice.graph_num_tokens,
                     uniform_decode=True,
                     has_lora=batch_descriptor.has_lora,
-                    start_num_tokens=split_slice.start_num_tokens,
-                    allow_inplace_lazy_key=(allow_lazy and split_slice.start_num_tokens > 0),
-                    graph_variant=("inplace_parallel" if split_slice.start_num_tokens > 0 else ""),
-                    attention_backend=(split_attention_backend if split_slice.start_num_tokens > 0 else ""),
-                    capture_metadata_mode=capture_metadata_mode,
+                    runtime_metadata=ubatch_runtime_metadata,
+                    allow_runtime_key_registration=(
+                        allow_lazy and split_slice.start_num_tokens > 0),
                 ))
 
+            ubatch_rm = getattr(ubatch_batch_descriptor, "runtime_metadata", None)
             allow_inplace_lazy_capture = bool(
                 allow_lazy and split_slice.start_num_tokens > 0
                 and ubatch_cudagraph_mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE)
-                and getattr(ubatch_batch_descriptor, "graph_variant", "")
-                == "inplace_parallel"
-                and getattr(ubatch_batch_descriptor, "attention_backend", "")
-                in ("fia", "pa"))
+                and ubatch_rm is not None
+                and ubatch_rm.variant == "inplace_parallel"
+                and ubatch_rm.backend_tag in ("fia", "pa"))
 
             validate_inplace_ptrs = bool(
                 split_cfg is not None
@@ -1162,7 +1174,8 @@ class InplaceSplitRunner:
             if (split_slice.start_num_tokens > 0
                     and split_attention_backend == "fia"
                     and ubatch_attn_metadata is not None
-                    and ubatch_batch_descriptor.capture_metadata_mode == "template"
+                    and getattr(ubatch_batch_descriptor, "runtime_metadata", None) is not None
+                    and getattr(ubatch_batch_descriptor, "runtime_metadata", None).metadata_mode == "template"
                     and split_slice.graph_num_tokens > split_slice.num_tokens):
                 # Template the dummy padding request's KV length only. For a
                 # zero-padding split (graph_num_tokens == num_tokens) the last
