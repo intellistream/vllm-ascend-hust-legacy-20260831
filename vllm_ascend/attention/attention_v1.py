@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
 
@@ -38,6 +39,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -71,6 +73,14 @@ from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
+
+_C8_CONTINUING_PREFILL_PROFILE_PREFIX = "vllm_ascend.c8.continuing_prefill"
+
+
+def _c8_continuing_prefill_profile_scope(region: str, *, enabled: bool = True):
+    if not enabled:
+        return nullcontext()
+    return record_function_or_nullcontext(f"{_C8_CONTINUING_PREFILL_PROFILE_PREFIX}.{region}")
 
 
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
@@ -1810,35 +1820,40 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
         max_tokens_padded = max_blocks_per_seq * block_size
 
-        flat_ids = block_table.reshape(-1)
-        key_nz = self._nz_5d_view(key, block_size)
-        value_nz = self._nz_5d_view(value, block_size)
+        with _c8_continuing_prefill_profile_scope("paged_kv_gather"):
+            flat_ids = block_table.reshape(-1)
+            key_nz = self._nz_5d_view(key, block_size)
+            value_nz = self._nz_5d_view(value, block_size)
 
-        # Gather: (batch*max_blocks, H, D//nz, S, nz)
-        gathered_k = key_nz[flat_ids]
-        gathered_v = value_nz[flat_ids]
-        # NZ→ND conversion: permute (S, H, D//nz, nz) → reshape (S, H, D)
-        gathered_k = (
-            gathered_k.permute(0, 3, 1, 2, 4)
-            .contiguous()
-            .view(batch_size, max_tokens_padded, self.num_kv_heads, self.head_size)
-        )
-        gathered_v = (
-            gathered_v.permute(0, 3, 1, 2, 4)
-            .contiguous()
-            .view(batch_size, max_tokens_padded, self.num_kv_heads, self.head_size)
-        )
+            # Gather: (batch*max_blocks, H, D//nz, S, nz)
+            gathered_k = key_nz[flat_ids]
+            gathered_v = value_nz[flat_ids]
 
-        seq_lens_t = torch.tensor(seq_lens, dtype=torch.long, device=key.device)
-        positions = torch.arange(max_tokens_padded, dtype=torch.long, device=key.device)
-        valid_mask = (positions.unsqueeze(0) < seq_lens_t.unsqueeze(1)).view(-1)
+        with _c8_continuing_prefill_profile_scope("nz_to_nd"):
+            # NZ→ND conversion: permute (S, H, D//nz, nz) → reshape (S, H, D)
+            gathered_k = (
+                gathered_k.permute(0, 3, 1, 2, 4)
+                .contiguous()
+                .view(batch_size, max_tokens_padded, self.num_kv_heads, self.head_size)
+            )
+            gathered_v = (
+                gathered_v.permute(0, 3, 1, 2, 4)
+                .contiguous()
+                .view(batch_size, max_tokens_padded, self.num_kv_heads, self.head_size)
+            )
 
-        dense_k = gathered_k.view(-1, self.num_kv_heads, self.head_size)[valid_mask]
-        dense_v = gathered_v.view(-1, self.num_kv_heads, self.head_size)[valid_mask]
+        with _c8_continuing_prefill_profile_scope("padding_filter"):
+            seq_lens_t = torch.tensor(seq_lens, dtype=torch.long, device=key.device)
+            positions = torch.arange(max_tokens_padded, dtype=torch.long, device=key.device)
+            valid_mask = (positions.unsqueeze(0) < seq_lens_t.unsqueeze(1)).view(-1)
 
-        # Scale-only dequant for NZ (symmetric)
-        dense_k = dense_k.to(target_dtype) * layer._c8_k_scale
-        dense_v = dense_v.to(target_dtype) * layer._c8_v_scale
+            dense_k = gathered_k.view(-1, self.num_kv_heads, self.head_size)[valid_mask]
+            dense_v = gathered_v.view(-1, self.num_kv_heads, self.head_size)[valid_mask]
+
+        with _c8_continuing_prefill_profile_scope("cast_scale"):
+            # Scale-only dequant for NZ (symmetric)
+            dense_k = dense_k.to(target_dtype) * layer._c8_k_scale
+            dense_v = dense_v.to(target_dtype) * layer._c8_v_scale
         return dense_k, dense_v
 
     def _quantize_kv_to_int8(
@@ -1977,58 +1992,61 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
                     all_new_prefill = False
                     break
 
-            if all_new_prefill and float_key is not None and float_value is not None:
-                self._record_c8_dispatch(
-                    dispatch_path="chunked_prefill_fia_tnd_new_float_kv",
-                    layer=layer,
-                    query=prefill_q,
-                    attn_metadata=attn_metadata,
-                    actual_cache_dtype=self.key_cache.dtype,  # type: ignore[attr-defined]
-                )
-                prefill_k = float_key[num_decode_tokens:num_tokens]
-                prefill_v = float_value[num_decode_tokens:num_tokens]
-                prefill_seq_kvlen = prefill_seq_qlen
-            else:
-                self._record_c8_dispatch(
-                    dispatch_path="chunked_prefill_fia_tnd_dequantized_cache",
-                    layer=layer,
-                    query=prefill_q,
-                    attn_metadata=attn_metadata,
-                    actual_cache_dtype=self.key_cache.dtype,  # type: ignore[attr-defined]
-                    fallback_reason="fia_tnd_requires_dense_kv",
-                )
-                num_block, blk_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
-                paged_k = self._nz_5d_view(self.key_cache, blk_size)
-                paged_v = self._nz_5d_view(self.value_cache, blk_size)
+            uses_dense_fallback = not (all_new_prefill and float_key is not None and float_value is not None)
+            with _c8_continuing_prefill_profile_scope("segment", enabled=uses_dense_fallback):
+                if not uses_dense_fallback:
+                    self._record_c8_dispatch(
+                        dispatch_path="chunked_prefill_fia_tnd_new_float_kv",
+                        layer=layer,
+                        query=prefill_q,
+                        attn_metadata=attn_metadata,
+                        actual_cache_dtype=self.key_cache.dtype,  # type: ignore[attr-defined]
+                    )
+                    prefill_k = float_key[num_decode_tokens:num_tokens]  # type: ignore[index]
+                    prefill_v = float_value[num_decode_tokens:num_tokens]  # type: ignore[index]
+                    prefill_seq_kvlen = prefill_seq_qlen
+                else:
+                    self._record_c8_dispatch(
+                        dispatch_path="chunked_prefill_fia_tnd_dequantized_cache",
+                        layer=layer,
+                        query=prefill_q,
+                        attn_metadata=attn_metadata,
+                        actual_cache_dtype=self.key_cache.dtype,  # type: ignore[attr-defined]
+                        fallback_reason="fia_tnd_requires_dense_kv",
+                    )
+                    num_block, blk_size, _, _ = self.key_cache.shape  # type: ignore[attr-defined]
+                    paged_k = self._nz_5d_view(self.key_cache, blk_size)
+                    paged_v = self._nz_5d_view(self.value_cache, blk_size)
 
-                prefill_bt = attn_metadata.block_tables[num_decodes:]
-                prefill_sl = attn_metadata.seq_lens_list[num_decodes:]
-                prefill_k, prefill_v = self._dequant_paged_kv_to_dense(
-                    paged_k, paged_v, prefill_bt, prefill_sl, query.dtype, layer
-                )
-                prefill_seq_kvlen = torch.tensor(prefill_sl, dtype=torch.int32).cumsum(dim=0)
+                    prefill_bt = attn_metadata.block_tables[num_decodes:]
+                    prefill_sl = attn_metadata.seq_lens_list[num_decodes:]
+                    prefill_k, prefill_v = self._dequant_paged_kv_to_dense(
+                        paged_k, paged_v, prefill_bt, prefill_sl, query.dtype, layer
+                    )
+                    prefill_seq_kvlen = torch.tensor(prefill_sl, dtype=torch.int32).cumsum(dim=0)
 
-            # block_table is None for prefill; FIA ignores block_size in this case.
-            # Use cache block_size for consistency rather than a magic number.
-            cache_block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
-            attn_out, _ = torch_npu.npu_fused_infer_attention_score(
-                query=prefill_q,
-                key=prefill_k,
-                value=prefill_v,
-                atten_mask=attn_metadata.attn_mask,
-                block_table=None,
-                input_layout="TND",
-                block_size=cache_block_size,
-                actual_seq_lengths=prefill_seq_qlen,
-                actual_seq_lengths_kv=prefill_seq_kvlen,
-                num_key_value_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                scale=self.scale,
-                sparse_mode=3,
-            )
-            n_prefill = num_tokens - num_decode_tokens
-            attn_out = attn_out.view(n_prefill, self.num_heads, self.head_size)
-            output[num_decode_tokens:num_tokens] = attn_out[:n_prefill]
+                # block_table is None for prefill; FIA ignores block_size in this case.
+                # Use cache block_size for consistency rather than a magic number.
+                cache_block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
+                with _c8_continuing_prefill_profile_scope("dense_tnd_fia", enabled=uses_dense_fallback):
+                    attn_out, _ = torch_npu.npu_fused_infer_attention_score(
+                        query=prefill_q,
+                        key=prefill_k,
+                        value=prefill_v,
+                        atten_mask=attn_metadata.attn_mask,
+                        block_table=None,
+                        input_layout="TND",
+                        block_size=cache_block_size,
+                        actual_seq_lengths=prefill_seq_qlen,
+                        actual_seq_lengths_kv=prefill_seq_kvlen,
+                        num_key_value_heads=self.num_kv_heads,
+                        num_heads=self.num_heads,
+                        scale=self.scale,
+                        sparse_mode=3,
+                    )
+                n_prefill = num_tokens - num_decode_tokens
+                attn_out = attn_out.view(n_prefill, self.num_heads, self.head_size)
+                output[num_decode_tokens:num_tokens] = attn_out[:n_prefill]
 
         return output
 
@@ -2058,60 +2076,65 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             key = key[:num_tokens]
             value = value[:num_tokens]
 
-        if key.dtype == torch.int8:
-            if block_table is not None:
-                self._record_c8_dispatch(
-                    dispatch_path="prefill_cache_hit_fia_tnd_dequantized_cache",
-                    layer=layer,
-                    query=query,
-                    attn_metadata=attn_metadata,
-                    actual_cache_dtype=actual_cache_dtype,
-                    fallback_reason="fia_tnd_requires_dense_kv",
-                )
-                seq_lens = (
-                    actual_seq_lengths_kv if isinstance(actual_seq_lengths_kv, list) else actual_seq_lengths_kv.tolist()
-                )
-                key, value = self._dequant_paged_kv_to_dense(key, value, block_table, seq_lens, query.dtype, layer)
-                block_table = None
-                # block_table is None after dequant; FIA ignores block_size.
-                # Use cache block_size for consistency rather than a magic number.
-                block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
-                actual_seq_lengths_kv = torch.tensor(seq_lens, dtype=torch.int32).cumsum(dim=0)
+        uses_dense_fallback = key.dtype == torch.int8 and block_table is not None
+        with _c8_continuing_prefill_profile_scope("segment", enabled=uses_dense_fallback):
+            if key.dtype == torch.int8:
+                if block_table is not None:
+                    self._record_c8_dispatch(
+                        dispatch_path="prefill_cache_hit_fia_tnd_dequantized_cache",
+                        layer=layer,
+                        query=query,
+                        attn_metadata=attn_metadata,
+                        actual_cache_dtype=actual_cache_dtype,
+                        fallback_reason="fia_tnd_requires_dense_kv",
+                    )
+                    seq_lens = (
+                        actual_seq_lengths_kv
+                        if isinstance(actual_seq_lengths_kv, list)
+                        else actual_seq_lengths_kv.tolist()
+                    )
+                    key, value = self._dequant_paged_kv_to_dense(key, value, block_table, seq_lens, query.dtype, layer)
+                    block_table = None
+                    # block_table is None after dequant; FIA ignores block_size.
+                    # Use cache block_size for consistency rather than a magic number.
+                    block_size = self.key_cache.shape[1]  # type: ignore[attr-defined]
+                    actual_seq_lengths_kv = torch.tensor(seq_lens, dtype=torch.int32).cumsum(dim=0)
+                else:
+                    self._record_c8_dispatch(
+                        dispatch_path="prefill_fia_tnd_dequantized_input",
+                        layer=layer,
+                        query=query,
+                        attn_metadata=attn_metadata,
+                        actual_cache_dtype=actual_cache_dtype,
+                        fallback_reason="fia_tnd_requires_float_kv",
+                    )
+                    key = (key.to(query.dtype) - layer._c8_k_offset) * layer._c8_k_scale
+                    value = (value.to(query.dtype) - layer._c8_v_offset) * layer._c8_v_scale
             else:
                 self._record_c8_dispatch(
-                    dispatch_path="prefill_fia_tnd_dequantized_input",
+                    dispatch_path="prefill_fia_tnd_float_kv",
                     layer=layer,
                     query=query,
                     attn_metadata=attn_metadata,
                     actual_cache_dtype=actual_cache_dtype,
-                    fallback_reason="fia_tnd_requires_float_kv",
                 )
-                key = (key.to(query.dtype) - layer._c8_k_offset) * layer._c8_k_scale
-                value = (value.to(query.dtype) - layer._c8_v_offset) * layer._c8_v_scale
-        else:
-            self._record_c8_dispatch(
-                dispatch_path="prefill_fia_tnd_float_kv",
-                layer=layer,
-                query=query,
-                attn_metadata=attn_metadata,
-                actual_cache_dtype=actual_cache_dtype,
-            )
 
-        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-            query=query,
-            key=key,
-            value=value,
-            atten_mask=attn_metadata.attn_mask,
-            block_table=block_table,
-            input_layout="TND",
-            block_size=block_size,
-            actual_seq_lengths=actual_seq_qlen,
-            actual_seq_lengths_kv=actual_seq_lengths_kv,
-            num_key_value_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale=self.scale,
-            sparse_mode=3,
-        )
+            with _c8_continuing_prefill_profile_scope("dense_tnd_fia", enabled=uses_dense_fallback):
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                    query=query,
+                    key=key,
+                    value=value,
+                    atten_mask=attn_metadata.attn_mask,
+                    block_table=block_table,
+                    input_layout="TND",
+                    block_size=block_size,
+                    actual_seq_lengths=actual_seq_qlen,
+                    actual_seq_lengths_kv=actual_seq_lengths_kv,
+                    num_key_value_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale=self.scale,
+                    sparse_mode=3,
+                )
         attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
         output[:num_tokens] = attn_output
         return output
