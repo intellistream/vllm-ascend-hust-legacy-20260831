@@ -143,6 +143,46 @@ def maybe_template_fia_seq_lens(
     return type(seq_lens)(result)
 
 
+def _fia_layer_seq_lens(forward_context: Any, metadata: Any,
+                        key_cache: Any, block_size: int, *,
+                        source: str) -> Any:
+    """Derive the templated FIA ``seq_lens`` for a single layer.
+
+    Keeps the host list type. Never converts to a device tensor (B1' lesson).
+    """
+    return maybe_template_fia_seq_lens(
+        forward_context, metadata.seq_lens_list,
+        _get_fia_key_t(key_cache, block_size),
+        source=source)
+
+
+def _fia_shared_seq_lens_probe(forward_context: Any,
+                               layer_items: list[tuple[Any, Any, Any]],
+                               ) -> tuple[Any, Any, bool]:
+    """C1: derive the FIA ``seq_lens`` / ``actual_seq_lengths_q`` for the first
+    layer and report whether every layer agrees (uniform decode).
+
+    Returns ``(first_seq_lens, first_actual_seq_lengths_q, uniform)``. When
+    ``uniform`` is True the caller may reuse the returned values for every
+    layer; otherwise it must derive per layer (fall back path).
+
+    This is a pure host-side computation (no NPU) so it is unit-testable.
+    """
+    layers = list(layer_items)
+    if not layers:
+        return None, None, False
+    meta0, key_cache0, block_size0 = layers[0]
+    seq0 = _fia_layer_seq_lens(forward_context, meta0, key_cache0, block_size0,
+                               source="acl_graph_shared:first")
+    act0 = getattr(meta0, "actual_seq_lengths_q", None)
+    for meta, key_cache, block_size in layers[1:]:
+        seq = _fia_layer_seq_lens(forward_context, meta, key_cache, block_size,
+                                  source="acl_graph_shared:check")
+        if seq != seq0 or getattr(meta, "actual_seq_lengths_q", None) != act0:
+            return seq0, act0, False
+    return seq0, act0, True
+
+
 def _iter_attn_metadata_objects(attn_metadata: Any):
     if isinstance(attn_metadata, dict):
         for value in attn_metadata.values():
@@ -255,23 +295,59 @@ def _update_attn_fia_params(update_stream, forward_context, runtime_shape,
     if param_key not in graph_params.events or not graph_params.events[param_key]:
         return
 
+    # C1: one derivation + shared host list for all layers. When
+    # VLLM_ASCEND_SPLIT_FIA_SHARED_LIST=1, build the templated seq_lens and
+    # actual_seq_lengths_q ONCE (from the first layer) and reuse them for every
+    # layer, guarded by a per-layer uniformity probe that falls back to
+    # per-layer derivation on any disagreement. Keep host lists; never feed
+    # device tensors to the FIA op (B1' lesson).
+    shared_seq_lens = None
+    shared_actual_seq_lengths_q = None
+    stream_items = None
+    if os.environ.get("VLLM_ASCEND_SPLIT_FIA_SHARED_LIST", "0") == "1":
+        stream_items = list(zip(
+            forward_context.attn_metadata,
+            graph_params.attn_params[param_key],
+            graph_params.handles[param_key],
+            graph_params.events[param_key],
+        ))
+        if stream_items:
+            layer_items = []
+            for key, param, _handle, _event in stream_items:
+                (query, key_cache, value, block_tables, attn_mask, block_size,
+                 seq_lens, actual_seq_lengths_q_capture, num_kv_heads,
+                 num_heads, scale, attn_output, softmax_lse, *rest) = param
+                layer_items.append((forward_context.attn_metadata[key],
+                                    key_cache, block_size))
+            seq0, act0, uniform = _fia_shared_seq_lens_probe(
+                forward_context, layer_items)
+            if uniform:
+                shared_seq_lens = seq0
+                shared_actual_seq_lengths_q = act0
+
     with torch.npu.stream(update_stream):
-        for key, param, handle, event in zip(
+        if stream_items is None:
+            stream_items = list(zip(
                 forward_context.attn_metadata,
                 graph_params.attn_params[param_key],
                 graph_params.handles[param_key],
                 graph_params.events[param_key],
-        ):
+            ))
+        for key, param, handle, event in stream_items:
             (query, key_cache, value, block_tables, attn_mask, block_size,
              seq_lens, actual_seq_lengths_q_capture, num_kv_heads, num_heads, scale,
              attn_output, softmax_lse, *rest) = param
 
             metadata = forward_context.attn_metadata[key]
-            seq_lens = maybe_template_fia_seq_lens(
-                forward_context, metadata.seq_lens_list,
-                _get_fia_key_t(key_cache, block_size),
-                source=f"acl_graph_update:{key}")
-            actual_seq_lengths_q = metadata.actual_seq_lengths_q
+            if shared_seq_lens is None:
+                seq_lens = maybe_template_fia_seq_lens(
+                    forward_context, metadata.seq_lens_list,
+                    _get_fia_key_t(key_cache, block_size),
+                    source=f"acl_graph_update:{key}")
+                actual_seq_lengths_q = metadata.actual_seq_lengths_q
+            else:
+                seq_lens = shared_seq_lens
+                actual_seq_lengths_q = shared_actual_seq_lengths_q
 
             metadata_block_table, metadata_block_source = extract_block_table_from_metadata(
                 metadata)
