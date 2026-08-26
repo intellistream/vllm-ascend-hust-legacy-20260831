@@ -1287,10 +1287,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
+        _rm = getattr(batch_descriptor, "runtime_metadata", None)
         if (attn_metadata.attn_state == AscendAttentionState.DecodeOnly
                 and batch_descriptor is not None
-                and getattr(batch_descriptor, 'capture_metadata_mode', '') == "template"
-                and getattr(batch_descriptor, 'attention_backend', '') == "fia"):
+                and _rm is not None
+                and _rm.metadata_mode == "template"
+                and _rm.backend_tag == "fia"):
             from vllm_ascend.compilation.acl_graph_split_batch import maybe_template_fia_seq_lens, _get_fia_key_t
             actual_seq_lengths_kv = maybe_template_fia_seq_lens(
                 forward_context, actual_seq_lengths_kv,

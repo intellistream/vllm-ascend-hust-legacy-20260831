@@ -1431,9 +1431,10 @@ class InplaceSplitRunner:
                         )
                     else:
 
-                        if (int(getattr(
-                                metadata.context.batch_descriptor,
-                                "start_num_tokens", 0) or 0) > 0
+                        _rm = getattr(
+                            metadata.context.batch_descriptor,
+                            "runtime_metadata", None)
+                        if (int(_rm.token_offset) > 0
                                 and metadata.context.cudagraph_runtime_mode
                                 == CUDAGraphMode.FULL
                                 and not self._has_aclgraph_for_context(
