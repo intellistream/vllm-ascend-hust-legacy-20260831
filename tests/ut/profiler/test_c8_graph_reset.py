@@ -1,0 +1,59 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2026 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+from unittest.mock import MagicMock
+
+from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+from vllm_ascend.profiler.c8_graph_reset import C8GraphResetWorkerExtension
+
+
+class _FakeWrapper:
+    def __init__(self, entries: int) -> None:
+        self.concrete_aclgraph_entries = dict.fromkeys(range(entries))
+
+    def clear_graphs(self) -> None:
+        self.concrete_aclgraph_entries.clear()
+
+
+def test_reset_c8_acl_graphs_for_profiling(monkeypatch) -> None:
+    wrappers = [_FakeWrapper(2), _FakeWrapper(3)]
+    synchronize = MagicMock()
+    monkeypatch.setattr(ACLGraphWrapper, "_all_instances", wrappers)
+    monkeypatch.setattr("torch.accelerator.synchronize", synchronize)
+
+    report = C8GraphResetWorkerExtension().reset_c8_acl_graphs_for_profiling()
+
+    assert report["status"] == "PASS"
+    assert report["wrapper_count"] == 2
+    assert report["graph_entries_before"] == 5
+    assert report["graph_entries_after"] == 0
+    assert synchronize.call_count == 2
+
+
+def test_reset_fails_closed_without_captured_graph(monkeypatch) -> None:
+    synchronize = MagicMock()
+    monkeypatch.setattr(ACLGraphWrapper, "_all_instances", [])
+    monkeypatch.setattr("torch.accelerator.synchronize", synchronize)
+
+    report = C8GraphResetWorkerExtension().reset_c8_acl_graphs_for_profiling()
+
+    assert report["status"] == "FAIL"
+    assert report["wrapper_count"] == 0
+    assert report["graph_entries_before"] == 0
+    assert report["graph_entries_after"] == 0
+    assert synchronize.call_count == 2
