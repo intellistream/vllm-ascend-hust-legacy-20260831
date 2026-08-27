@@ -173,6 +173,10 @@ def main() -> int:
     p.add_argument("--enable-parallel-streams", action="store_true")
     p.add_argument("--min-batch-size-for-split", type=int, default=4)
     p.add_argument("--force-split", action="store_true")
+    p.add_argument("--unified-capture-sizes", default=None,
+                   help=("P11 DUAL_UNIFIED_GEMM: comma-separated exact FULL "
+                         "graph sizes (injected only for the split arm; also "
+                         "export VLLM_ASCEND_DUAL_UNIFIED_GEMM=1)."))
     p.add_argument("--offset-match-policy", default="exact",
                    choices=["exact", "bucket"])
     p.add_argument("--run", default="both", choices=["both", "pad", "split"])
@@ -203,6 +207,10 @@ def main() -> int:
         batch_size=args.batch_size, prompt=FIXED_PROMPT)
 
     def make_cfg(enabled: bool):
+        unified_sizes = None
+        if enabled and args.unified_capture_sizes:
+            from examples.test_split_batch_correctness_npu import _parse_int_list
+            unified_sizes = _parse_int_list(args.unified_capture_sizes)
         cfg = h._build_split_additional_config(
             enabled=enabled,
             split_mode=args.split_mode,
@@ -215,6 +223,7 @@ def main() -> int:
             inplace_parallel_replay_policy="full_graph_parallel",
             macro_graph_config=None,
             pa_shape_list=None,
+            unified_capture_sizes=unified_sizes,
         )
         cfg["split_batch_config"]["inplace_offset_match_policy"] = (
             args.offset_match_policy)
