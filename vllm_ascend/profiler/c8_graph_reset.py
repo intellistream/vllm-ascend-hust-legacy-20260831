@@ -16,12 +16,16 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import gc
 from typing import Any
 
 import torch
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+from vllm_ascend.device_allocator.sleep_mem_optimized import (
+    AclGraphSleepWakeupManager,
+)
 
 
 class C8GraphResetWorkerExtension:
@@ -30,21 +34,53 @@ class C8GraphResetWorkerExtension:
     def reset_c8_acl_graphs_for_profiling(self) -> dict[str, Any]:
         wrappers = list(ACLGraphWrapper._all_instances)
         entries_before = sum(len(wrapper.concrete_aclgraph_entries) for wrapper in wrappers)
+        graph_objects_reset = 0
+        reset_error = None
 
+        set_cudagraph_capturing_enabled(False)
         torch.accelerator.synchronize()
-        ACLGraphWrapper.clear_all_graphs()
+        try:
+            # Dropping only the Python dictionaries can leave the shared graph
+            # pool referenced. Explicitly release every graph before clearing
+            # the remaining capture metadata.
+            for wrapper in wrappers:
+                for entry in wrapper.concrete_aclgraph_entries.values():
+                    if entry.aclgraph is None:
+                        continue
+                    entry.aclgraph.reset()
+                    graph_objects_reset += 1
+
+            AclGraphSleepWakeupManager.clear_all_attention_workspaces()
+            AclGraphSleepWakeupManager.reset_all_graph_params()
+            AclGraphSleepWakeupManager.reset_model_runner_graph_manager(self.model_runner)
+            gc.collect()
+            torch.npu.empty_cache()
+        except Exception as exc:  # pragma: no cover - exercised on real runtime
+            reset_error = f"{type(exc).__name__}: {exc}"
         torch.accelerator.synchronize()
 
         entries_after = sum(len(wrapper.concrete_aclgraph_entries) for wrapper in wrappers)
-        status = "PASS" if wrappers and entries_before > 0 and entries_after == 0 else "FAIL"
+        status = (
+            "PASS"
+            if (
+                wrappers
+                and entries_before > 0
+                and graph_objects_reset == entries_before
+                and entries_after == 0
+                and reset_error is None
+            )
+            else "FAIL"
+        )
         capture_enabled = status == "PASS"
         set_cudagraph_capturing_enabled(capture_enabled)
         return {
-            "schema_version": "vllm-ascend-c8-graph-reset/v1",
+            "schema_version": "vllm-ascend-c8-graph-reset/v2",
             "status": status,
             "wrapper_count": len(wrappers),
             "graph_entries_before": entries_before,
+            "graph_objects_reset": graph_objects_reset,
             "graph_entries_after": entries_after,
+            "reset_error": reset_error,
             "cudagraph_capturing_enabled_after": capture_enabled,
             "caller_precondition": "engine idle with no in-flight requests",
             "synchronization_scope": (
