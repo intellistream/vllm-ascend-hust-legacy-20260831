@@ -43,9 +43,58 @@ from vllm.forward_context import BatchDescriptor
 
 from vllm_ascend.worker.inplace_split_utils import (
     INPLACE_SPLIT_DRY_RUN,
+    UNIFIED_SINGLE_GRAPH_REASON,
     InplaceSplitPlan,
     SplitBatchSlice,
 )
+
+
+def make_unified_whole_batch_plan(plan: InplaceSplitPlan) -> InplaceSplitPlan:
+    """Convert a would-be dual_pad plan into a unified whole-batch plan.
+
+    The unified execution keeps ONE main-pool graph captured at the exact
+    batch token count (the joint continuous row buffer): the union of the two
+    contiguous dual_pad request slices is simply ``[0, num_reqs)``, and the
+    single slice's padded size equals the exact token count (no padding tail,
+    no parallel-pool graphs, no dual-stream replay).
+
+    Args:
+        plan: the committed dual_pad plan (non-None).
+
+    Returns:
+        A single-slice ``InplaceSplitPlan`` with ``use_unified=True``.
+    """
+    total = int(plan.total_num_tokens)
+    num_reqs = int(plan.first_reqs) + int(plan.second_reqs)
+    single = SplitBatchSlice(
+        request_slice=slice(0, num_reqs),
+        token_slice=slice(0, total),
+        padded_num_tokens=total,
+        start_num_tokens=0,
+    )
+    return InplaceSplitPlan(
+        split_slices=[single],
+        reason=UNIFIED_SINGLE_GRAPH_REASON,
+        total_num_tokens=total,
+        padded_num_tokens_without_split=total,
+        first_tokens=total,
+        second_tokens=0,
+        first_reqs=num_reqs,
+        second_reqs=0,
+        lower_capture_size=total,
+        remainder_tokens=0,
+        capture_sizes_considered=list(plan.capture_sizes_considered),
+        first_tokens_policy="unified_exact",
+        offset_match_policy="none",
+        second_actual_tokens=0,
+        second_graph_tokens=0,
+        second_padding_tokens=0,
+        offset_capture_sizes_considered=[],
+        offset_min_graph_tokens=1,
+        offset_max_graph_tokens_by_start=None,
+        offset_allowed_graph_tokens_by_start=None,
+        use_unified=True,
+    )
 
 
 def make_dual_pad_parallel_batch_descriptor(

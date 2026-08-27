@@ -2435,7 +2435,14 @@ class NPUModelRunner(GPUModelRunner):
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
             if inplace_split_plan is not None:
                 split_mode = split_batch_config.mode
-                if split_mode == "inplace_parallel":
+                if getattr(inplace_split_plan, "use_unified", False):
+                    hidden_states = self._inplace_split_runner.run_unified(
+                        inplace_split_plan, input_ids, positions,
+                        intermediate_tensors, inputs_embeds, attn_metadata,
+                        cudagraph_mode, batch_desc,
+                        **model_kwargs,
+                    )
+                elif split_mode == "inplace_parallel":
                     from vllm_ascend.worker.inplace_split_utils import (
                         select_inplace_attention_backend,
                     )
@@ -5253,6 +5260,43 @@ class NPUModelRunner(GPUModelRunner):
                 AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
+
+        # P11 unified-row-graph (env-gated, default OFF): register exact-size
+        # FULL keys for the declared unified sizes so that
+        #   - ``get_capture_descs`` exposes them → core capture_model captures
+        #     each one through the standard startup dummy-run flow,
+        #   - ``set_graph_params`` below allocates the matching attn-param
+        #     buckets keyed by the exact token count,
+        #   - runtime dispatch hits them exactly (no padding to next size).
+        # Descriptor construction MUST reuse _create_padded_batch_descriptor
+        # AFTER patching the bs->padded table, so the registered key matches
+        # the runtime dispatch formula bit-for-bit.
+        unified_cfg = getattr(self.ascend_config, "split_batch_config", None)
+        if (
+            unified_cfg is not None
+            and getattr(unified_cfg, "enable_unified_gemm", False)
+            and getattr(unified_cfg, "unified_capture_sizes", None)
+        ):
+            dispatcher = self.cudagraph_dispatcher
+            max_size = dispatcher.compilation_config.max_cudagraph_capture_size
+            bs_to_padded = dispatcher._bs_to_padded_graph_size
+            for size in unified_cfg.unified_capture_sizes:
+                if size <= 0 or size > max_size:
+                    raise ValueError(
+                        "DUAL_UNIFIED_GEMM unified_capture_sizes entry "
+                        f"{size} must be within [1, {max_size}]")
+                if size >= len(bs_to_padded):
+                    raise ValueError(
+                        "DUAL_UNIFIED_GEMM unified_capture_sizes entry "
+                        f"{size} exceeds the dispatcher table range")
+                bs_to_padded[size] = size
+                unified_desc = dispatcher._create_padded_batch_descriptor(
+                    size, True, False, 0)
+                dispatcher.add_cudagraph_key(CUDAGraphMode.FULL, unified_desc)
+            logger.info(
+                "DUAL_UNIFIED_GEMM registered exact-size FULL keys: %s",
+                sorted(unified_cfg.unified_capture_sizes),
+            )
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({

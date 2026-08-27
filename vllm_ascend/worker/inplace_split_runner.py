@@ -409,7 +409,7 @@ class InplaceSplitRunner:
         cudagraph_capture_sizes: list[int],
     ) -> tuple[Any, str]:
         if split_batch_config.mode == "dual_pad":
-            return self._should_split_dual_pad(
+            plan, reason = self._should_split_dual_pad(
                 split_batch_config=split_batch_config,
                 cudagraph_mode=cudagraph_mode,
                 num_scheduled_tokens_np=num_scheduled_tokens_np,
@@ -421,6 +421,9 @@ class InplaceSplitRunner:
                 spec_decode_enabled=spec_decode_enabled,
                 cudagraph_capture_sizes=cudagraph_capture_sizes,
             )
+            plan = self._maybe_convert_dual_pad_to_unified(
+                split_batch_config, plan)
+            return plan, (plan.reason if plan is not None else reason)
         from vllm_ascend.inplace_split_debug import (
             is_enabled as _debug_enabled,
         )
@@ -575,6 +578,38 @@ class InplaceSplitRunner:
         )
 
         return split_plan, reason
+
+    def _maybe_convert_dual_pad_to_unified(
+        self,
+        split_batch_config: Any,
+        split_plan: Any | None,
+    ) -> Any | None:
+        """P11 unified-row-graph gate: swap a committed dual_pad plan for a
+        single whole-batch plan executed as ONE main-pool graph.
+
+        Requires ``VLLM_ASCEND_DUAL_UNIFIED_GEMM=1`` AND a non-empty declared
+        ``unified_capture_sizes`` AND the batch token total to be one of the
+        declared sizes. Everything is default-OFF; the OFF path returns the
+        dual_pad plan untouched (bit-exact behavior).
+        """
+        if split_plan is None:
+            return None
+        if not getattr(split_batch_config, "enable_unified_gemm", False):
+            return split_plan
+        declared = getattr(split_batch_config, "unified_capture_sizes", None)
+        if not declared:
+            return split_plan
+        total = int(split_plan.total_num_tokens)
+        if total not in declared:
+            return split_plan
+        from vllm_ascend.worker.dual_pad_utils import make_unified_whole_batch_plan
+        converted = make_unified_whole_batch_plan(split_plan)
+        logger.info(
+            "DUAL_PAD decision converted to UNIFIED single graph: "
+            "total=%d, declared=%s",
+            total, declared,
+        )
+        return converted
 
     def _has_aclgraph_for_context(self, forward_context: Any) -> bool:
         from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
@@ -1960,6 +1995,105 @@ class InplaceSplitRunner:
                 if not clone_split_outputs:
                     self._record_inplace_parallel_output_release_event()
         return result
+
+    def run_unified(
+        self,
+        split_plan: Any,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Any,
+        inputs_embeds: torch.Tensor | None,
+        attn_metadata: Any,
+        cudagraph_mode: CUDAGraphMode,
+        batch_descriptor: BatchDescriptor,
+        **model_kwargs,
+    ) -> torch.Tensor:
+        """P11 unified-row-graph execution (env-gated, default OFF).
+
+        ONE main-pool graph replaying at the exact batch token count over a
+        single whole-batch slice (the joint continuous row buffer):
+
+        - no worker threads / parallel streams / output merging;
+        - merged varlen FIA attention: one per-layer attention call serves
+          the whole batch (single TND GEMM-like dispatch alongside the
+          unified linears that motivated this path);
+        - graph task-param update BEFORE replay via the normal-path channel
+          (``_update_full_graph_params_if_needed`` → backend
+          ``update_graph_params``, ExternalEvent-order on the update stream).
+        """
+        from vllm.v1.worker.ubatch_utils import UBatchSlice
+
+        from vllm_ascend.ascend_forward_context import create_ascend_forward_context
+
+        runner = self._runner
+        original_forward_context = get_forward_context()
+        split_slice = split_plan.split_slices[0]
+        graph_num_tokens = int(split_slice.graph_num_tokens)
+        actual_num_tokens = int(split_slice.num_tokens)
+
+        unified_mode, unified_desc = self.cudagraph_dispatcher.dispatch(
+            num_tokens=graph_num_tokens,
+            uniform_decode=True,
+            has_lora=bool(getattr(batch_descriptor, "has_lora", False)),
+        )
+        if unified_mode != CUDAGraphMode.FULL:
+            raise RuntimeError(
+                "DUAL_UNIFIED_GEMM requires an exact-size FULL graph for "
+                f"{graph_num_tokens} tokens; got mode={unified_mode}, "
+                f"descriptor={unified_desc!r}. Verify that "
+                "split_batch_config.unified_capture_sizes was declared and "
+                "active during startup capture."
+            )
+
+        unified_attn_metadata = attn_metadata
+        if isinstance(attn_metadata, list):
+            if len(attn_metadata) != 1:
+                raise RuntimeError(
+                    "DUAL_UNIFIED_GEMM expects single whole-batch attention "
+                    f"metadata, got {len(attn_metadata)} entries")
+            unified_attn_metadata = attn_metadata[0]
+
+        context_ubatch_slices = [
+            UBatchSlice(split_slice.request_slice,
+                        slice(0, graph_num_tokens))
+        ]
+        unified_forward_context = create_ascend_forward_context(
+            original_forward_context,
+            attn_metadata=unified_attn_metadata,
+            vllm_config=self.vllm_config,
+            dp_metadata=getattr(original_forward_context, "dp_metadata", None),
+            ubatch_slices=context_ubatch_slices,
+            batch_descriptor=unified_desc,
+            cudagraph_runtime_mode=unified_mode,
+            ubatch_num=0,
+            positions=positions[:graph_num_tokens],
+        )
+        setattr(unified_forward_context, "split_inplace_mode", "dual_pad")
+        setattr(unified_forward_context, "allow_inplace_lazy_capture", False)
+        setattr(unified_forward_context, "split_actual_num_tokens",
+                actual_num_tokens)
+        setattr(unified_forward_context, "split_graph_num_tokens",
+                graph_num_tokens)
+
+        with override_forward_context(unified_forward_context):
+            # Normal-path ordering: refresh the graph-bound attention task
+            # parameters BEFORE enqueueing the replay so the event recorded
+            # on the update stream orders it against the captured wait.
+            self._runner._update_full_graph_params_if_needed(
+                unified_forward_context,
+                graph_num_tokens,
+                positions[:graph_num_tokens],
+            )
+            split_result = self.model(
+                input_ids=input_ids[:graph_num_tokens],
+                positions=positions[:graph_num_tokens],
+                inputs_embeds=(
+                    inputs_embeds[:graph_num_tokens]
+                    if inputs_embeds is not None else None),
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
+        return trim_split_output(split_result, actual_num_tokens)
 
     def capture_parallel_stream_graphs(self) -> None:
         from vllm_ascend.compilation.acl_graph import ACLGraphWrapper

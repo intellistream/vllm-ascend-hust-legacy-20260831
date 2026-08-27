@@ -1115,6 +1115,21 @@ class SplitBatchConfig:
             int(raw_max_remainder) if raw_max_remainder is not None else None
         )
 
+        # P11 unified-row-graph gate (default OFF). Requires BOTH the env
+        # switch and a non-empty declared size list; converts a would-be
+        # dual_pad decision into one main-pool graph captured at the exact
+        # batch token count (see plan-0826g M2).
+        self.enable_unified_gemm: bool = os.environ.get(
+            "VLLM_ASCEND_DUAL_UNIFIED_GEMM", "0"
+        ) in ("1", "true", "True")
+        raw_unified_sizes = split_batch_config.get("unified_capture_sizes", None)
+        if raw_unified_sizes is not None:
+            self.unified_capture_sizes: list[int] = sorted(
+                int(s) for s in raw_unified_sizes
+            )
+        else:
+            self.unified_capture_sizes = []
+
         self._validate()
 
     def _validate(self):

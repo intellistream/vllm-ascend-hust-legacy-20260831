@@ -88,6 +88,15 @@ class InplaceSplitPlan:
     offset_min_graph_tokens: int
     offset_max_graph_tokens_by_start: dict[int, int] | None
     offset_allowed_graph_tokens_by_start: dict[int, list[int]] | None
+    # P11 unified-row-graph marker: when True the plan carries a single
+    # whole-batch slice and executes as ONE main-pool graph at the exact
+    # token count (no dual-stream replay, no parallel pool).
+    use_unified: bool = False
+
+
+# Reason tag for a would-be dual_pad decision converted to the unified
+# single-graph execution path (VLLM_ASCEND_DUAL_UNIFIED_GEMM=1).
+UNIFIED_SINGLE_GRAPH_REASON = "unified_single_graph_conversion"
 
 
 

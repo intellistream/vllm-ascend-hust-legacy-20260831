@@ -40,7 +40,8 @@ PROMPTS = ["你好，请介绍一下你自己。", "What is the capital of Franc
 
 
 def build_additional_config(split_enabled: bool, force_split: bool = False,
-                            split_mode: str = "inplace_parallel") -> dict:
+                            split_mode: str = "inplace_parallel",
+                            unified_capture_sizes: list[int] | None = None) -> dict:
     cfg = {
         "split_batch_config": {
             "enabled": split_enabled,
@@ -56,6 +57,12 @@ def build_additional_config(split_enabled: bool, force_split: bool = False,
             "inplace_parallel_replay_policy"] = "full_graph_parallel"
     if force_split:
         cfg["split_batch_config"]["force_split"] = True
+    # P11 unified-row-graph (requires the env switch too):
+    # ``VLLM_ASCEND_DUAL_UNIFIED_GEMM=1`` is exported by main() when this
+    # option is provided.
+    if unified_capture_sizes:
+        cfg["split_batch_config"]["unified_capture_sizes"] = list(
+            unified_capture_sizes)
     return cfg
 
 
@@ -71,7 +78,8 @@ def build_compilation_config(cudagraph: bool) -> dict | None:
 def run_offline(model: str, prompts: list[str],
                 split_enabled: bool, cudagraph: bool,
                 force_split: bool = False,
-                split_mode: str = "inplace_parallel") -> None:
+                split_mode: str = "inplace_parallel",
+                unified_capture_sizes: list[int] | None = None) -> None:
     from vllm import LLM, SamplingParams
 
     kwargs = dict(
@@ -80,7 +88,7 @@ def run_offline(model: str, prompts: list[str],
         gpu_memory_utilization=0.8,
         enforce_eager=not cudagraph,
         additional_config=build_additional_config(
-            split_enabled, force_split, split_mode),
+            split_enabled, force_split, split_mode, unified_capture_sizes),
     )
     if cudagraph:
         kwargs["compilation_config"] = build_compilation_config(cudagraph)
@@ -163,7 +171,22 @@ def main() -> int:
                              ">= 5 to actually split with default capture sizes)")
     parser.add_argument("--eager", action="store_true",
                         help="skip cudagraph (enforce eager)")
+    parser.add_argument("--unified-capture-sizes", type=str, default=None,
+                        help="P11 DUAL_UNIFIED_GEMM: comma-separated exact "
+                             "sizes (e.g. '6'); exports VLLM_ASCEND_DUAL_"
+                             "UNIFIED_GEMM=1 and injects unified_capture_"
+                             "sizes into split_batch_config. Requires a "
+                             "would-be dual_pad decision hitting one of the "
+                             "declared totals.")
     args = parser.parse_args()
+
+    unified_sizes: list[int] | None = None
+    if args.unified_capture_sizes:
+        os.environ["VLLM_ASCEND_DUAL_UNIFIED_GEMM"] = "1"
+        unified_sizes = [
+            int(s) for s in args.unified_capture_sizes.split(",") if s.strip()]
+        print(f"[unified] VLLM_ASCEND_DUAL_UNIFIED_GEMM=1, "
+              f"unified_capture_sizes={unified_sizes}")
 
     split_enabled = not args.no_split
     cudagraph = not args.eager
@@ -174,7 +197,8 @@ def main() -> int:
         try:
             run_offline(args.model, prompts, split_enabled, cudagraph,
                         force_split=args.force_split,
-                        split_mode=args.split_mode)
+                        split_mode=args.split_mode,
+                        unified_capture_sizes=unified_sizes)
         except Exception as exc:  # noqa: BLE001 - report and continue
             failures.append(("offline", exc))
     if args.mode in ("serve", "both"):
