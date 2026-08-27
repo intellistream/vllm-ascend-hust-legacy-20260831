@@ -33,8 +33,13 @@ class _FakeWrapper:
 def test_reset_c8_acl_graphs_for_profiling(monkeypatch) -> None:
     wrappers = [_FakeWrapper(2), _FakeWrapper(3)]
     synchronize = MagicMock()
+    set_capture = MagicMock()
     monkeypatch.setattr(ACLGraphWrapper, "_all_instances", wrappers)
     monkeypatch.setattr("torch.accelerator.synchronize", synchronize)
+    monkeypatch.setattr(
+        "vllm_ascend.profiler.c8_graph_reset.set_cudagraph_capturing_enabled",
+        set_capture,
+    )
 
     report = C8GraphResetWorkerExtension().reset_c8_acl_graphs_for_profiling()
 
@@ -42,13 +47,20 @@ def test_reset_c8_acl_graphs_for_profiling(monkeypatch) -> None:
     assert report["wrapper_count"] == 2
     assert report["graph_entries_before"] == 5
     assert report["graph_entries_after"] == 0
+    assert report["cudagraph_capturing_enabled_after"] is True
     assert synchronize.call_count == 2
+    set_capture.assert_called_once_with(True)
 
 
 def test_reset_fails_closed_without_captured_graph(monkeypatch) -> None:
     synchronize = MagicMock()
+    set_capture = MagicMock()
     monkeypatch.setattr(ACLGraphWrapper, "_all_instances", [])
     monkeypatch.setattr("torch.accelerator.synchronize", synchronize)
+    monkeypatch.setattr(
+        "vllm_ascend.profiler.c8_graph_reset.set_cudagraph_capturing_enabled",
+        set_capture,
+    )
 
     report = C8GraphResetWorkerExtension().reset_c8_acl_graphs_for_profiling()
 
@@ -56,4 +68,47 @@ def test_reset_fails_closed_without_captured_graph(monkeypatch) -> None:
     assert report["wrapper_count"] == 0
     assert report["graph_entries_before"] == 0
     assert report["graph_entries_after"] == 0
+    assert report["cudagraph_capturing_enabled_after"] is False
     assert synchronize.call_count == 2
+    set_capture.assert_called_once_with(False)
+
+
+def test_seal_c8_acl_graph_recapture_for_profiling(monkeypatch) -> None:
+    wrappers = [_FakeWrapper(4), _FakeWrapper(1)]
+    synchronize = MagicMock()
+    set_capture = MagicMock()
+    monkeypatch.setattr(ACLGraphWrapper, "_all_instances", wrappers)
+    monkeypatch.setattr("torch.accelerator.synchronize", synchronize)
+    monkeypatch.setattr(
+        "vllm_ascend.profiler.c8_graph_reset.set_cudagraph_capturing_enabled",
+        set_capture,
+    )
+
+    report = C8GraphResetWorkerExtension().seal_c8_acl_graph_recapture_for_profiling()
+
+    assert report["status"] == "PASS"
+    assert report["wrapper_count"] == 2
+    assert report["graph_entries_after_recapture"] == 5
+    assert report["cudagraph_capturing_enabled_after"] is False
+    assert synchronize.call_count == 2
+    set_capture.assert_called_once_with(False)
+
+
+def test_seal_fails_closed_and_disables_capture_without_recaptured_graph(
+    monkeypatch,
+) -> None:
+    synchronize = MagicMock()
+    set_capture = MagicMock()
+    monkeypatch.setattr(ACLGraphWrapper, "_all_instances", [_FakeWrapper(0)])
+    monkeypatch.setattr("torch.accelerator.synchronize", synchronize)
+    monkeypatch.setattr(
+        "vllm_ascend.profiler.c8_graph_reset.set_cudagraph_capturing_enabled",
+        set_capture,
+    )
+
+    report = C8GraphResetWorkerExtension().seal_c8_acl_graph_recapture_for_profiling()
+
+    assert report["status"] == "FAIL"
+    assert report["graph_entries_after_recapture"] == 0
+    assert report["cudagraph_capturing_enabled_after"] is False
+    set_capture.assert_called_once_with(False)
