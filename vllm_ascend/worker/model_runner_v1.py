@@ -5278,25 +5278,34 @@ class NPUModelRunner(GPUModelRunner):
             and getattr(unified_cfg, "unified_capture_sizes", None)
         ):
             dispatcher = self.cudagraph_dispatcher
-            max_size = dispatcher.compilation_config.max_cudagraph_capture_size
-            bs_to_padded = dispatcher._bs_to_padded_graph_size
-            for size in unified_cfg.unified_capture_sizes:
-                if size <= 0 or size > max_size:
-                    raise ValueError(
-                        "DUAL_UNIFIED_GEMM unified_capture_sizes entry "
-                        f"{size} must be within [1, {max_size}]")
-                if size >= len(bs_to_padded):
-                    raise ValueError(
-                        "DUAL_UNIFIED_GEMM unified_capture_sizes entry "
-                        f"{size} exceeds the dispatcher table range")
-                bs_to_padded[size] = size
-                unified_desc = dispatcher._create_padded_batch_descriptor(
-                    size, True, False, 0)
-                dispatcher.add_cudagraph_key(CUDAGraphMode.FULL, unified_desc)
-            logger.info(
-                "DUAL_UNIFIED_GEMM registered exact-size FULL keys: %s",
-                sorted(unified_cfg.unified_capture_sizes),
-            )
+            bs_to_padded = getattr(dispatcher, "_bs_to_padded_graph_size", None)
+            if bs_to_padded is None:
+                # Eager run (cudagraph keys never initialized): exact-size
+                # FULL graphs do not exist here, so skip registration; the
+                # standard dispatch path stays NONE end to end.
+                logger.info_once(
+                    "DUAL_UNIFIED_GEMM skipped key registration: cudagraph "
+                    "keys are not initialized (eager run).")
+                unified_cfg = None
+            else:
+                max_size = dispatcher.compilation_config.max_cudagraph_capture_size
+                for size in unified_cfg.unified_capture_sizes:
+                    if size <= 0 or size > max_size:
+                        raise ValueError(
+                            "DUAL_UNIFIED_GEMM unified_capture_sizes entry "
+                            f"{size} must be within [1, {max_size}]")
+                    if size >= len(bs_to_padded):
+                        raise ValueError(
+                            "DUAL_UNIFIED_GEMM unified_capture_sizes entry "
+                            f"{size} exceeds the dispatcher table range")
+                    bs_to_padded[size] = size
+                    unified_desc = dispatcher._create_padded_batch_descriptor(
+                        size, True, False, 0)
+                    dispatcher.add_cudagraph_key(CUDAGraphMode.FULL, unified_desc)
+                logger.info(
+                    "DUAL_UNIFIED_GEMM registered exact-size FULL keys: %s",
+                    sorted(unified_cfg.unified_capture_sizes),
+                )
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({

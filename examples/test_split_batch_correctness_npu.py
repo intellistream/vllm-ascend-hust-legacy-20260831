@@ -933,6 +933,18 @@ def create_parser() -> FlexibleArgumentParser:
         ),
     )
     test_group.add_argument(
+        "--unified-capture-sizes",
+        type=str,
+        default="",
+        help=(
+            "P11 DUAL_UNIFIED_GEMM: comma-separated exact FULL-graph sizes "
+            "injected as split_batch_config.unified_capture_sizes. Only "
+            "affects the enabled run; requires the env switch "
+            "VLLM_ASCEND_DUAL_UNIFIED_GEMM=1 to convert a committed dual_pad "
+            "decision into one exact-size single graph."
+        ),
+    )
+    test_group.add_argument(
         "--validate-ptrs",
         action="store_true",
         help=(
@@ -1406,6 +1418,7 @@ def _build_split_additional_config(
     macro_graph_config: dict[str, Any] | None = None,
     pa_shape_list: list[int] | None = None,
     cudagraph_split_pad_threshold: int = 0,
+    unified_capture_sizes: list[int] | None = None,
 ) -> dict[str, Any]:
     cfg: dict[str, Any] = {
         "enabled": enabled,
@@ -1424,6 +1437,10 @@ def _build_split_additional_config(
     if split_mode == "dual_pad":
         cfg["cudagraph_split_pad_threshold"] = int(
             cudagraph_split_pad_threshold)
+        # P11 unified-row-graph: exact-size key whitelist (requires the env
+        # switch too). Injected only for dual_pad enabled runs.
+        if unified_capture_sizes:
+            cfg["unified_capture_sizes"] = list(unified_capture_sizes)
     elif split_mode.startswith("inplace"):
         cfg["enable_inplace_lazy_capture"] = not macro_graph_enabled
         cfg["inplace_validate_metadata_ptrs"] = bool(validate_ptrs)
@@ -1849,6 +1866,8 @@ def main() -> int:
     force_split = bool(args.pop("force_split"))
     cudagraph_split_pad_threshold = int(
         args.pop("cudagraph_split_pad_threshold"))
+    unified_capture_sizes = _parse_int_list(
+        str(args.pop("unified_capture_sizes") or "") or None)
     validate_ptrs = bool(args.pop("validate_ptrs"))
     inplace_force_pa_for_offset = bool(
         args.pop("inplace_force_pa_for_offset"))
@@ -2045,6 +2064,7 @@ def main() -> int:
         macro_graph_config=macro_graph_config,
         pa_shape_list=pa_shape_list,
         cudagraph_split_pad_threshold=cudagraph_split_pad_threshold,
+        unified_capture_sizes=unified_capture_sizes,
     )
 
     # Preferred: coordinator mode spawns 2 child processes then compares.
