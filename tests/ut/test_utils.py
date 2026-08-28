@@ -13,6 +13,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+# CI canary: verify the hosted CPU Smart UT path.
+
 import math
 import os
 import tempfile
