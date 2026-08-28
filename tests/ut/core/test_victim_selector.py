@@ -43,7 +43,7 @@ class TestUnifiedVictimSelector:
         assert get_ascend_victim_selector(config, core_selector) is core_selector
 
     def test_explicit_core_plugin_disable_is_preserved(self):
-        core_selector = object()
+        core_selector = NoOpVictimSelector()
         config = SimpleNamespace(
             additional_config={"victim_selector_plugin_disabled": True}
         )

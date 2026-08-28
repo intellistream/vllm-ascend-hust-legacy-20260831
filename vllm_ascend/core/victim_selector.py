@@ -445,6 +445,9 @@ def get_ascend_victim_selector(vllm_config, core_selector):
     after the core scheduler has initialized it. When no native choice is made,
     retain the historical Ascend utility-selector configuration path.
     """
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    if additional_config.get("victim_selector_plugin_disabled"):
+        return core_selector
     if not isinstance(core_selector, NoOpVictimSelector):
         return core_selector
     return UnifiedVictimSelector.from_vllm_config(vllm_config)
