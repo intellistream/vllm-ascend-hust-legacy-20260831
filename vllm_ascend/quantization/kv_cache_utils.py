@@ -98,3 +98,20 @@ def setup_kv_cache_quant(layer: torch.nn.Module, cache_dtype: str) -> None:
         cache_dtype,
         type(scheme).__name__,
     )
+
+
+def validate_kv_cache_quant_config(vllm_config) -> None:
+    """Reject executable KV-cache modes whose runtime contract is incomplete."""
+    cache_config = getattr(vllm_config, "cache_config", None)
+    if getattr(cache_config, "cache_dtype", None) != "int4":
+        return
+
+    model_config = getattr(vllm_config, "model_config", None)
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    cudagraph_mode = getattr(compilation_config, "cudagraph_mode", None)
+    graph_disabled = getattr(cudagraph_mode, "name", None) == "NONE"
+    if not getattr(model_config, "enforce_eager", False) or not graph_disabled:
+        raise ValueError(
+            "Ascend INT4 KV cache currently supports eager execution only. "
+            "Set --enforce-eager; ACL graph capture is not yet supported."
+        )

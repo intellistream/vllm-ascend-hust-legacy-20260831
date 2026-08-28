@@ -46,28 +46,32 @@ def _make_mock_module(name, attrs=None):
     return mod
 
 
-_mock_torch_npu = _make_mock_module("torch_npu", attrs={
-    "is_available": MagicMock(return_value=False),
-    "Event": MagicMock(),
-    "Stream": MagicMock(),
-    "current_stream": MagicMock(return_value=MagicMock()),
-    "current_device": MagicMock(return_value=0),
-    "synchronize": MagicMock(),
-    "set_device": MagicMock(),
-    "device_count": MagicMock(return_value=0),
-    "mem_get_info": MagicMock(return_value=(0, 0)),
-    "get_device_name": MagicMock(return_value="MockNPU"),
-    "get_device_properties": MagicMock(),
-    "manual_seed_all": MagicMock(),
-    "reset_peak_memory_stats": MagicMock(),
-    "max_memory_allocated": MagicMock(return_value=0),
-    "empty_cache": MagicMock(),
-    "is_current_stream_capturing": MagicMock(return_value=False),
-    "set_compile_mode": MagicMock(),
-})
+_mock_torch_npu = _make_mock_module(
+    "torch_npu",
+    attrs={
+        "is_available": MagicMock(return_value=False),
+        "Event": MagicMock(),
+        "Stream": MagicMock(),
+        "current_stream": MagicMock(return_value=MagicMock()),
+        "current_device": MagicMock(return_value=0),
+        "synchronize": MagicMock(),
+        "set_device": MagicMock(),
+        "device_count": MagicMock(return_value=0),
+        "mem_get_info": MagicMock(return_value=(0, 0)),
+        "get_device_name": MagicMock(return_value="MockNPU"),
+        "get_device_properties": MagicMock(),
+        "manual_seed_all": MagicMock(),
+        "reset_peak_memory_stats": MagicMock(),
+        "max_memory_allocated": MagicMock(return_value=0),
+        "empty_cache": MagicMock(),
+        "is_current_stream_capturing": MagicMock(return_value=False),
+        "set_compile_mode": MagicMock(),
+    },
+)
 sys.modules["torch_npu"] = _mock_torch_npu
 
 import torch  # noqa: E402
+
 torch.npu = _mock_torch_npu
 
 # Mock torchaudio to avoid libcudart.so loading errors
@@ -75,14 +79,23 @@ sys.modules["torchaudio"] = _make_mock_module("torchaudio")
 
 import pytest  # noqa: E402
 
-from vllm_ascend.quantization.kv_cache_utils import (
+from vllm_ascend.quantization.kv_cache_utils import (  # noqa: E402
     get_kv_cache_scheme,
     setup_kv_cache_quant,
+    validate_kv_cache_quant_config,
 )
-from vllm_ascend.quantization.methods.kv_int4 import AscendKVCacheInt4Method
-from vllm_ascend.quantization.methods.kv_nvfp4 import AscendKVCacheNVFP4Method
-from vllm_ascend.quantization.methods.kv_fp8_e4m3 import AscendKVCacheFP8E4M3Method
-from vllm_ascend.quantization.methods.kv_fp4_e2m1 import AscendKVCacheFP4E2M1Method
+from vllm_ascend.quantization.methods.kv_fp4_e2m1 import (  # noqa: E402
+    AscendKVCacheFP4E2M1Method,
+)
+from vllm_ascend.quantization.methods.kv_fp8_e4m3 import (  # noqa: E402
+    AscendKVCacheFP8E4M3Method,
+)
+from vllm_ascend.quantization.methods.kv_int4 import (  # noqa: E402
+    AscendKVCacheInt4Method,
+)
+from vllm_ascend.quantization.methods.kv_nvfp4 import (  # noqa: E402
+    AscendKVCacheNVFP4Method,
+)
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -100,7 +113,6 @@ def _make_layer():
 
 
 class TestAscendKVCacheInt4Method:
-
     def test_create_weights_sets_uint8_dtype(self):
         layer = _make_layer()
         scheme = AscendKVCacheInt4Method()
@@ -144,7 +156,6 @@ class TestAscendKVCacheInt4Method:
 
 
 class TestAscendKVCacheNVFP4Method:
-
     def test_create_weights_sets_uint8_dtype(self):
         layer = _make_layer()
         scheme = AscendKVCacheNVFP4Method()
@@ -186,7 +197,6 @@ class TestAscendKVCacheNVFP4Method:
 
 
 class TestAscendKVCacheFP8E4M3Method:
-
     def test_create_weights_sets_fp8_dtype(self):
         layer = _make_layer()
         scheme = AscendKVCacheFP8E4M3Method()
@@ -229,7 +239,6 @@ class TestAscendKVCacheFP8E4M3Method:
 
 
 class TestAscendKVCacheFP4E2M1Method:
-
     def test_create_weights_sets_uint8_dtype(self):
         layer = _make_layer()
         scheme = AscendKVCacheFP4E2M1Method()
@@ -271,15 +280,17 @@ class TestAscendKVCacheFP4E2M1Method:
 
 
 class TestKVCacheUtils:
-
     # -- get_kv_cache_scheme -------------------------------------------------
 
-    @pytest.mark.parametrize("dtype,expected_cls", [
-        ("int4", AscendKVCacheInt4Method),
-        ("nvfp4", AscendKVCacheNVFP4Method),
-        ("fp8_e4m3", AscendKVCacheFP8E4M3Method),
-        ("fp4_e2m1", AscendKVCacheFP4E2M1Method),
-    ])
+    @pytest.mark.parametrize(
+        "dtype,expected_cls",
+        [
+            ("int4", AscendKVCacheInt4Method),
+            ("nvfp4", AscendKVCacheNVFP4Method),
+            ("fp8_e4m3", AscendKVCacheFP8E4M3Method),
+            ("fp4_e2m1", AscendKVCacheFP4E2M1Method),
+        ],
+    )
     def test_get_kv_cache_scheme_returns_correct_type(self, dtype, expected_cls):
         """For each known dtype string, ``get_kv_cache_scheme`` returns a
         non-None instance of the correct handler class."""
@@ -332,3 +343,22 @@ class TestKVCacheUtils:
         layer = _make_layer()
         setup_kv_cache_quant(layer, "")
         assert not hasattr(layer, "kv_cache_torch_dtype")
+
+    def test_int4_config_requires_eager_execution(self):
+        config = types.SimpleNamespace(
+            cache_config=types.SimpleNamespace(cache_dtype="int4"),
+            model_config=types.SimpleNamespace(enforce_eager=False),
+            compilation_config=types.SimpleNamespace(cudagraph_mode=types.SimpleNamespace(name="FULL_DECODE_ONLY")),
+        )
+
+        with pytest.raises(ValueError, match="supports eager execution only"):
+            validate_kv_cache_quant_config(config)
+
+    def test_int4_config_accepts_eager_without_graph_capture(self):
+        config = types.SimpleNamespace(
+            cache_config=types.SimpleNamespace(cache_dtype="int4"),
+            model_config=types.SimpleNamespace(enforce_eager=True),
+            compilation_config=types.SimpleNamespace(cudagraph_mode=types.SimpleNamespace(name="NONE")),
+        )
+
+        validate_kv_cache_quant_config(config)

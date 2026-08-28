@@ -685,6 +685,12 @@ class NPUPlatform(Platform):
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+        from vllm_ascend.quantization.kv_cache_utils import (
+            validate_kv_cache_quant_config,
+        )
+
+        validate_kv_cache_quant_config(vllm_config)
+
         # Recompute cudagraph sizes after Ascend-specific compatibility updates.
         # The platform default max is injected earlier via
         # `apply_config_platform_defaults`, so this late pass should only honor

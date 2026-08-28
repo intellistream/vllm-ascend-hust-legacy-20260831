@@ -32,13 +32,16 @@ Tests are skipped when no NPU is available.
 """
 
 import itertools
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 torch_npu = pytest.importorskip("torch_npu")
 
+from vllm_ascend.attention import attention_v1  # noqa: E402
 from vllm_ascend.attention.attention_v1 import (  # noqa: E402
+    AscendAttentionState,
     AscendInt4AttentionBackendImpl,
 )
 
@@ -256,11 +259,16 @@ def test_decode_append_mutates_cache_and_keeps_prefill(device):
     assert cos2 > 0.9, f"decode-path attention cosine too low: {cos2:.4f}"
 
 
-def test_multi_step_decode_caches_each_new_token(device):
+def test_multi_step_decode_caches_each_new_token(device, monkeypatch):
     """Multi-step decode: every newly decoded K/V token is cached and later
     decode steps attend to the full extended sequence (prefill + all prior
     decode tokens).  This is the exact paired-head contract that was broken
     when ``forward`` skipped the write path for ``DecodeOnly``."""
+    monkeypatch.setattr(
+        attention_v1,
+        "_EXTRA_CTX",
+        SimpleNamespace(capturing=False),
+    )
     backend = _make_backend(device)
     mask = _make_mask(device)
     seq_lens = [37, 23, 51]
@@ -319,16 +327,33 @@ def test_multi_step_decode_caches_each_new_token(device):
             key_all[i] = torch.cat([key_all[i], k_dec[i : i + 1]], dim=0)
             value_all[i] = torch.cat([value_all[i], v_dec[i : i + 1]], dim=0)
 
-        kp, vp, ks, vs = backend._quantize_kv_to_int4(k_dec, v_dec, bsz)
+        q_dec = (
+            torch.randn(
+                bsz,
+                _NUM_HEADS,
+                _HEAD_SIZE,
+                generator=rng,
+                device=device,
+            )
+            * 0.5
+        ).to(_DTYPE)
         harness_step = _Harness(
             slot_mapping=_next_slots(cur_lens),
             num_actual_tokens=bsz,
             block_tables=block_table_pad,
             seq_lens_list=[s + step + 1 for s in seq_lens],
             attn_mask=mask,
-            attn_state=None,
+            attn_state=AscendAttentionState.DecodeOnly,
         )
-        backend._reshape_and_cache_int4(kp, vp, ks, vs, harness_step)
+        actual = backend.forward(
+            layer=None,
+            query=q_dec,
+            key=k_dec,
+            value=v_dec,
+            kv_cache=(backend.key_cache, backend.value_cache),
+            attn_metadata=harness_step,
+            output=torch.empty_like(q_dec),
+        )
 
         # Dequantize the full extended sequence and compare to the ideal dense
         # stack in the same per-sequence (block-major) order.
@@ -344,10 +369,8 @@ def test_multi_step_decode_caches_each_new_token(device):
         assert v_cos > 0.99, f"step {step}: V reconstruction cosine too low: {v_cos:.4f}"
 
         # Decode attention over the extended sequence matches the bf16 reference.
-        q_dec = (torch.randn(bsz, _NUM_HEADS, _HEAD_SIZE, generator=rng, device=device) * 0.5).to(_DTYPE)
         cu2 = torch.tensor(list(itertools.accumulate(seq_lens_full)), dtype=torch.int32, device=device)
         q_cu = torch.arange(1, bsz + 1, dtype=torch.int32, device=device)
         ref2 = _fia_dense(q_dec, key_full, value_full, mask, q_cu, cu2, device)
-        out2 = _fia_dense(q_dec, dk.to(_DTYPE), dv.to(_DTYPE), mask, q_cu, cu2, device)
-        cos2 = _cosine(out2, ref2)
+        cos2 = _cosine(actual, ref2)
         assert cos2 > 0.9, f"step {step}: decode-path attention cosine too low: {cos2:.4f}"
