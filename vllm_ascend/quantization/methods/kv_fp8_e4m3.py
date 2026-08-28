@@ -17,7 +17,6 @@
 """FP8 E4M3 KV cache quantization for dense-attention models."""
 
 import torch
-
 from vllm.logger import init_logger
 
 from .base import AscendAttentionScheme
