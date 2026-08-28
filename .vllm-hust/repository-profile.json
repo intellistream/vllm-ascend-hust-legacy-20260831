@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "canonical_registry": "https://github.com/vLLM-HUST/vllm-hust-docs/tree/codex/ecosystem-architecture-reorganization/registry",
+  "repository": "https://github.com/vLLM-HUST/vllm-ascend-hust",
+  "repository_role": "platform_profile",
+  "relation_to_runtime": "implements_core_contracts",
+  "lifecycle": "supported",
+  "artifacts": [
+    {
+      "id": "vllm-ascend-platform-profile",
+      "artifact_type": "platform_profile",
+      "system_role": "platform_backend",
+      "delivery_model": "platform_distribution",
+      "execution_planes": ["worker", "native", "device"],
+      "integration_contracts": [
+        "vllm.platform.v1",
+        "vllm.operator.v1",
+        "vllm.model_runner.v1"
+      ]
+    }
+  ],
+  "system_boundaries": {
+    "is": [
+      "the HUST-maintained Ascend platform integration profile paired with vllm-hust",
+      "a coordinated distribution of Python, native, operator, worker, and device components"
+    ],
+    "is_not": [
+      "the vLLM runtime core or owner of generic domain contracts",
+      "a single universal plugin callback",
+      "an external KV state system or control plane"
+    ]
+  },
+  "validation": [
+    "bash format.sh ci",
+    "pytest -sv tests/ut/",
+    "run declared tests/e2e coverage on supported Ascend hardware"
+  ],
+  "compatibility_document": "upstream_version.json"
+}

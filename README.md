@@ -60,6 +60,17 @@ and managed NPU service workflows:
 The plugin should stay thin where possible. Core vLLM behavior belongs in
 `vllm-hust`; Ascend-only runtime behavior belongs here.
 
+## Ecosystem classification
+
+This repository is a multi-component Ascend platform profile, not one generic
+runtime callback. It packages platform discovery, workers, model runners,
+operators, native code, device capabilities, compatibility metadata, and the
+legacy entry-point delivery shim used during migration. The stable domain
+contracts remain owned by `vllm-hust`.
+
+The machine-readable boundary and validation declaration is
+[`.vllm-hust/repository-profile.json`](./.vllm-hust/repository-profile.json).
+
 ## Repository Map
 
 | Path | Purpose |
