@@ -21,6 +21,7 @@ from typing import Any
 
 import torch
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+from vllm.platforms import current_platform
 
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.device_allocator.sleep_mem_optimized import (
@@ -35,6 +36,8 @@ class C8GraphResetWorkerExtension:
         wrappers = list(ACLGraphWrapper._all_instances)
         entries_before = sum(len(wrapper.concrete_aclgraph_entries) for wrapper in wrappers)
         graph_objects_reset = 0
+        graph_pool_rebound = False
+        old_graph_pool_count = len({repr(wrapper.graph_pool) for wrapper in wrappers})
         reset_error = None
 
         set_cudagraph_capturing_enabled(False)
@@ -49,12 +52,25 @@ class C8GraphResetWorkerExtension:
                         continue
                     entry.aclgraph.reset()
                     graph_objects_reset += 1
+            if not wrappers or entries_before == 0:
+                raise RuntimeError("no captured ACL graphs were available for reset")
+            if graph_objects_reset != entries_before:
+                raise RuntimeError("not every captured ACL graph entry held a releasable graph object")
 
             AclGraphSleepWakeupManager.clear_all_attention_workspaces()
             AclGraphSleepWakeupManager.reset_all_graph_params()
             AclGraphSleepWakeupManager.reset_model_runner_graph_manager(self.model_runner)
             gc.collect()
             torch.npu.empty_cache()
+
+            old_graph_pools = [wrapper.graph_pool for wrapper in wrappers]
+            fresh_graph_pool = current_platform.graph_pool_handle()
+            if any(fresh_graph_pool == old_pool for old_pool in old_graph_pools):
+                raise RuntimeError("the replacement ACL graph pool is not fresh")
+            current_platform.__class__._global_graph_pool = fresh_graph_pool
+            for wrapper in wrappers:
+                wrapper.graph_pool = fresh_graph_pool
+            graph_pool_rebound = all(wrapper.graph_pool == fresh_graph_pool for wrapper in wrappers)
         except Exception as exc:  # pragma: no cover - exercised on real runtime
             reset_error = f"{type(exc).__name__}: {exc}"
         torch.accelerator.synchronize()
@@ -67,6 +83,7 @@ class C8GraphResetWorkerExtension:
                 and entries_before > 0
                 and graph_objects_reset == entries_before
                 and entries_after == 0
+                and graph_pool_rebound
                 and reset_error is None
             )
             else "FAIL"
@@ -74,12 +91,14 @@ class C8GraphResetWorkerExtension:
         capture_enabled = status == "PASS"
         set_cudagraph_capturing_enabled(capture_enabled)
         return {
-            "schema_version": "vllm-ascend-c8-graph-reset/v2",
+            "schema_version": "vllm-ascend-c8-graph-reset/v3",
             "status": status,
             "wrapper_count": len(wrappers),
             "graph_entries_before": entries_before,
             "graph_objects_reset": graph_objects_reset,
             "graph_entries_after": entries_after,
+            "old_graph_pool_count": old_graph_pool_count,
+            "graph_pool_rebound": graph_pool_rebound,
             "reset_error": reset_error,
             "cudagraph_capturing_enabled_after": capture_enabled,
             "caller_precondition": "engine idle with no in-flight requests",

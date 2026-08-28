@@ -26,6 +26,7 @@ class _FakeWrapper:
     def __init__(self, entries: int) -> None:
         self.concrete_aclgraph_entries = {key: MagicMock(aclgraph=MagicMock()) for key in range(entries)}
         self.first_run_finished = True
+        self.graph_pool = (1, 1)
 
     def clear_graphs(self) -> None:
         self.concrete_aclgraph_entries.clear()
@@ -40,12 +41,15 @@ def test_reset_c8_acl_graphs_for_profiling(monkeypatch) -> None:
     reset_model_runner = MagicMock()
     collect = MagicMock()
     empty_cache = MagicMock()
+    platform = type("FakePlatform", (), {"_global_graph_pool": (1, 1)})()
+    platform.graph_pool_handle = MagicMock(return_value=(2, 2))
     extension = C8GraphResetWorkerExtension()
     extension.model_runner = MagicMock()
     monkeypatch.setattr(ACLGraphWrapper, "_all_instances", wrappers)
     monkeypatch.setattr("torch.accelerator.synchronize", synchronize)
     monkeypatch.setattr("torch.npu.empty_cache", empty_cache)
     monkeypatch.setattr("vllm_ascend.profiler.c8_graph_reset.gc.collect", collect)
+    monkeypatch.setattr("vllm_ascend.profiler.c8_graph_reset.current_platform", platform)
     monkeypatch.setattr(
         "vllm_ascend.profiler.c8_graph_reset.AclGraphSleepWakeupManager.clear_all_attention_workspaces",
         clear_workspaces,
@@ -71,6 +75,8 @@ def test_reset_c8_acl_graphs_for_profiling(monkeypatch) -> None:
     assert report["graph_entries_before"] == 5
     assert report["graph_objects_reset"] == 5
     assert report["graph_entries_after"] == 0
+    assert report["old_graph_pool_count"] == 1
+    assert report["graph_pool_rebound"] is True
     assert report["reset_error"] is None
     assert report["cudagraph_capturing_enabled_after"] is True
     assert synchronize.call_count == 2
@@ -81,6 +87,9 @@ def test_reset_c8_acl_graphs_for_profiling(monkeypatch) -> None:
     reset_model_runner.assert_called_once_with(extension.model_runner)
     collect.assert_called_once_with()
     empty_cache.assert_called_once_with()
+    platform.graph_pool_handle.assert_called_once_with()
+    assert platform.__class__._global_graph_pool == (2, 2)
+    assert all(wrapper.graph_pool == (2, 2) for wrapper in wrappers)
     assert [call.args[0] for call in set_capture.call_args_list] == [False, True]
 
 
@@ -117,6 +126,8 @@ def test_reset_fails_closed_without_captured_graph(monkeypatch) -> None:
     assert report["graph_entries_before"] == 0
     assert report["graph_objects_reset"] == 0
     assert report["graph_entries_after"] == 0
+    assert report["graph_pool_rebound"] is False
+    assert report["reset_error"] == ("RuntimeError: no captured ACL graphs were available for reset")
     assert report["cudagraph_capturing_enabled_after"] is False
     assert synchronize.call_count == 2
     assert [call.args[0] for call in set_capture.call_args_list] == [False, False]
@@ -139,6 +150,7 @@ def test_reset_fails_closed_when_graph_release_raises(monkeypatch) -> None:
 
     assert report["status"] == "FAIL"
     assert report["graph_entries_after"] == 1
+    assert report["graph_pool_rebound"] is False
     assert report["reset_error"] == "RuntimeError: release failed"
     assert report["cudagraph_capturing_enabled_after"] is False
     assert [call.args[0] for call in set_capture.call_args_list] == [False, False]
@@ -176,6 +188,9 @@ def test_reset_fails_closed_when_a_graph_object_is_missing(monkeypatch) -> None:
     assert report["status"] == "FAIL"
     assert report["graph_entries_before"] == 2
     assert report["graph_objects_reset"] == 1
+    assert report["graph_entries_after"] == 2
+    assert report["graph_pool_rebound"] is False
+    assert report["reset_error"] == ("RuntimeError: not every captured ACL graph entry held a releasable graph object")
     assert report["cudagraph_capturing_enabled_after"] is False
     assert [call.args[0] for call in set_capture.call_args_list] == [False, False]
 
