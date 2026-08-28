@@ -96,9 +96,7 @@ class ProfilingChunkScheduler(Scheduler):
             max_fit_chunk=profiling_cfg.max_fit_chunk,
         )
         self._profiling_initialized = False
-        self.victim_selector = get_ascend_victim_selector(
-            vllm_config, self.victim_selector
-        )
+        self.victim_selector = get_ascend_victim_selector(vllm_config, self.victim_selector)
 
         logger.info(
             "[ProfilingChunk] Scheduler initialized. base_chunk=%d, page_size=%d, smooth_factor=%.2f, min_chunk=%d",

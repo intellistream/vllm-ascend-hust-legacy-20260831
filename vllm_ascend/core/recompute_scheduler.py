@@ -114,9 +114,7 @@ class RecomputeScheduler(Scheduler):
             "qwen3_next" in self.vllm_config.model_config.hf_text_config.model_type
             or "qwen3_5" in self.vllm_config.model_config.hf_text_config.model_type
         )
-        self.victim_selector = get_ascend_victim_selector(
-            self.vllm_config, self.victim_selector
-        )
+        self.victim_selector = get_ascend_victim_selector(self.vllm_config, self.victim_selector)
 
     def _is_kv_consumer_recompute_path(self) -> bool:
         transfer_config = self.vllm_config.kv_transfer_config

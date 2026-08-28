@@ -158,9 +158,7 @@ class SchedulerDynamicBatch(Scheduler):
             default_budget=self.scheduler_config.max_num_batched_tokens,
             slo_limit=self.scheduler_config.SLO_limits_for_dynamic_batch,
         )
-        self.victim_selector = get_ascend_victim_selector(
-            vllm_config, self.victim_selector
-        )
+        self.victim_selector = get_ascend_victim_selector(vllm_config, self.victim_selector)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE: This scheduling algorithm is developed based on the "super.schedule()"

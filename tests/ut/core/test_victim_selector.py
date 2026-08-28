@@ -36,24 +36,18 @@ def _make_request(
 class TestUnifiedVictimSelector:
     def test_explicit_core_plugin_is_preserved(self):
         core_selector = object()
-        config = SimpleNamespace(
-            additional_config={"victim_selector_plugin": "bidkv"}
-        )
+        config = SimpleNamespace(additional_config={"victim_selector_plugin": "bidkv"})
 
         assert get_ascend_victim_selector(config, core_selector) is core_selector
 
     def test_explicit_core_plugin_disable_is_preserved(self):
         core_selector = NoOpVictimSelector()
-        config = SimpleNamespace(
-            additional_config={"victim_selector_plugin_disabled": True}
-        )
+        config = SimpleNamespace(additional_config={"victim_selector_plugin_disabled": True})
 
         assert get_ascend_victim_selector(config, core_selector) is core_selector
 
     def test_legacy_ascend_selector_remains_default(self):
-        selector = get_ascend_victim_selector(
-            SimpleNamespace(additional_config={}), NoOpVictimSelector()
-        )
+        selector = get_ascend_victim_selector(SimpleNamespace(additional_config={}), NoOpVictimSelector())
 
         assert isinstance(selector, UnifiedVictimSelector)
 

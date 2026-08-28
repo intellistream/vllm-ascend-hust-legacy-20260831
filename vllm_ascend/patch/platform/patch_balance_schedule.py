@@ -82,9 +82,7 @@ class BalanceScheduler(Scheduler):
                 torch.tensor([0], dtype=torch.int, device="cpu")
                 for _ in range(self.vllm_config.parallel_config.data_parallel_size)
             ]
-        self.victim_selector = get_ascend_victim_selector(
-            vllm_config, self.victim_selector
-        )
+        self.victim_selector = get_ascend_victim_selector(vllm_config, self.victim_selector)
 
     def balance_gather(self, dp_group):
         if not self._balance_enabled:
