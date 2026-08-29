@@ -48,8 +48,7 @@ class TestStreamResourceCaptureError(TestBase):
             "stream resources are insufficient (207008)",
             "SqCqManage Alloc sq cq fail",
             "ACLNN error 207005 in aclnnMatmulAllReduce",
-            "The inner error is reported above; current operator is aclnnMatmulAllReduce "
-            "(SqCqManage Alloc sq cq fail)",
+            "The inner error is reported above; current operator is aclnnMatmulAllReduce (SqCqManage Alloc sq cq fail)",
         ]
 
         for message in messages:
@@ -93,9 +92,9 @@ class TestACLGraphEntry(TestBase):
         )
 
         self.assertEqual(
-            _acl_graph_profile_marker("replay", CUDAGraphMode.FULL, descriptor),
+            _acl_graph_profile_marker("replay", CUDAGraphMode.FULL, descriptor, wrapper_index=7),
             "vllm_ascend.acl_graph.replay[has_lora=False,num_active_loras=0,"
-            "num_reqs=2,num_tokens=64,runtime_mode=FULL,uniform=True]",
+            "num_reqs=2,num_tokens=64,runtime_mode=FULL,uniform=True,wrapper_index=7]",
         )
 
     def test_aclgraph_entry_initialization(self):
