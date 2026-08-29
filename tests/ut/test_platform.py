@@ -15,6 +15,7 @@ from vllm_ascend.platform import (
     _ensure_ascend_compilation_config_dict,
     _resolve_npu_alloc_conf,
     _sync_npugraph_ex_to_additional_config,
+    prune_capture_sizes_for_mc2,
 )
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
@@ -239,6 +240,55 @@ class TestNPUPlatform(TestBase):
         self.platform.apply_config_platform_defaults(vllm_config)
 
         self.assertIsNone(vllm_config.compilation_config.max_cudagraph_capture_size)
+
+    def test_prune_capture_sizes_for_mc2(self):
+        test_cases = [
+            (list(range(1, 17)), 48, 8, list(range(1, 17))),
+            (list(range(1, 17)) + [32, 64], 48, 16, None),
+            ([1, 2, 3, 4, 8], 384, 3, [1, 2, 3, 8]),
+        ]
+        for sizes, num_layers, max_num_seqs, expected in test_cases:
+            with self.subTest(sizes=sizes, num_layers=num_layers, max_num_seqs=max_num_seqs):
+                vllm_config = self.mock_vllm_config()
+                vllm_config.compilation_config.cudagraph_capture_sizes = sizes.copy()
+                vllm_config.compilation_config.max_cudagraph_capture_size = sizes[-1]
+                vllm_config.model_config.hf_text_config.num_hidden_layers = num_layers
+                vllm_config.scheduler_config.max_num_seqs = max_num_seqs
+
+                prune_capture_sizes_for_mc2(vllm_config)
+
+                result = vllm_config.compilation_config.cudagraph_capture_sizes
+                if expected is not None:
+                    self.assertEqual(result, expected)
+                else:
+                    self.assertEqual(len(result), 16)
+                    self.assertEqual(result[-1], 64)
+                    self.assertTrue(all(size <= 16 for size in result[:-1]))
+
+    def test_prune_capture_sizes_for_mc2_keeps_dense_region_and_largest_tail(self):
+        vllm_config = self.mock_vllm_config()
+        sizes = list(range(1, 9)) + list(range(16, 145, 8))
+        vllm_config.compilation_config.cudagraph_capture_sizes = sizes.copy()
+        vllm_config.compilation_config.max_cudagraph_capture_size = sizes[-1]
+        vllm_config.model_config.hf_text_config.num_hidden_layers = 48
+        vllm_config.scheduler_config.max_num_seqs = 8
+
+        prune_capture_sizes_for_mc2(vllm_config)
+
+        result = vllm_config.compilation_config.cudagraph_capture_sizes
+        self.assertEqual(len(result), 16)
+        self.assertEqual(result[:8], list(range(1, 9)))
+        self.assertEqual(result[-1], sizes[-1])
+
+    def test_prune_capture_sizes_for_mc2_skips_unknown_layer_count(self):
+        vllm_config = self.mock_vllm_config()
+        sizes = list(range(1, 33))
+        vllm_config.compilation_config.cudagraph_capture_sizes = sizes.copy()
+        vllm_config.model_config.hf_text_config.num_hidden_layers = 0
+
+        prune_capture_sizes_for_mc2(vllm_config)
+
+        self.assertEqual(vllm_config.compilation_config.cudagraph_capture_sizes, sizes)
 
     @patch("vllm_ascend.platform.refresh_block_size")
     @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)
