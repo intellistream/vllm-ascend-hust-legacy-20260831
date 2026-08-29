@@ -1469,7 +1469,11 @@ class InplaceSplitRunner:
                         _rm = getattr(
                             metadata.context.batch_descriptor,
                             "runtime_metadata", None)
-                        if (int(_rm.token_offset) > 0
+                        # The main split slice has no runtime_metadata; only
+                        # offset descriptors (token_offset > 0) carry the
+                        # pre-captured-graph invariant checked below.
+                        if (_rm is not None
+                                and int(_rm.token_offset) > 0
                                 and metadata.context.cudagraph_runtime_mode
                                 == CUDAGraphMode.FULL
                                 and not self._has_aclgraph_for_context(
