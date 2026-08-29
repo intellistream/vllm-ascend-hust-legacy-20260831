@@ -1,4 +1,5 @@
 import importlib
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -63,6 +64,7 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.enable_mc2_hierarchy_comm = False
         mock_ascend_config.enable_fused_mc2 = False
         mock_ascend_config.enable_flashcomm1 = False
+        mock_ascend_config.enable_layered_prefill = False
         mock_ascend_config.SLO_limits_for_dynamic_batch = -1
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.update_compile_ranges_split_points = MagicMock()
@@ -553,6 +555,77 @@ class TestNPUPlatform(TestBase):
             self.platform.check_and_update_config(vllm_config)
 
         self.assertTrue("Model config is missing" in cm.output[0])
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_qwen2_keeps_graph_with_native_rope_by_default(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_init_recompute.return_value = MagicMock()
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.architectures = ["Qwen2ForCausalLM"]
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+        vllm_config.scheduler_config = MagicMock()
+
+        with patch.dict(os.environ, {}, clear=True):
+            from vllm_ascend import platform
+
+            importlib.reload(platform)
+            self.platform = platform.NPUPlatform()
+
+            with (
+                self.assertLogs(logger="vllm", level="WARNING") as cm,
+                patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+            ):
+                self.platform.check_and_update_config(vllm_config)
+
+        self.assertTrue(
+            any("Using native rotary fallback for Qwen2ForCausalLM on NPU" in log for log in cm.output),
+            cm.output,
+        )
+        self.assertFalse(vllm_config.model_config.enforce_eager)
+        self.assertEqual(vllm_config.compilation_config.mode, CompilationMode.VLLM_COMPILE)
+        self.assertEqual(vllm_config.compilation_config.cudagraph_mode, CUDAGraphMode.FULL)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_qwen2_disables_graph_without_safe_rope_or_unsafe_opt_in(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_init_recompute.return_value = MagicMock()
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.architectures = ["Qwen2ForCausalLM"]
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+        vllm_config.scheduler_config = MagicMock()
+
+        with patch.dict(os.environ, {"VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE": "0"}, clear=True):
+            from vllm_ascend import platform
+
+            importlib.reload(platform)
+            self.platform = platform.NPUPlatform()
+
+            with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
+                self.platform.check_and_update_config(vllm_config)
+
+        self.assertTrue(vllm_config.model_config.enforce_eager)
+        self.assertEqual(vllm_config.compilation_config.mode, CompilationMode.NONE)
+        self.assertEqual(vllm_config.compilation_config.cudagraph_mode, CUDAGraphMode.NONE)
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
