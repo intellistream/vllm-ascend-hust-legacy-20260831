@@ -1,4 +1,5 @@
 import unittest
+from contextlib import contextmanager
 from unittest.mock import MagicMock, Mock, patch
 
 import torch
@@ -744,11 +745,131 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
             (torch.zeros(2, num_kv_heads, 1, head_size), None),
             (torch.zeros(3, num_kv_heads, head_size), None),
         ]
+        profile_regions = []
 
-        impl._forward_c8_chunked_prefill(query, float_key, float_value, attn_metadata, output, layer)
+        @contextmanager
+        def record_region(name):
+            profile_regions.append(name)
+            yield
+
+        with patch(
+            "vllm_ascend.attention.attention_v1.record_function_or_nullcontext",
+            side_effect=record_region,
+        ):
+            impl._forward_c8_chunked_prefill(query, float_key, float_value, attn_metadata, output, layer)
 
         recorded_queries = [call.kwargs["query"] for call in impl._record_c8_dispatch.call_args_list]
         self.assertEqual([item.shape[0] for item in recorded_queries], [2, 3])
+        self.assertEqual(profile_regions, [])
+
+    @patch("vllm_ascend.attention.attention_v1.torch_npu.npu_fused_infer_attention_score")
+    def test_chunked_cached_prefill_profiles_dense_fallback_regions(self, mock_fia):
+        num_kv_heads, head_size, block_size = 2, 32, 32
+        impl = self._make_impl(num_kv_heads, head_size)
+        impl.key_cache = torch.zeros(3, block_size, num_kv_heads, head_size, dtype=torch.int8)
+        impl.value_cache = torch.zeros_like(impl.key_cache)
+        impl._record_c8_dispatch = MagicMock()
+        query = torch.zeros(5, num_kv_heads, head_size)
+        output = torch.empty_like(query)
+        layer = Mock(layer_name="model.layers.0.self_attn")
+        layer._c8_k_aq_scale_nz_bnsd = torch.ones(num_kv_heads, 1, head_size)
+        layer._c8_v_aq_scale_nz_bnsd = torch.ones(num_kv_heads, 1, head_size)
+        layer._c8_k_scale = torch.ones(1, num_kv_heads, head_size)
+        layer._c8_v_scale = torch.ones(1, num_kv_heads, head_size)
+        attn_metadata = Mock(
+            num_decode_tokens=2,
+            num_decodes=2,
+            num_prefills=1,
+            actual_seq_lengths_q=[1, 2, 5],
+            seq_lens_list=[1, 1, 4],
+            block_tables=torch.tensor([[0], [1], [2]]),
+            attn_mask=None,
+        )
+        mock_fia.side_effect = [
+            (torch.zeros(2, num_kv_heads, 1, head_size), None),
+            (torch.zeros(3, num_kv_heads, head_size), None),
+        ]
+        profile_regions = []
+
+        @contextmanager
+        def record_region(name):
+            profile_regions.append(name)
+            yield
+
+        with patch(
+            "vllm_ascend.attention.attention_v1.record_function_or_nullcontext",
+            side_effect=record_region,
+        ):
+            impl._forward_c8_chunked_prefill(query, None, None, attn_metadata, output, layer)
+
+        prefix = "vllm_ascend.c8.continuing_prefill"
+        self.assertEqual(
+            profile_regions,
+            [
+                f"{prefix}.segment",
+                f"{prefix}.paged_kv_gather",
+                f"{prefix}.nz_to_nd",
+                f"{prefix}.padding_filter",
+                f"{prefix}.cast_scale",
+                f"{prefix}.dense_tnd_fia",
+            ],
+        )
+
+    @patch("vllm_ascend.attention.attention_v1.torch_npu.npu_fused_infer_attention_score")
+    def test_prefill_cache_hit_profiles_dense_fallback_regions(self, mock_fia):
+        from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+        num_kv_heads, head_size, block_size = 2, 32, 32
+        impl = self._make_impl(num_kv_heads, head_size)
+        impl.key_cache = torch.zeros(2, block_size, num_kv_heads, head_size, dtype=torch.int8)
+        impl.value_cache = torch.zeros_like(impl.key_cache)
+        impl._record_c8_dispatch = MagicMock()
+        query = torch.zeros(3, num_kv_heads, head_size)
+        output = torch.empty_like(query)
+        layer = Mock(layer_name="model.layers.0.self_attn")
+        layer._c8_k_scale = torch.ones(1, num_kv_heads, head_size)
+        layer._c8_v_scale = torch.ones(1, num_kv_heads, head_size)
+        attn_metadata = Mock(
+            attn_state=AscendAttentionState.PrefillCacheHit,
+            actual_seq_lengths_q=[3],
+            seq_lens=torch.tensor([4]),
+            seq_lens_list=[4],
+            block_tables=torch.tensor([[1]]),
+            attn_mask=None,
+        )
+        mock_fia.return_value = (torch.zeros_like(query), None)
+        profile_regions = []
+
+        @contextmanager
+        def record_region(name):
+            profile_regions.append(name)
+            yield
+
+        with patch(
+            "vllm_ascend.attention.attention_v1.record_function_or_nullcontext",
+            side_effect=record_region,
+        ):
+            impl._forward_c8_fused_infer_attention(
+                query,
+                torch.empty_like(query, dtype=torch.int8),
+                torch.empty_like(query, dtype=torch.int8),
+                attn_metadata,
+                output,
+                layer,
+            )
+
+        prefix = "vllm_ascend.c8.continuing_prefill"
+        self.assertEqual(
+            profile_regions,
+            [
+                f"{prefix}.segment",
+                f"{prefix}.paged_kv_gather",
+                f"{prefix}.nz_to_nd",
+                f"{prefix}.padding_filter",
+                f"{prefix}.cast_scale",
+                f"{prefix}.dense_tnd_fia",
+            ],
+        )
 
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_rank", return_value=0)
     @patch("vllm_ascend.attention.attention_v1.get_tensor_model_parallel_world_size", return_value=1)
@@ -842,13 +963,34 @@ class TestAscendC8AttentionBackendImplScales(TestBase):
         seq_lens = [32, 32]
         block_table = torch.tensor([[0], [1]], dtype=torch.long)
 
-        dense_k, dense_v = impl._dequant_paged_kv_to_dense(
-            key_int8, value_int8, block_table, seq_lens, torch.float32, layer
-        )
+        profile_regions = []
+
+        @contextmanager
+        def record_region(name):
+            profile_regions.append(name)
+            yield
+
+        with patch(
+            "vllm_ascend.attention.attention_v1.record_function_or_nullcontext",
+            side_effect=record_region,
+        ):
+            dense_k, dense_v = impl._dequant_paged_kv_to_dense(
+                key_int8, value_int8, block_table, seq_lens, torch.float32, layer
+            )
         # Convert NZ 5D to ND 3D for expected comparison
         expected_k = key_int8.permute(0, 3, 1, 2, 4).contiguous().view(-1, num_kv_heads, head_size).float()
         self.assertEqual(dense_k.shape, (64, num_kv_heads, head_size))
         self.assertTrue(torch.allclose(dense_k, expected_k))
+        prefix = "vllm_ascend.c8.continuing_prefill"
+        self.assertEqual(
+            profile_regions,
+            [
+                f"{prefix}.paged_kv_gather",
+                f"{prefix}.nz_to_nd",
+                f"{prefix}.padding_filter",
+                f"{prefix}.cast_scale",
+            ],
+        )
 
 
 if __name__ == "__main__":

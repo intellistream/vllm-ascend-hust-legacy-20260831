@@ -19,6 +19,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
+from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
@@ -59,6 +60,24 @@ def _iter_exception_messages(exc: BaseException):
         seen.add(id(current))
         yield str(current)
         current = current.__context__ or current.__cause__
+
+
+def _acl_graph_profile_marker(
+    phase: str,
+    runtime_mode: CUDAGraphMode,
+    descriptor: BatchDescriptor,
+    wrapper_index: int,
+) -> str:
+    return (
+        f"vllm_ascend.acl_graph.{phase}["
+        f"has_lora={descriptor.has_lora},"
+        f"num_active_loras={descriptor.num_active_loras},"
+        f"num_reqs={descriptor.num_reqs},"
+        f"num_tokens={descriptor.num_tokens},"
+        f"runtime_mode={runtime_mode.name},"
+        f"uniform={descriptor.uniform},"
+        f"wrapper_index={wrapper_index}]"
+    )
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -125,6 +144,7 @@ class ACLGraphWrapper:
     """
 
     _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
+    _next_profile_index: ClassVar[int] = 0
 
     @classmethod
     def clear_all_graphs(cls) -> None:
@@ -163,6 +183,8 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        self.profile_index = ACLGraphWrapper._next_profile_index
+        ACLGraphWrapper._next_profile_index += 1
         _acl_graph_wrappers.add(self)
 
         ACLGraphWrapper._all_instances.add(self)
@@ -223,6 +245,16 @@ class ACLGraphWrapper:
             aclgraph = torch.npu.NPUGraph()
 
             with ExitStack() as stack:
+                stack.enter_context(
+                    record_function_or_nullcontext(
+                        _acl_graph_profile_marker(
+                            "capture",
+                            self.runtime_mode,
+                            entry.batch_descriptor,
+                            self.profile_index,
+                        )
+                    )
+                )
                 if self.aclgraph_options.gc_disable:
                     # during every model forward for piecewise aclgraph
                     # mode, we will capture many pieces of aclgraphs
@@ -307,7 +339,15 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        entry.aclgraph.replay()
+        with record_function_or_nullcontext(
+            _acl_graph_profile_marker(
+                "replay",
+                self.runtime_mode,
+                entry.batch_descriptor,
+                self.profile_index,
+            )
+        ):
+            entry.aclgraph.replay()
         return entry.output
 
 
