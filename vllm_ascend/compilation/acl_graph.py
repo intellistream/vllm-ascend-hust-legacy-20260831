@@ -19,6 +19,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
+from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
@@ -37,6 +38,18 @@ _STREAM_RESOURCE_GUIDANCE = (
     "FULL or FULL_DECODE_ONLY for mostly uniform decode workloads, or "
     "temporarily disabling graph mode to confirm the failure is capture-related."
 )
+
+
+def _acl_graph_profile_marker(phase: str, runtime_mode: CUDAGraphMode, descriptor: BatchDescriptor) -> str:
+    return (
+        f"vllm_ascend.acl_graph.{phase}["
+        f"has_lora={descriptor.has_lora},"
+        f"num_active_loras={descriptor.num_active_loras},"
+        f"num_reqs={descriptor.num_reqs},"
+        f"num_tokens={descriptor.num_tokens},"
+        f"runtime_mode={runtime_mode.name},"
+        f"uniform={descriptor.uniform}]"
+    )
 
 
 def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
@@ -186,6 +199,11 @@ class ACLGraphWrapper:
             aclgraph = torch.npu.NPUGraph()
 
             with ExitStack() as stack:
+                stack.enter_context(
+                    record_function_or_nullcontext(
+                        _acl_graph_profile_marker("capture", self.runtime_mode, entry.batch_descriptor)
+                    )
+                )
                 if self.aclgraph_options.gc_disable:
                     # during every model forward for piecewise aclgraph
                     # mode, we will capture many pieces of aclgraphs
@@ -270,7 +288,10 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        entry.aclgraph.replay()
+        with record_function_or_nullcontext(
+            _acl_graph_profile_marker("replay", self.runtime_mode, entry.batch_descriptor)
+        ):
+            entry.aclgraph.replay()
         return entry.output
 
 
