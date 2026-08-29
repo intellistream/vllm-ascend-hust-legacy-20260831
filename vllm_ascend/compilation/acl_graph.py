@@ -257,12 +257,17 @@ class ACLGraphWrapper:
             )
 
             if start_num_tokens > 0 and not is_inplace_lazy_capture:
-                raise RuntimeError(
-                    f"Offset ACL Graph (start_num_tokens={start_num_tokens}) not found "
-                    f"and lazy capture is not allowed. "
-                    f"BatchDescriptor: {batch_descriptor}"
+                # Fail closed to eager execution: post-startup admission of
+                # an offset key whose per-forward capture preconditions are
+                # not met must never raise or attempt to capture here.
+                logger.warning_once(
+                    "Offset ACL Graph (start_num_tokens=%d) not found and "
+                    "lazy capture is not allowed; falling back to eager "
+                    "execution. BatchDescriptor: %s",
+                    start_num_tokens,
+                    batch_descriptor,
                 )
-
+                return self.runnable(*args, **kwargs)
 
             previous_capture_enabled = compilation_monitor.cudagraph_capturing_enabled
             if is_inplace_lazy_capture:
