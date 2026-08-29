@@ -474,6 +474,43 @@ def _configure_layered_prefill(
     ascend_config.ascend_compilation_config.enable_static_kernel = False
 
 
+class AscendCudagraphKeyStrategy:
+    """Dispatch-time admission policy for split-batch (dual-stream) keys.
+
+    Implements the core ``Platform.get_cudagraph_key_strategy`` contract:
+    core stays neutral and fail-closed, while the plugin owns the admission
+    decision and the capture lifecycle of the keys it admits.
+
+    The checks here mirror the dispatch-time conditions of the wrapper-side
+    ``is_allowed_inplace_lazy_capture`` (``vllm_ascend.compilation.
+    acl_graph_split_batch``). Per-forward flags (split execution mode,
+    lazy-capture opt-in) are re-checked by the ACL graph wrapper before a
+    lazy capture; a strategy-admitted key whose wrapper-side capture
+    preconditions are not met still fails closed to eager inside the
+    wrapper. Offset ACL graphs are captured on first replay under a bounded,
+    synchronized temporary capture window (see
+    ``vllm_ascend.compilation.acl_graph``).
+    """
+
+    _VARIANTS = ("inplace_serial", "inplace_parallel")
+    _BACKEND_TAGS = ("fia", "pa")
+
+    def admit_runtime_key(self, num_tokens: int, runtime_metadata: Any) -> bool:
+        if runtime_metadata is None:
+            return False
+        token_offset = getattr(runtime_metadata, "token_offset", 0)
+        if not isinstance(token_offset, int) or isinstance(token_offset, bool):
+            return False
+        return (
+            token_offset > 0
+            and getattr(runtime_metadata, "variant", "") in self._VARIANTS
+            and getattr(runtime_metadata, "backend_tag", "") in self._BACKEND_TAGS
+        )
+
+
+_ASCEND_CUDAGRAPH_KEY_STRATEGY = AscendCudagraphKeyStrategy()
+
+
 class NPUPlatform(Platform):
     _enum = PlatformEnum.OOT
     device_name: str = "npu"
@@ -492,6 +529,17 @@ class NPUPlatform(Platform):
         FP8_METHOD,
         "deepseek_v4_fp8",
     ]
+
+    @classmethod
+    def get_cudagraph_key_strategy(cls, vllm_config: VllmConfig) -> Any | None:
+        """Split-batch (dual-stream) runtime key admission policy.
+
+        The plugin owns the capture lifecycle of the keys it admits: offset
+        ACL graphs are captured on first replay under a bounded, synchronized
+        temporary capture window, or the wrapper bypasses to eager when the
+        per-forward capture preconditions are not met.
+        """
+        return _ASCEND_CUDAGRAPH_KEY_STRATEGY
 
     def is_sleep_mode_available(self) -> bool:
         # Sleep mode is only usable when camem resolved an ACL memcpy entrypoint.
