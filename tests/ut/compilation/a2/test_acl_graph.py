@@ -47,12 +47,26 @@ class TestStreamResourceCaptureError(TestBase):
             "stream resources are insufficient (207008)",
             "SqCqManage Alloc sq cq fail",
             "ACLNN error 207005 in aclnnMatmulAllReduce",
-            "The inner error is reported above; current operator is aclnnMatmulAllReduce",
+            "The inner error is reported above; current operator is aclnnMatmulAllReduce "
+            "(SqCqManage Alloc sq cq fail)",
         ]
 
         for message in messages:
             with self.subTest(message=message):
                 self.assertTrue(acl_graph._is_stream_resource_capture_error(RuntimeError(message)))
+
+    def test_rejects_mc2_inner_error_without_stream_marker(self):
+        # The MC2 kernel's async "inner error" wrapper also carries real OOM /
+        # illegal-address failures. Without an MC2 stream-exhaustion marker
+        # (207005 or "alloc sq cq fail"/"sqcqmanage") we must NOT re-classify
+        # those as stream-resource exhaustion, which would hide the real root
+        # cause behind misleading capture-size guidance.
+        for message in (
+            "The inner error is reported above; current operator is aclnnMatmulAllReduce",
+            "ACLNN error: out of memory in aclnnMatmulAllReduce (inner error)",
+        ):
+            with self.subTest(message=message):
+                self.assertFalse(acl_graph._is_stream_resource_capture_error(RuntimeError(message)))
 
     def test_walks_exception_cause_chain(self):
         inner = RuntimeError("The current working operator is aclnnMatmulAllReduce")

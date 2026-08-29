@@ -194,7 +194,9 @@ def prune_capture_sizes_for_950(vllm_config):
 # 207005 -> AclmdlRICaptureEnd 507903). Measured on Qwen2.5-14B (48 layers x 2
 # fused ops/layer): 18 distinct sizes capture fine, the 19th fails. Scale the
 # safe count by the per-layer fused-op count (~2 for dense transformers).
-_MC2_CAPTURE_INSTANCE_BUDGET = 1536
+# Override VLLM_ASCEND_MC2_CAPTURE_INSTANCE_BUDGET to tune the driver budget on
+# other hardware/driver/model combinations without touching code.
+_MC2_CAPTURE_INSTANCE_BUDGET = int(os.environ.get("VLLM_ASCEND_MC2_CAPTURE_INSTANCE_BUDGET", "1536"))
 
 
 def _sample_capture_sizes(sizes: list[int], count: int) -> list[int]:
@@ -240,8 +242,8 @@ def prune_capture_sizes_for_mc2(vllm_config):
     pruned_sizes = dense + tail
     update_cudagraph_capture_sizes(vllm_config, pruned_sizes)
     logger.warning(
-        "Pruned ACL graph capture sizes for TP>1 + matmul_allreduce: %d -> %d sizes "
-        "(%d dense decode sizes <= max_num_seqs=%d kept, largest size %d kept). "
+        "Pruned ACL graph capture sizes for TP>1 + matmul_allreduce: %d → %d sizes "
+        "(%d dense decode sizes <= max_num_seqs=%d kept, largest size %d kept).\n"
         "Too many distinct capture sizes exhaust the driver SQ/CQ pool via the "
         "MatmulAllReduce kernel's internal aicpu stream registration "
         "(SqCqManage alloc fail, error 207005/507903).",

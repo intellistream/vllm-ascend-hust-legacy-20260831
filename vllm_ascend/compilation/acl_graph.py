@@ -70,13 +70,18 @@ def _is_stream_resource_capture_error(exc: RuntimeError) -> bool:
             return True
 
     combined_message = "\n".join(messages)
-    if any(marker in combined_message for marker in _MC2_STREAM_EXHAUSTION_MARKERS):
-        return True
-    if _MC2_ERROR_CODE in combined_message and _MC2_KERNEL_NAME in combined_message:
-        return True
-    # Async-reported inner error names the MC2 kernel; this matcher only runs
-    # inside the graph-capture except block, so the capture context is guaranteed.
-    return _MC2_KERNEL_NAME in combined_message and "inner error" in combined_message
+    # NOTE: we deliberately do NOT classify a bare "<aclnnmatmulallreduce> ...
+    # inner error" wrapper as stream-resource exhaustion. The driver surfaces
+    # real MC2 failures (OOM, illegal address) through the same async "inner
+    # error" wrapper that names aclnnMatmulAllReduce, so matching the kernel
+    # name alone would misclassify them and re-wrap the original error into
+    # misleading capture-size guidance. MC2 stream exhaustion is only confirmed
+    # when the chain carries its actual signature (error 207005, or the
+    # "alloc sq cq fail" / "sqcqmanage" marker). Otherwise let the original
+    # error propagate unchanged.
+    return any(marker in combined_message for marker in _MC2_STREAM_EXHAUSTION_MARKERS) or (
+        _MC2_ERROR_CODE in combined_message and _MC2_KERNEL_NAME in combined_message
+    )
 
 
 def _raise_stream_resource_capture_error(exc: RuntimeError) -> None:
