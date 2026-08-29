@@ -52,9 +52,9 @@ class TestACLGraphEntry(TestBase):
         )
 
         self.assertEqual(
-            _acl_graph_profile_marker("replay", CUDAGraphMode.FULL, descriptor),
+            _acl_graph_profile_marker("replay", CUDAGraphMode.FULL, descriptor, wrapper_index=7),
             "vllm_ascend.acl_graph.replay[has_lora=False,num_active_loras=0,"
-            "num_reqs=2,num_tokens=64,runtime_mode=FULL,uniform=True]",
+            "num_reqs=2,num_tokens=64,runtime_mode=FULL,uniform=True,wrapper_index=7]",
         )
 
     def test_aclgraph_entry_initialization(self):

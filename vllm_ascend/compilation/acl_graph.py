@@ -40,7 +40,12 @@ _STREAM_RESOURCE_GUIDANCE = (
 )
 
 
-def _acl_graph_profile_marker(phase: str, runtime_mode: CUDAGraphMode, descriptor: BatchDescriptor) -> str:
+def _acl_graph_profile_marker(
+    phase: str,
+    runtime_mode: CUDAGraphMode,
+    descriptor: BatchDescriptor,
+    wrapper_index: int,
+) -> str:
     return (
         f"vllm_ascend.acl_graph.{phase}["
         f"has_lora={descriptor.has_lora},"
@@ -48,7 +53,8 @@ def _acl_graph_profile_marker(phase: str, runtime_mode: CUDAGraphMode, descripto
         f"num_reqs={descriptor.num_reqs},"
         f"num_tokens={descriptor.num_tokens},"
         f"runtime_mode={runtime_mode.name},"
-        f"uniform={descriptor.uniform}]"
+        f"uniform={descriptor.uniform},"
+        f"wrapper_index={wrapper_index}]"
     )
 
 
@@ -101,6 +107,7 @@ class ACLGraphWrapper:
     """
 
     _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
+    _next_profile_index: ClassVar[int] = 0
 
     @classmethod
     def clear_all_graphs(cls) -> None:
@@ -139,6 +146,8 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        self.profile_index = ACLGraphWrapper._next_profile_index
+        ACLGraphWrapper._next_profile_index += 1
         _acl_graph_wrappers.add(self)
 
         ACLGraphWrapper._all_instances.add(self)
@@ -201,7 +210,12 @@ class ACLGraphWrapper:
             with ExitStack() as stack:
                 stack.enter_context(
                     record_function_or_nullcontext(
-                        _acl_graph_profile_marker("capture", self.runtime_mode, entry.batch_descriptor)
+                        _acl_graph_profile_marker(
+                            "capture",
+                            self.runtime_mode,
+                            entry.batch_descriptor,
+                            self.profile_index,
+                        )
                     )
                 )
                 if self.aclgraph_options.gc_disable:
@@ -289,7 +303,12 @@ class ACLGraphWrapper:
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
         with record_function_or_nullcontext(
-            _acl_graph_profile_marker("replay", self.runtime_mode, entry.batch_descriptor)
+            _acl_graph_profile_marker(
+                "replay",
+                self.runtime_mode,
+                entry.batch_descriptor,
+                self.profile_index,
+            )
         ):
             entry.aclgraph.replay()
         return entry.output
