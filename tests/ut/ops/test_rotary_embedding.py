@@ -138,21 +138,23 @@ def make_yarn_embedding(patch_init_side_effects):
 
 
 class TestAscendEmbeddingForwardOOT:
-    def test_qwen2_native_fallback_disabled_by_default(self, patch_init_side_effects, make_embedding):
+    def test_qwen2_native_fallback_enabled_by_default(self, patch_init_side_effects, make_embedding):
         patch_init_side_effects.return_value.model_config.architectures = ["Qwen2ForCausalLM"]
 
         with patch.dict(os.environ, {}, clear=True):
             emb = make_embedding()
 
-        assert emb.force_native_qwen2_rope is False
+        assert emb.force_native_qwen2_rope is True
 
-    def test_qwen2_native_fallback_requires_explicit_opt_in(self, patch_init_side_effects, make_embedding):
+    def test_qwen2_native_fallback_can_be_disabled_for_unsafe_diagnostics(
+        self, patch_init_side_effects, make_embedding
+    ):
         patch_init_side_effects.return_value.model_config.architectures = ["Qwen2ForCausalLM"]
 
-        with patch.dict(os.environ, {"VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE": "1"}, clear=True):
+        with patch.dict(os.environ, {"VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE": "0"}, clear=True):
             emb = make_embedding()
 
-        assert emb.force_native_qwen2_rope is True
+        assert emb.force_native_qwen2_rope is False
 
     def test_slicegpt_qwen2_native_fallback_requires_explicit_opt_in(self, patch_init_side_effects, make_embedding):
         patch_init_side_effects.return_value.model_config.architectures = ["SliceGPTQwen2ForCausalLM"]

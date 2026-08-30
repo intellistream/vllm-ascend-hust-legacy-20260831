@@ -34,7 +34,7 @@ os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from vllm_ascend.ascend_config import init_ascend_config
-from vllm_ascend.model_compat import uses_qwen2_rope
+from vllm_ascend.model_compat import defaults_to_native_qwen2_rope, uses_qwen2_rope
 
 # isort: off
 from vllm_ascend.utils import (
@@ -322,48 +322,26 @@ def _configure_layered_prefill(
     architecture = model_config.architecture
     if architecture not in LAYERED_PREFILL_MODEL_ADAPTERS:
         supported = ", ".join(LAYERED_PREFILL_MODEL_ADAPTERS)
-        raise ValueError(
-            "Layered prefill on Ascend currently supports "
-            f"{supported}; got {architecture!r}."
-        )
+        raise ValueError(f"Layered prefill on Ascend currently supports {supported}; got {architecture!r}.")
     if getattr(model_config, "model_impl", "auto") not in ("auto", "vllm"):
-        raise ValueError(
-            "Layered prefill requires the native vLLM model implementation."
-        )
+        raise ValueError("Layered prefill requires the native vLLM model implementation.")
     num_layers = model_config.get_total_num_hidden_layers()
     if ascend_config.layered_prefill_num_stages > num_layers:
-        raise ValueError(
-            "layered_prefill_num_stages cannot exceed the model's "
-            f"{num_layers} hidden layers."
-        )
+        raise ValueError(f"layered_prefill_num_stages cannot exceed the model's {num_layers} hidden layers.")
 
-    layered_scheduler_cls = (
-        "vllm_ascend.core.layered_prefill_scheduler."
-        "LayeredPrefillScheduler"
-    )
+    layered_scheduler_cls = "vllm_ascend.core.layered_prefill_scheduler.LayeredPrefillScheduler"
     if getattr(scheduler_config, "scheduler_cls", None) not in (
         None,
         layered_scheduler_cls,
     ):
-        raise ValueError(
-            "Layered prefill cannot be combined with a custom scheduler."
-        )
+        raise ValueError("Layered prefill cannot be combined with a custom scheduler.")
     if getattr(scheduler_config, "async_scheduling", False):
-        logger.warning_once(
-            "Disabling asynchronous scheduling for layered prefill."
-        )
+        logger.warning_once("Disabling asynchronous scheduling for layered prefill.")
     if getattr(scheduler_config, "policy", "fcfs") != "fcfs":
-        raise ValueError(
-            "Layered prefill currently requires the FCFS scheduling policy."
-        )
+        raise ValueError("Layered prefill currently requires the FCFS scheduling policy.")
     if getattr(scheduler_config, "runner_type", "generate") != "generate":
-        raise ValueError(
-            "Layered prefill only supports generative model runners."
-        )
-    if (
-        getattr(vllm_config, "use_v2_model_runner", False)
-        and not vllm_version_is("0.23.0")
-    ):
+        raise ValueError("Layered prefill only supports generative model runners.")
+    if getattr(vllm_config, "use_v2_model_runner", False) and not vllm_version_is("0.23.0"):
         raise ValueError("Layered prefill currently requires Model Runner V1.")
 
     if getattr(parallel_config, "pipeline_parallel_size", 1) != 1:
@@ -378,41 +356,28 @@ def _configure_layered_prefill(
     if getattr(parallel_config, "data_parallel_size", 1) != 1:
         raise ValueError("Layered prefill currently requires DP=1 on Ascend.")
     if getattr(parallel_config, "use_ubatching", False):
-        raise ValueError(
-            "Layered prefill cannot be combined with DBO or explicit "
-            "microbatching."
-        )
+        raise ValueError("Layered prefill cannot be combined with DBO or explicit microbatching.")
     if getattr(parallel_config, "worker_cls", "auto") not in (
         "auto",
         "vllm_ascend.worker.worker.NPUWorker",
     ):
-        raise ValueError(
-            "Layered prefill cannot be combined with a custom worker class."
-        )
+        raise ValueError("Layered prefill cannot be combined with a custom worker class.")
 
     if getattr(vllm_config, "speculative_config", None) is not None:
-        raise ValueError(
-            "Layered prefill cannot be combined with speculative decoding."
-        )
+        raise ValueError("Layered prefill cannot be combined with speculative decoding.")
     if getattr(vllm_config, "lora_config", None) is not None:
         raise ValueError("Layered prefill cannot be combined with LoRA.")
     if (
         getattr(vllm_config, "kv_transfer_config", None) is not None
         or getattr(vllm_config, "ec_transfer_config", None) is not None
     ):
-        raise ValueError(
-            "Layered prefill cannot be combined with KV/EC connectors."
-        )
+        raise ValueError("Layered prefill cannot be combined with KV/EC connectors.")
     if getattr(model_config, "is_multimodal_model", False):
         raise ValueError("Layered prefill currently supports text-only models.")
     if getattr(model_config, "enable_return_routed_experts", False):
-        raise ValueError(
-            "Layered prefill cannot return routed-expert metadata."
-        )
+        raise ValueError("Layered prefill cannot return routed-expert metadata.")
     if getattr(getattr(vllm_config, "cache_config", None), "kv_sharing_fast_prefill", False):
-        raise ValueError(
-            "Layered prefill cannot be combined with --kv-sharing-fast-prefill."
-        )
+        raise ValueError("Layered prefill cannot be combined with --kv-sharing-fast-prefill.")
 
     incompatible_ascend_features: list[str] = []
     extension = getattr(ascend_config, "scheduler_config", None)
@@ -446,9 +411,7 @@ def _configure_layered_prefill(
         incompatible_ascend_features.append("sequence parallelism")
     if incompatible_ascend_features:
         raise ValueError(
-            "Layered prefill cannot currently be combined with: "
-            + ", ".join(incompatible_ascend_features)
-            + "."
+            "Layered prefill cannot currently be combined with: " + ", ".join(incompatible_ascend_features) + "."
         )
 
     scheduler_config.async_scheduling = False
@@ -456,9 +419,7 @@ def _configure_layered_prefill(
     if hasattr(scheduler_config, "enable_layered_prefill"):
         scheduler_config.enable_layered_prefill = True
     if hasattr(scheduler_config, "layered_prefill_num_stages"):
-        scheduler_config.layered_prefill_num_stages = (
-            ascend_config.layered_prefill_num_stages
-        )
+        scheduler_config.layered_prefill_num_stages = ascend_config.layered_prefill_num_stages
 
     if not getattr(model_config, "disable_cascade_attn", False):
         logger.warning_once("Disabling cascade attention for layered prefill.")
@@ -945,12 +906,15 @@ class NPUPlatform(Platform):
                 for architecture in architectures or ()
                 if architecture in {"Qwen2ForCausalLM", "SliceGPTQwen2ForCausalLM"}
             )
-            if os.environ.get("VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE", "0") != "0":
+            native_rope_default_enabled = defaults_to_native_qwen2_rope(architectures)
+            native_rope_default = "1" if native_rope_default_enabled else "0"
+            unsafe_aclgraph_default = "0" if native_rope_default_enabled else "1"
+            if os.environ.get("VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE", native_rope_default) != "0":
                 logger.warning(
                     "Using native rotary fallback for %s on NPU because VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE=1.",
                     architecture,
                 )
-            elif os.environ.get("VLLM_ASCEND_ALLOW_UNSAFE_QWEN2_ACLGRAPH", "1") != "1":
+            elif os.environ.get("VLLM_ASCEND_ALLOW_UNSAFE_QWEN2_ACLGRAPH", unsafe_aclgraph_default) != "1":
                 logger.warning(
                     "Disabling NPU graph compilation for %s because VLLM_ASCEND_ALLOW_UNSAFE_QWEN2_ACLGRAPH=0 while "
                     "native rotary fallback is disabled. Set VLLM_ASCEND_USE_NATIVE_QWEN2_ROPE=1 to force the safe "
