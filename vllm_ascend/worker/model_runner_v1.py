@@ -109,7 +109,19 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendAtt
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPMetadataBuilder
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_attn_metadata, using_paged_attention
+from vllm_ascend.worker.inplace_split_ops import (
+    AscendUbatchMetadata,
+    clone_attn_metadata_block_tables,
+    context_ubatch_slices_for_inplace,
+    dual_stream_attention_config,
+    merge_split_outputs,
+    rebind_attn_metadata_slot_mapping,
+    stabilize_inplace_common_attn_metadata_list,
+    trim_split_output,
+)
+from vllm_ascend.worker.inplace_split_runner import InplaceSplitRunner
+from vllm_ascend.worker.inplace_split_utils import SplitBatchSlice
 
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -118,6 +130,7 @@ from vllm_ascend.compilation.acl_graph import (
     reset_graph_params,
     set_draft_graph_params,
     set_graph_params,
+    set_graph_params_parallel,
     update_full_graph_params,
 )
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
@@ -241,6 +254,9 @@ def graph_capture(device: torch.device):
 
 def get_tp_context(drafter):
     return getattr(drafter, "tp_group_context", nullcontext())
+
+
+
 
 
 class ExecuteModelState(NamedTuple):
@@ -501,7 +517,17 @@ class NPUModelRunner(GPUModelRunner):
         set_potential_max_tokens(vllm_config)
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
 
+        self.stream_main: torch.npu.Stream | None = None
+        self.stream_parallel: torch.npu.Stream | None = None
+        self.update_stream_main: torch.npu.Stream | None = None
+        self.update_stream_parallel: torch.npu.Stream | None = None
+        self.input_ids_parallel_streams: torch.Tensor | None = None
+        self.inputs_embeds_parallel_streams: torch.Tensor | None = None
+        self.positions_parallel_streams: torch.Tensor | None = None
+        self._inplace_split_runner: InplaceSplitRunner | None = None
+
         self.use_aclgraph = self._use_aclgraph()
+
 
         eplb_config = self.ascend_config.eplb_config
         self.dynamic_eplb = eplb_config.dynamic_eplb
@@ -610,7 +636,6 @@ class NPUModelRunner(GPUModelRunner):
 
     def _sync_device(self) -> None:
         torch.npu.synchronize()
-
 
     def _init_dp_metadata_buffers(self) -> None:
         if self.dp_size <= 1:
@@ -2192,6 +2217,35 @@ class NPUModelRunner(GPUModelRunner):
 
                 num_tokens_padded = batch_desc.num_tokens
                 num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+
+                from vllm_ascend.worker.inplace_split_utils import INPLACE_SPLIT_DRY_RUN
+                split_batch_config = self.ascend_config.split_batch_config
+                inplace_split_plan = None
+                inplace_split_reason = ""
+                logger.info_once(
+                    "DUAL_INPLACE check: enabled=%s, mode=%s, cudagraph_mode=%s",
+                    split_batch_config.enabled, split_batch_config.mode, cudagraph_mode,
+                )
+                if split_batch_config.enabled and cudagraph_mode in (CUDAGraphMode.FULL, CUDAGraphMode.PIECEWISE):
+                    is_mla = self.model_config.use_mla
+                    is_mrope = getattr(self.model_config.hf_text_config, "rope_scaling", None) is not None and getattr(
+                        self.model_config.hf_text_config, "rope_type", ""
+                    ) == "mrope"
+                    has_lora = len(self.input_batch.lora_id_to_lora_request) > 0
+                    use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+                    capture_sizes = list(self.compilation_config.cudagraph_capture_sizes) if self.compilation_config.cudagraph_capture_sizes else []
+                    inplace_split_plan, inplace_split_reason = self._inplace_split_runner.should_split(
+                        split_batch_config=split_batch_config,
+                        cudagraph_mode=cudagraph_mode,
+                        num_scheduled_tokens_np=num_scheduled_tokens_np,
+                        num_reqs=num_reqs,
+                        total_num_tokens=num_tokens_unpadded,
+                        has_lora=has_lora,
+                        is_mla=is_mla,
+                        is_mrope=is_mrope,
+                        spec_decode_enabled=use_spec_decode,
+                        cudagraph_capture_sizes=capture_sizes,
+                    )
                 ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
                     should_ubatch,
                     num_scheduled_tokens_np,
@@ -2280,6 +2334,7 @@ class NPUModelRunner(GPUModelRunner):
                         batch_desc.num_reqs,
                     )
 
+
                 (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded
                     if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
@@ -2294,6 +2349,9 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                    split_mode=split_batch_config.mode if inplace_split_plan is not None else None,
+                    inplace_split_plan=inplace_split_plan,
+
                 )
 
                 self._sanitize_placeholder_input_ids_for_forward(
@@ -2375,9 +2433,44 @@ class NPUModelRunner(GPUModelRunner):
             observe_first_compute_if_supported(self, scheduler_output)
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
-            hidden_states = self._model_forward(
-                num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
-            )
+            if inplace_split_plan is not None:
+                split_mode = split_batch_config.mode
+                if getattr(inplace_split_plan, "use_unified", False):
+                    hidden_states = self._inplace_split_runner.run_unified(
+                        inplace_split_plan, input_ids, positions,
+                        intermediate_tensors, inputs_embeds, attn_metadata,
+                        cudagraph_mode, batch_desc,
+                        **model_kwargs,
+                    )
+                elif split_mode == "inplace_parallel":
+                    from vllm_ascend.worker.inplace_split_utils import (
+                        select_inplace_attention_backend,
+                    )
+                    attn_backend = select_inplace_attention_backend(
+                        inplace_split_plan,
+                        lambda shape: using_paged_attention(shape, self.vllm_config))
+                    hidden_states = self._inplace_split_runner.run_inplace_parallel(
+                        inplace_split_plan, input_ids, positions,
+                        intermediate_tensors, inputs_embeds, attn_metadata,
+                        cudagraph_mode, batch_desc,
+                        inplace_attention_backend=attn_backend,
+                        **model_kwargs,
+                    )
+                elif split_mode == "dual_pad":
+                    hidden_states = self._inplace_split_runner.run_dual_pad(
+                        inplace_split_plan, input_ids, positions,
+                        intermediate_tensors, inputs_embeds, attn_metadata,
+                        cudagraph_mode, batch_desc,
+                        **model_kwargs,
+                    )
+                else:
+                    hidden_states = self._model_forward(
+                        num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+                    )
+            else:
+                hidden_states = self._model_forward(
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+                )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -2911,17 +3004,10 @@ class NPUModelRunner(GPUModelRunner):
         }
         run_model = partial(self.model, **model_inputs)
 
-        if self.enable_enpu:
-            # The soft segmentation scenario requires event.record first, then event.wait
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions
-            )
-            hidden_states = run_model()
-        else:
-            hidden_states = run_model()
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions
-            )
+        self._update_full_graph_params_if_needed(
+            forward_context, num_tokens_padded, positions
+        )
+        hidden_states = run_model()
 
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
@@ -3097,6 +3183,9 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
+        split_mode: str | None = None,
+        inplace_split_plan: Any | None = None,
+
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -3109,6 +3198,8 @@ class NPUModelRunner(GPUModelRunner):
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
+        elif inplace_split_plan is not None:
+            attn_metadata = [dict() for _ in range(len(inplace_split_plan.split_slices))]
 
         if for_cudagraph_capture:
             # For some attention backends (e.g. FA) with sliding window models we need
@@ -3315,12 +3406,24 @@ class NPUModelRunner(GPUModelRunner):
             for layer_name in attn_group.layer_names:
                 attn_metadata_dict[layer_name] = attn_metadata_i
 
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
         decode_ratio_to_sas_metadata: dict[Any, Any] = {}
         common_ratio_to_sas_metadata: dict[Any, Any] = {}
         spec_decode_common_attn_metadata = None
+
+        split_ubatch_slices_for_metadata = None
+        if ubatch_slices is not None:
+            split_ubatch_slices_for_metadata = ubatch_slices
+        elif inplace_split_plan is not None:
+            from vllm.v1.worker.ubatch_utils import UBatchSlice
+            split_ubatch_slices_for_metadata = [
+                UBatchSlice(s.request_slice, s.token_slice)
+                for s in inplace_split_plan.split_slices
+            ]
+
         for kv_cache_gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
             cm = copy(cm_base)  # shallow copy
             # Basically only the encoder seq_lens, block_table and slot_mapping change
@@ -3352,24 +3455,52 @@ class NPUModelRunner(GPUModelRunner):
                 # build per-step attention metadata for the active MTP layer.
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
-            if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer):
-                    if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
+
+            if split_ubatch_slices_for_metadata is not None:
+
+                common_attn_metadata_list = split_attn_metadata(
+                    split_ubatch_slices_for_metadata, cm, self.max_num_tokens)
+                common_attn_metadata_list = self._inplace_split_runner._stabilize_inplace_common_attn_metadata_list(
+                    common_attn_metadata_list,
+                    split_mode=split_mode or "",
+                    inplace_split_plan=inplace_split_plan)
+                for ubid, cm_i in enumerate(common_attn_metadata_list):
+
+                    if self._has_gdn:
+                        attn_group = self.attn_groups[kv_cache_gid][0]
+                        builder = attn_group.get_metadata_builder(0)
+                        if isinstance(builder, GDNAttentionMetadataBuilder):
+                            cm_i.query_start_loc_cpu = self.gdn_query_start_loc.cpu[: num_reqs_padded + 1]
+                            cm_i.query_start_loc = self.gdn_query_start_loc.gpu[: num_reqs_padded + 1]
+                    if self.enable_hamming_sparse is True:
+                        from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
+                        build_kvcomp_metadata(self.kvcomp_meta_data, cm_i)
+                    for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
+                        _build_attn_group_metadata(
+                            kv_cache_gid, attn_gid, cm_i,
+                            prefill_ratio_to_sas_metadata,
+                            decode_ratio_to_sas_metadata,
+                            common_ratio_to_sas_metadata,
+                            ubid=ubid)
+            else:
+                if self.speculative_config and spec_decode_common_attn_metadata is None:
+                    if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer):
+                        if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
+                            spec_decode_common_attn_metadata = cm
+                    else:
                         spec_decode_common_attn_metadata = cm
-                else:
-                    spec_decode_common_attn_metadata = cm
-            if self.enable_hamming_sparse is True:
-                from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
-                build_kvcomp_metadata(self.kvcomp_meta_data, cm)
-            for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
-                _build_attn_group_metadata(
-                    kv_cache_gid,
-                    attn_gid,
-                    cm,
-                    prefill_ratio_to_sas_metadata,
-                    decode_ratio_to_sas_metadata,
-                    common_ratio_to_sas_metadata,
-                )
+                if self.enable_hamming_sparse is True:
+                    from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
+                    build_kvcomp_metadata(self.kvcomp_meta_data, cm)
+                for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
+                    _build_attn_group_metadata(
+                        kv_cache_gid,
+                        attn_gid,
+                        cm,
+                        prefill_ratio_to_sas_metadata,
+                        decode_ratio_to_sas_metadata,
+                        common_ratio_to_sas_metadata,
+                    )
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
@@ -3397,6 +3528,7 @@ class NPUModelRunner(GPUModelRunner):
             # the attention metadata in directly), and therefore does not want to use
             # padded attention metadata.
             spec_decode_common_attn_metadata = spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
+
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _should_build_dummy_attn_metadata(
@@ -3430,6 +3562,7 @@ class NPUModelRunner(GPUModelRunner):
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
+        in_parallel_streams: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -3496,6 +3629,23 @@ class NPUModelRunner(GPUModelRunner):
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
         )
+        if in_parallel_streams:
+            # DUAL_PAD parallel-pool capture: graphs must be keyed by the
+            # exact parallel size.  The main-pool dispatcher above would pad
+            # the size to the nearest main capture size, which mis-keys the
+            # graph (runtime lookup misses) and breaks dummy metadata
+            # construction (num_reqs vs num_reqs_padded mismatch).
+            assert uniform_decode, (
+                "parallel stream graph capture requires uniform decode")
+            from vllm_ascend.worker.dual_pad_utils import (
+                make_dual_pad_parallel_batch_descriptor)
+            batch_desc = make_dual_pad_parallel_batch_descriptor(
+                num_tokens_unpadded,
+                has_lora=num_active_loras > 0,
+                num_active_loras=num_active_loras,
+                uniform_decode_query_len=self.uniform_decode_query_len,
+                max_num_seqs=max_num_reqs,
+            )
         if self.use_cp:
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
@@ -3508,6 +3658,12 @@ class NPUModelRunner(GPUModelRunner):
                 self.pcp_manager.query_lens_pcp_full.copy_to_gpu()
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = _cudagraph_mode
+        elif (in_parallel_streams
+              and cudagraph_runtime_mode == CUDAGraphMode.FULL
+              and _cudagraph_mode != CUDAGraphMode.FULL):
+            logger.debug(
+                "[dummy_run] Overriding runtime mode %s -> FULL for parallel stream capture",
+                _cudagraph_mode.name)
         else:
             assert cudagraph_runtime_mode == _cudagraph_mode, (
                 f"Cudagraph runtime mode mismatch in dummy_run. "
@@ -3610,20 +3766,33 @@ class NPUModelRunner(GPUModelRunner):
             assert num_tokens_padded <= self.max_num_tokens
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder or self.enable_prompt_embeds:
                 input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
+                if in_parallel_streams and hasattr(self, 'inputs_embeds_parallel_streams'):
+                    inputs_embeds = self.inputs_embeds_parallel_streams.gpu[:num_tokens_padded]
+                else:
+                    inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
             else:
-                input_ids = self.input_ids.gpu[:num_tokens_padded]
+                if in_parallel_streams and hasattr(self, 'input_ids_parallel_streams'):
+                    input_ids = self.input_ids_parallel_streams.gpu[:num_tokens_padded]
+                else:
+                    input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
             elif self.uses_xdrope_dim > 0:
                 positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
+            elif in_parallel_streams and hasattr(self, 'positions_parallel_streams'):
+                positions = self.positions_parallel_streams.gpu[:num_tokens_padded]
             else:
                 positions = self.positions[:num_tokens_padded]
 
             # update global cos, sin
-            update_cos_sin(positions)
+            # Parallel-stream graphs bind the slot-1 cos/sin buffers (the
+            # runtime dual-pad split-1 forward context uses cos_sin_slot_id=1),
+            # so the capture-time update must target slot 1 as well.
+            update_cos_sin(
+                positions,
+                slot_id=(1 if in_parallel_streams else 0))
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
@@ -3661,8 +3830,24 @@ class NPUModelRunner(GPUModelRunner):
                 if hasattr(self.drafter, "model") and hasattr(self.drafter.model, "compute_logits"):
                     return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
+            capture_attn_metadata = attn_metadata
+            if in_parallel_streams:
+                capture_attn_metadata = clone_attn_metadata_block_tables(
+                    capture_attn_metadata)
+                # Bind the parallel-pool graphs to the dedicated slot_mapping
+                # buffer: at runtime _prepare_dual_pad_split_inputs copies
+                # split-1's slots into it, so the captured KV-write op
+                # scatters split-1 K/V into split-1's own cache slots
+                # instead of split-0's.
+                parallel_slot_mapping = getattr(
+                    self, "slot_mapping_parallel_streams", None)
+                if parallel_slot_mapping is not None:
+                    capture_attn_metadata = (
+                        rebind_attn_metadata_slot_mapping(
+                            capture_attn_metadata,
+                            parallel_slot_mapping.gpu[:num_tokens_padded]))
             with set_ascend_forward_context(
-                attn_metadata,
+                capture_attn_metadata,
                 self.vllm_config,
                 num_tokens=num_tokens_padded,
                 num_tokens_across_dp=num_tokens_across_dp,
@@ -3674,6 +3859,8 @@ class NPUModelRunner(GPUModelRunner):
                 has_sinks = self._has_sinks,
                 input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
+                in_parallel_streams=in_parallel_streams,
+                cos_sin_slot_id=(1 if in_parallel_streams else 0),
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
@@ -3859,6 +4046,33 @@ class NPUModelRunner(GPUModelRunner):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
+            if self.ascend_config.split_batch_config.enabled:
+                self.stream_main = torch.npu.current_stream()
+                self.stream_parallel = torch.npu.Stream(device=self.device)
+                self.update_stream_main = torch.npu.Stream()
+                self.update_stream_parallel = torch.npu.Stream()
+                self.input_ids_parallel_streams = self._make_buffer(
+                    self.max_num_tokens, dtype=torch.int32)
+                self.inputs_embeds_parallel_streams = self._make_buffer(
+                    self.max_num_tokens, self.inputs_embeds_size,
+                    dtype=self.dtype, numpy=False)
+                self.positions_parallel_streams = self._make_buffer(
+                    self.max_num_tokens, dtype=torch.int64)
+                # Dedicated slot_mapping for the parallel-stream graph pool.
+                # The captured KV-write op (npu_scatter_pa_kv_cache) binds the
+                # slot_mapping address seen at capture time; without this
+                # buffer the parallel graphs would bind the head of the
+                # persistent slot_mapping buffer, which at runtime holds
+                # split-0's slots, so split-1 would overwrite split-0's KV.
+                self.slot_mapping_parallel_streams = self._make_buffer(
+                    self.max_num_tokens, dtype=torch.int32)
+                self.slot_mapping_parallel_streams.gpu.fill_(-1)
+                self._inplace_split_runner = InplaceSplitRunner(self)
+                logger.info(
+                    "DUAL_INPLACE mode enabled: mode=%s, parallel_streams=%s",
+                    self.ascend_config.split_batch_config.mode,
+                    self.ascend_config.split_batch_config.enable_parallel_streams,
+                )
 
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
@@ -4823,20 +5037,30 @@ class NPUModelRunner(GPUModelRunner):
                 set(group_key.attn_backend for group_key in attn_backends.values()),
             )
 
+        def _get_num_attn_metadata_builders() -> int:
+            if self.parallel_config.use_ubatching:
+                return self.parallel_config.num_ubatches
+            split_cfg = getattr(self.ascend_config, "split_batch_config", None)
+            split_enabled = bool(split_cfg is not None
+                                 and getattr(split_cfg, "enabled", False))
+            if split_enabled:
+                n = int(getattr(split_cfg, "num_splits", 1))
+                return max(1, n)
+            return 1
+
         def create_attn_groups(
             attn_backends_map: dict[AttentionBackend, list[str]], kv_cache_group_id: int
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
             for (attn_backend, kv_cache_spec), layer_names in attn_backends_map.items():
-                attn_metadata_builders = []
-                attn_metadata_builders.append(
+                attn_metadata_builders = [
                     attn_backend.get_builder_cls()(
                         kv_cache_spec,
                         layer_names,
                         self.vllm_config,
                         self.device,
-                    )
-                )
+                    ) for _ in range(_get_num_attn_metadata_builders())
+                ]
                 attn_group = AttentionGroup(
                     attn_backend, layer_names, kv_cache_spec, kv_cache_group_id, attn_metadata_builders
                 )
@@ -5037,6 +5261,52 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
+        # P11 unified-row-graph (env-gated, default OFF): register exact-size
+        # FULL keys for the declared unified sizes so that
+        #   - ``get_capture_descs`` exposes them → core capture_model captures
+        #     each one through the standard startup dummy-run flow,
+        #   - ``set_graph_params`` below allocates the matching attn-param
+        #     buckets keyed by the exact token count,
+        #   - runtime dispatch hits them exactly (no padding to next size).
+        # Descriptor construction MUST reuse _create_padded_batch_descriptor
+        # AFTER patching the bs->padded table, so the registered key matches
+        # the runtime dispatch formula bit-for-bit.
+        unified_cfg = getattr(self.ascend_config, "split_batch_config", None)
+        if (
+            unified_cfg is not None
+            and getattr(unified_cfg, "enable_unified_gemm", False)
+            and getattr(unified_cfg, "unified_capture_sizes", None)
+        ):
+            dispatcher = self.cudagraph_dispatcher
+            bs_to_padded = getattr(dispatcher, "_bs_to_padded_graph_size", None)
+            if bs_to_padded is None:
+                # Eager run (cudagraph keys never initialized): exact-size
+                # FULL graphs do not exist here, so skip registration; the
+                # standard dispatch path stays NONE end to end.
+                logger.info_once(
+                    "DUAL_UNIFIED_GEMM skipped key registration: cudagraph "
+                    "keys are not initialized (eager run).")
+                unified_cfg = None
+            else:
+                max_size = dispatcher.compilation_config.max_cudagraph_capture_size
+                for size in unified_cfg.unified_capture_sizes:
+                    if size <= 0 or size > max_size:
+                        raise ValueError(
+                            "DUAL_UNIFIED_GEMM unified_capture_sizes entry "
+                            f"{size} must be within [1, {max_size}]")
+                    if size >= len(bs_to_padded):
+                        raise ValueError(
+                            "DUAL_UNIFIED_GEMM unified_capture_sizes entry "
+                            f"{size} exceeds the dispatcher table range")
+                    bs_to_padded[size] = size
+                    unified_desc = dispatcher._create_padded_batch_descriptor(
+                        size, True, False, 0)
+                    dispatcher.add_cudagraph_key(CUDAGraphMode.FULL, unified_desc)
+                logger.info(
+                    "DUAL_UNIFIED_GEMM registered exact-size FULL keys: %s",
+                    sorted(unified_cfg.unified_capture_sizes),
+                )
+
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
             desc.num_tokens
@@ -5052,6 +5322,15 @@ class NPUModelRunner(GPUModelRunner):
             set_graph_params(capture_sizes)
             if self.speculative_config:
                 set_draft_graph_params(capture_sizes)
+            split_cfg = getattr(self.ascend_config, "split_batch_config", None)
+            if split_cfg is not None and split_cfg.enabled:
+                parallel_sizes = (
+                    split_cfg.parallel_capture_sizes
+                    if split_cfg.parallel_capture_sizes is not None
+                    else capture_sizes
+                )
+                self.cudagraph_batch_sizes_parallel = sorted(parallel_sizes)
+                set_graph_params_parallel(self.cudagraph_batch_sizes_parallel)
 
     def profile_cudagraph_memory(self) -> int:
         parent_module_name = _get_gpu_model_runner_module_name(self)
@@ -5084,6 +5363,21 @@ class NPUModelRunner(GPUModelRunner):
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and hasattr(self, "update_stream"):
             mgr.update_stream = self.update_stream
+
+        split_cfg = getattr(self.ascend_config, "split_batch_config", None)
+        if (split_cfg is not None
+                and split_cfg.enabled
+                and split_cfg.enable_parallel_streams
+                and self.use_aclgraph):
+            from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+            if isinstance(self.model, ACLGraphWrapper):
+                from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+                set_cudagraph_capturing_enabled(True)
+                try:
+                    with graph_capture(device=self.device):
+                        self._inplace_split_runner.capture_parallel_stream_graphs()
+                finally:
+                    set_cudagraph_capturing_enabled(False)
 
         return cuda_graph_size
 
