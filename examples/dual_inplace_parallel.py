@@ -1,9 +1,23 @@
+"""Demonstrates the Ascend split-batch (dual-stream) decode path.
+
+Passes ``additional_config={"split_batch_config": ...}`` to run the
+inplace-parallel (two NPU streams) decode path on an 80-request batch.
+See docs/source/user_guide/feature_guide/split_batch.md for the full
+configuration reference and admission conditions.
+"""
+
 import os
-os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "7"
-os.environ["VLLM_USE_MODELSCOPE"] = "True"
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ["VLLM_ASCEND_SPLIT_INPLACE_DEBUG"] = "1"
-os.environ["VLLM_ASCEND_SPLIT_INPLACE_DEBUG_FILE"] = "/tmp/vllm_ascend_inplace_parallel.jsonl"
+
+os.environ.setdefault("ASCEND_RT_VISIBLE_DEVICES", "7")
+os.environ.setdefault("VLLM_USE_MODELSCOPE", "True")
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+# Optional JSONL diagnostics for the split-batch path; disabled by default.
+if os.environ.get("SPLIT_BATCH_DEBUG", "0") == "1":
+    os.environ["VLLM_ASCEND_SPLIT_INPLACE_DEBUG"] = "1"
+    os.environ.setdefault(
+        "VLLM_ASCEND_SPLIT_INPLACE_DEBUG_FILE",
+        "/tmp/vllm_ascend_inplace_parallel.jsonl",
+    )
 
 from vllm import LLM, SamplingParams
 
@@ -64,7 +78,11 @@ def main():
         prompt = output.prompt
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-    print(f">>> Diag log: {os.environ['VLLM_ASCEND_SPLIT_INPLACE_DEBUG_FILE']} <<<")
+    if os.environ.get("VLLM_ASCEND_SPLIT_INPLACE_DEBUG") == "1":
+        print(
+            ">>> Diag log: "
+            f"{os.environ.get('VLLM_ASCEND_SPLIT_INPLACE_DEBUG_FILE', '(default)')} <<<"
+        )
 
 if __name__ == "__main__":
     main()
